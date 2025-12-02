@@ -9,11 +9,19 @@ venv/
 ENV/
 .venv
 
-# Test files
+# Test files and outputs
 *_updated*.xml
+*_applied*.xml
 *_diffs/
+*_diff*/
+*_diff_*/
+*_output/
+*_output*/
 test*.xml
 arduinotest*.xml
+
+# Intermediate .sc files (extracted from XML for diffing)
+*.sc
 
 # IDE
 .vscode/

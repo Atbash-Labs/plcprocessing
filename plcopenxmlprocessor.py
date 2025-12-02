@@ -84,19 +84,11 @@ def extract_variable_declarations(var_list_element, namespace=None):
 
 
 def extract_st_from_xhtml(st_element):
-    """Extract ST code from <ST><xhtml> structure."""
+    """Extract ST code from <ST><xhtml> structure (CODESYS format)."""
     if st_element is None:
         return None
 
     XHTML_NS = "http://www.w3.org/1999/xhtml"
-
-    # Look for xhtml:p element (Arduino format with CDATA)
-    xhtml_p = st_element.find(f".//{{{XHTML_NS}}}p")
-    if xhtml_p is not None:
-        # Get CDATA content
-        text = xhtml_p.text or ""
-        # Unescape HTML entities
-        return html.unescape(text.strip())
 
     # Look for xhtml element inside ST (CODESYS format)
     xhtml = st_element.find(f".//{{{XHTML_NS}}}xhtml")
@@ -106,6 +98,14 @@ def extract_st_from_xhtml(st_element):
         # Also check tail text from xhtml element
         if xhtml.tail:
             text += xhtml.tail
+        # Unescape HTML entities
+        return html.unescape(text.strip())
+
+    # Fallback: Look for xhtml:p element (for compatibility with standard PLCopen)
+    xhtml_p = st_element.find(f".//{{{XHTML_NS}}}p")
+    if xhtml_p is not None:
+        # Get CDATA content
+        text = xhtml_p.text or ""
         # Unescape HTML entities
         return html.unescape(text.strip())
 
@@ -180,12 +180,13 @@ def parse_plcopen_xml(xml_path, output_dir):
     tree = ET.parse(xml_path)
     root = tree.getroot()
 
-    # Detect namespace - Arduino uses tc6_0201, CODESYS uses tc6_0200
+    # Detect namespace - CODESYS uses tc6_0200 (default)
     # Get namespace from root element
     ns_map = root.tag.split("}")[0].strip("{") if "}" in root.tag else ""
     if "tc6_0201" in ns_map:
         PLCOPEN_NS = "http://www.plcopen.org/xml/tc6_0201"
     else:
+        # Default to CODESYS namespace
         PLCOPEN_NS = "http://www.plcopen.org/xml/tc6_0200"
 
     XHTML_NS = "http://www.w3.org/1999/xhtml"
@@ -202,19 +203,7 @@ def parse_plcopen_xml(xml_path, output_dir):
     extracted_methods = 0
     extracted_gvls = 0
 
-    # Extract POUs - check both standard location and CODESYS-specific location
-    # Method 1: Standard PLCopen format (Arduino, etc.) - POUs in <types><pous>
-    types_elem = root.find(f".//{{{PLCOPEN_NS}}}types")
-    if types_elem is not None:
-        pous_elem = types_elem.find(f".//{{{PLCOPEN_NS}}}pous")
-        if pous_elem is not None:
-            for pou in pous_elem.findall(f".//{{{PLCOPEN_NS}}}pou"):
-                pou_extracted, method_count = extract_pou_code(pou, output_path)
-                if pou_extracted:
-                    extracted_pous += 1
-                extracted_methods += method_count
-
-    # Method 2: CODESYS-specific format - POUs in addData sections
+    # Extract POUs - CODESYS-specific format (POUs in addData sections)
     # Look for data elements with name="http://www.3s-software.com/plcopenxml/pou"
     for data in root.findall(f".//{{{PLCOPEN_NS}}}data"):
         if data.get("name") == "http://www.3s-software.com/plcopenxml/pou":
@@ -225,6 +214,19 @@ def parse_plcopen_xml(xml_path, output_dir):
                 if pou_extracted:
                     extracted_pous += 1
                 extracted_methods += method_count
+
+    # Fallback: Standard PLCopen format - POUs in <types><pous>
+    # (for compatibility with standard PLCopen XML files)
+    if extracted_pous == 0:
+        types_elem = root.find(f".//{{{PLCOPEN_NS}}}types")
+        if types_elem is not None:
+            pous_elem = types_elem.find(f".//{{{PLCOPEN_NS}}}pous")
+            if pous_elem is not None:
+                for pou in pous_elem.findall(f".//{{{PLCOPEN_NS}}}pou"):
+                    pou_extracted, method_count = extract_pou_code(pou, output_path)
+                    if pou_extracted:
+                        extracted_pous += 1
+                    extracted_methods += method_count
 
     # Extract Global Variables
     # GVLs can have variables in interface sections, as direct children, or in addData sections (CODESYS-specific)
