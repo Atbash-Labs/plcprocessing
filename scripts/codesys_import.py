@@ -315,7 +315,7 @@ def main():
     """Main entry point."""
     # Hardcoded paths for testing (will be overridden by sys.argv or env vars)
     project_path = r"C:\Users\leorf\OneDrive\Desktop\plcprocessing\Untitled1.project"
-    import_dir = r"C:\Users\leorf\OneDrive\Desktop\plcprocessing\test_additions"
+    import_dir = r"C:\Users\leorf\OneDrive\Desktop\plcprocessing\tests\test_additions"
 
     # Try to get from sys.argv if provided (for future use)
     if len(sys.argv) >= 3:

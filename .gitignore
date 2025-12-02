@@ -10,6 +10,7 @@ ENV/
 .venv
 
 # Test files and outputs
+tests/
 *_updated*.xml
 *_applied*.xml
 *_diffs/
