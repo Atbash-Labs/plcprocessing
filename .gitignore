@@ -20,8 +20,19 @@ ENV/
 test*.xml
 arduinotest*.xml
 
-# Intermediate .sc files (extracted from XML for diffing)
+# Legacy XML intermediate files
 *.sc
+*.st
+
+# CODESYS Scripting API exports (text format)
+*.prg.st
+*.fb.st
+*.fun.st
+*.gvl.st
+*_export/
+*_import/
+*_modified_*/
+*_applied_*/
 
 # IDE
 .vscode/
@@ -37,4 +48,9 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.log
+
+# CODESYS project files
+Untitled1.*
+Untitled1_*
+Untitled1-*
 
