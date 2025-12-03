@@ -1,121 +1,156 @@
-# CODESYS Scripting API Tools
+# CODESYS DevOps Tools
 
-A collection of Python tools for exporting, diffing, and applying changes to CODESYS projects using the **CODESYS Scripting API**. This approach solves the broken PLCOpenXML export/import cycle by using CODESYS's native API, which exports/imports correctly.
+A complete DevOps toolchain for CODESYS PLC projects: export, diff, merge, and import with full support for additions, modifications, and deletions.
 
-## Why Scripting API Instead of XML?
+## Why These Tools?
 
-**Problem**: CODESYS V3.x GUI PLCOpenXML export/import is broken - exported XML files cannot be re-imported.
+**Problem**: CODESYS V3.x GUI PLCOpenXML export/import is broken - exported XML files cannot be re-imported reliably.
 
 **Solution**: Use the CODESYS Scripting API which:
-- ✅ Exports XML that actually works
-- ✅ Direct project manipulation (no export/import cycle)
+- ✅ Direct project manipulation (no broken export/import cycle)
+- ✅ Full text-based workflow for version control
+- ✅ Supports additions, modifications, AND deletions
 - ✅ Can run headless for CI/CD
-- ✅ Full access to project structure
-- ✅ Well-documented with active community
+- ✅ Authoritative imports (import directory is source of truth)
+
+## Quick Start (PowerShell Driver Scripts)
+
+### Export Project
+```powershell
+# From PLCOpenXML file (no CODESYS needed)
+.\codesys-export.ps1 -FromXml "MyProject.xml" -OutputDir ".\export"
+```
+
+### Generate Diff
+```powershell
+.\codesys-diff.ps1 -BaseDir ".\export_v1" -TargetDir ".\export_v2" -OutputDir ".\diffs"
+```
+
+### Apply Diff (Merge)
+```powershell
+.\codesys-apply.ps1 -DiffDir ".\diffs" -TargetDir ".\export" -OutputDir ".\merged"
+```
+
+### Import to Project
+```powershell
+# Preview changes first
+.\codesys-import.ps1 -ProjectPath "MyProject.project" -ImportDir ".\merged" -DryRun
+
+# Apply changes
+.\codesys-import.ps1 -ProjectPath "MyProject.project" -ImportDir ".\merged"
+```
+
+### Complete Merge Workflow
+```powershell
+# One command to apply diffs and import
+.\codesys-merge.ps1 -DiffDir ".\diffs" -TargetDir ".\export" -ProjectPath "MyProject.project" -DryRun
+```
 
 ## Project Structure
 
 ```
 .
-├── scripts/              # Main CODESYS Scripting API tools
-│   ├── codesys_export.py          # Export project to .st files
-│   ├── codesys_import.py          # Import .st files to project (runs in CODESYS)
-│   ├── codesys_import_external.py # Import wrapper (runs outside CODESYS)
-│   ├── codesys_diff.py            # Generate diffs between exports
-│   ├── codesys_apply.py            # Apply diffs to exports
-│   └── codesys_apply_diff_to_project.py  # End-to-end workflow
-├── legacy/              # Legacy XML-based tools (deprecated)
-│   ├── plcopenxmlprocessor.py
-│   ├── plcopenxmlmerge.py
-│   └── ...
-├── tests/               # Test files and outputs
+├── codesys-export.ps1    # Driver: Export project to text files
+├── codesys-diff.ps1      # Driver: Generate diffs between exports
+├── codesys-apply.ps1     # Driver: Apply diffs to exports
+├── codesys-import.ps1    # Driver: Import text files to project
+├── codesys-merge.ps1     # Driver: Complete merge workflow
+├── scripts/              # Python implementation
+│   ├── codesys_export.py           # Export (runs in CODESYS)
+│   ├── codesys_export_from_xml.py  # Export from PLCOpenXML
+│   ├── codesys_import.py           # Import (runs in CODESYS)
+│   ├── codesys_import_external.py  # Import wrapper (headless)
+│   ├── codesys_diff.py             # Generate unified diffs
+│   └── codesys_apply.py            # Apply diffs to text files
+├── legacy/               # Deprecated XML-based tools
+├── tests/                # Test files and outputs
 └── docs/                 # Documentation
 ```
 
-## Quick Start
+## File Formats
 
-### Export Project
+### Exported Text Files (.st)
 
-**Inside CODESYS:**
+| Extension | Type |
+|-----------|------|
+| `NAME.prg.st` | Program |
+| `NAME.fb.st` | Function Block |
+| `NAME.fun.st` | Function |
+| `NAME.gvl.st` | Global Variable List |
+| `POU_METHOD.meth.st` | Method (in POU) |
+
+### Diff Files
+
+| Extension | Meaning |
+|-----------|---------|
+| `*.diff` | Unified diff (modifications) |
+| `*.added` | New file content |
+| `*.removed` | Marker for deletion |
+| `diff_summary.txt` | Summary statistics |
+
+## Workflow Examples
+
+### 1. Version Control Workflow
+```powershell
+# Export current state
+.\codesys-export.ps1 -FromXml "Project.xml" -OutputDir ".\v1"
+
+# Make changes in CODESYS, export again
+.\codesys-export.ps1 -FromXml "Project_modified.xml" -OutputDir ".\v2"
+
+# Generate diff for review/commit
+.\codesys-diff.ps1 -BaseDir ".\v1" -TargetDir ".\v2" -OutputDir ".\changes"
 ```
-Tools → Execute Script → scripts/codesys_export.py
+
+### 2. Merge Changes from Branch
+```powershell
+# You have: diffs from feature branch, current project export
+.\codesys-merge.ps1 `
+    -DiffDir ".\feature_diffs" `
+    -TargetDir ".\current_export" `
+    -ProjectPath "MyProject.project" `
+    -DryRun  # Preview first!
 ```
 
-**Headless:**
-```bash
-CODESYS.exe --noUI --profile="CODESYS V3.5 SP21 Patch 3" \
-  --runscript="scripts/codesys_export.py" \
-  "C:\Projects\MyProject.project" \
-  "C:\Export"
+### 3. Add New Variables to GVL
+```powershell
+# Edit GVL.gvl.st in your text editor, then import
+.\codesys-import.ps1 -ProjectPath "MyProject.project" -ImportDir ".\modified"
 ```
 
-### Import Project
+## Authoritative Import Behavior
 
-**From outside CODESYS:**
-```bash
-python scripts/codesys_import_external.py \
-  "C:\Projects\MyProject.project" \
-  "C:\Import" \
-  --codesys-path "C:\Program Files\CODESYS 3.5.21.30\CODESYS\Common\CODESYS.exe"
-```
+The import is **authoritative** - the import directory is the source of truth:
 
-### Apply Diff to Project
+- **POUs/GVLs not in import directory → DELETED from project**
+- **Methods not in import directory → DELETED from their POU**
+- **GVL content is fully replaced** (variables not in file are removed)
 
-```bash
-python scripts/codesys_apply_diff_to_project.py \
-  "C:\Projects\MyProject.project" \
-  "C:\Diffs" \
-  --codesys-path "C:\Program Files\CODESYS 3.5.21.30\CODESYS\Common\CODESYS.exe"
-```
-
-## Tools
-
-### `scripts/codesys_export.py`
-Exports CODESYS project to text format using Scripting API. Exports POUs and GVLs as `.st` files for source control and diffing.
-
-**Output Format:**
-- POUs: `POU_NAME.prg.st`, `POU_NAME.fb.st`, `POU_NAME.fun.st`
-- GVLs: `GVL_NAME.gvl.st`
-- Methods: `POU_METHOD.meth.st`
-- Each file contains declaration and implementation sections
-
-### `scripts/codesys_import.py`
-Imports text files back into CODESYS project using Scripting API. Reads `.st` files and applies them to the project.
-
-**Features:**
-- Creates new POUs/GVLs/methods
-- Updates existing POUs/GVLs/methods
-- Merges variables in GVLs (adds new variables without removing existing ones)
-
-### `scripts/codesys_diff.py`
-Compares two directories of CODESYS text exports and generates unified diffs for source control.
-
-**Output:**
-- `.diff` files for modified files
-- `.added` files for new files
-- `.removed` files for deleted files
-- `diff_summary.txt` with summary
-
-### `scripts/codesys_apply.py`
-Applies unified diffs (generated by `codesys_diff.py`) to a target directory of `.st` files.
-
-### `scripts/codesys_apply_diff_to_project.py`
-Complete end-to-end workflow: export project, apply diff, and import back into the project.
-
-## Workflow
-
-1. **Export** project → `.st` files
-2. **Diff** two exports → unified diff files
-3. **Apply** diff to export → modified `.st` files
-4. **Import** modified files → back into CODESYS project
+Use `--dry-run` to preview deletions before applying!
 
 ## Requirements
 
 - CODESYS V3.5 SP21 or later
-- Python 3.x (for external scripts)
-- IronPython (for scripts running inside CODESYS)
+- Python 3.x
+- PowerShell 5.1+ (for driver scripts)
+- Windows (CODESYS is Windows-only)
+
+## Python Scripts (Direct Usage)
+
+```bash
+# Export from XML
+python scripts/codesys_export_from_xml.py "Project.xml" "output_dir"
+
+# Generate diff
+python scripts/codesys_diff.py "dir1" "dir2" "diff_output"
+
+# Apply diff
+python scripts/codesys_apply.py "diff_dir" "target_dir" "project.project" "output_dir"
+
+# Import (runs CODESYS headless)
+python scripts/codesys_import_external.py "Project.project" "import_dir" --dry-run
+```
 
 ## See Also
 
 - [docs/import_instructions.md](docs/import_instructions.md) - Detailed import instructions
-- [docs/README_DIFF.md](docs/README_DIFF.md) - Diff format documentation
