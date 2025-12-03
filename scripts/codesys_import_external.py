@@ -4,7 +4,7 @@ Import CODESYS text files into a project from outside CODESYS.
 Uses subprocess to call CODESYS headless with the import script.
 
 Usage:
-    python codesys_import_external.py <project_path> <import_dir> [codesys_path]
+    python codesys_import_external.py <project_path> <import_dir> [--dry-run] [--codesys-path PATH]
 """
 
 import sys
@@ -43,7 +43,9 @@ def get_script_path():
     return str(import_script)
 
 
-def update_import_script_paths(import_script_path, project_path, import_dir):
+def update_import_script_paths(
+    import_script_path, project_path, import_dir, dry_run=False
+):
     """Update hardcoded paths in codesys_import.py before running."""
     import_script_path = Path(import_script_path)
 
@@ -59,20 +61,36 @@ def update_import_script_paths(import_script_path, project_path, import_dir):
     # Find and replace hardcoded paths using regex
     import re
 
-    # Pattern to match: project_path = r"path" or project_path = r'path'
-    # Match the entire assignment line
-    project_pattern = r'(project_path\s*=\s*r)["\']([^"\']+)["\']'
-    import_pattern = r'(import_dir\s*=\s*r)["\']([^"\']+)["\']'
+    # Pattern to match paths - handles both single-line and multi-line (with parens) formats
+    # Single-line: project_path = r"path"
+    # Multi-line:  project_path = (\n        r"path"\n    )
+    project_pattern = r'(project_path\s*=\s*(?:\(\s*)?r)["\']([^"\']+)["\']'
+    import_pattern = r'(import_dir\s*=\s*(?:\(\s*)?r)["\']([^"\']+)["\']'
+    # Match standalone assignment (with leading whitespace), not function parameter defaults
+    dry_run_pattern = r"(^    dry_run = )(True|False)"
 
-    # Replace project path (keep the assignment part, replace the path)
+    # Replace paths - normalize to single-line format for consistency
     def replace_project(match):
-        return f'{match.group(1)}"{project_path}"'
+        return f'project_path = r"{project_path}"'
 
     def replace_import(match):
-        return f'{match.group(1)}"{import_dir}"'
+        return f'import_dir = r"{import_dir}"'
 
-    content = re.sub(project_pattern, replace_project, content, count=1)
-    content = re.sub(import_pattern, replace_import, content, count=1)
+    def replace_dry_run(match):
+        return f"{match.group(1)}{str(dry_run)}"
+
+    # Use DOTALL flag to match across newlines for multi-line formats
+    content = re.sub(
+        project_pattern, replace_project, content, count=1, flags=re.DOTALL
+    )
+    content = re.sub(import_pattern, replace_import, content, count=1, flags=re.DOTALL)
+    content = re.sub(
+        dry_run_pattern, replace_dry_run, content, count=1, flags=re.MULTILINE
+    )
+
+    # Clean up any orphaned closing parens from multi-line format
+    content = re.sub(r'(import_dir = r"[^"]+"\s*)\n\s*\)', r"\1", content)
+    content = re.sub(r'(project_path = r"[^"]+"\s*)\n\s*\)', r"\1", content)
 
     # Write back
     with open(import_script_path, "wb") as f:
@@ -82,9 +100,21 @@ def update_import_script_paths(import_script_path, project_path, import_dir):
 
 
 def import_to_project(
-    project_path, import_dir, codesys_path=None, profile="CODESYS V3.5 SP21 Patch 3"
+    project_path,
+    import_dir,
+    codesys_path=None,
+    profile="CODESYS V3.5 SP21 Patch 3",
+    dry_run=False,
 ):
-    """Import text files to CODESYS project using subprocess."""
+    """Import text files to CODESYS project using subprocess.
+
+    Args:
+        project_path: Path to the CODESYS project file
+        import_dir: Directory containing .st files to import
+        codesys_path: Optional path to CODESYS.exe
+        profile: CODESYS profile name
+        dry_run: If True, only preview changes without modifying the project
+    """
 
     # Validate inputs
     project_path = Path(project_path).absolute()
@@ -118,7 +148,9 @@ def import_to_project(
 
     # Update hardcoded paths in the import script before running
     print(f"[INFO] Updating paths in {import_script}")
-    update_import_script_paths(import_script, str(project_path), str(import_dir))
+    update_import_script_paths(
+        import_script, str(project_path), str(import_dir), dry_run
+    )
 
     # Build command
     # CODESYS.exe --noUI --profile="profile" --runscript="script.py"
@@ -135,6 +167,8 @@ def import_to_project(
     print(f"[INFO] Profile: {profile}")
     print(f"[INFO] Project: {project_path}")
     print(f"[INFO] Import directory: {import_dir}")
+    if dry_run:
+        print(f"[INFO] Mode: DRY RUN (no changes will be made)")
     print(f"[INFO] Running: {cmd_str}\n")
 
     try:
@@ -193,12 +227,21 @@ def main():
         default="CODESYS V3.5 SP21 Patch 3",
         help="CODESYS profile name (default: CODESYS V3.5 SP21 Patch 3)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying the project",
+    )
 
     args = parser.parse_args()
 
     try:
         success = import_to_project(
-            args.project_path, args.import_dir, args.codesys_path, args.profile
+            args.project_path,
+            args.import_dir,
+            args.codesys_path,
+            args.profile,
+            args.dry_run,
         )
         sys.exit(0 if success else 1)
     except Exception as e:
