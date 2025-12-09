@@ -49,9 +49,12 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.log
+*.json
+ontologies/
+PLC/
 
 # CODESYS project files
 Untitled1.*
 Untitled1_*
 Untitled1-*
-
+.env

@@ -181,3 +181,4 @@ if ($createdWorkDir -and -not $KeepWorkDir -and -not $DryRun) {
     Write-Host "`nMerged files available at: $mergedDir" -ForegroundColor Gray
 }
 
+

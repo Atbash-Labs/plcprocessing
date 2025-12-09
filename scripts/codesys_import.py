@@ -521,7 +521,8 @@ def main():
     """Main entry point."""
     # Hardcoded paths for testing (will be overridden by sys.argv or env vars)
     project_path = r"C:\Users\leorf\OneDrive\Desktop\plcprocessing\Untitled1.project"
-    import_dir = r"C:\Users\leorf\OneDrive\Desktop\plcprocessing\tests\merge_test_applied"
+    import_dir = r"C:\Users\leorf\OneDrive\Desktop\plcprocessing\tests\merge_test_applied"
+
     dry_run = False
 
     # Check for --dry-run flag in args

@@ -1,6 +1,6 @@
-# CODESYS DevOps Tools
+# PLC DevOps Tools
 
-A complete DevOps toolchain for CODESYS PLC projects: export, diff, merge, and import with full support for additions, modifications, and deletions.
+A complete DevOps toolchain for PLC projects supporting both **CODESYS** and **Rockwell/Allen-Bradley** platforms. Export, diff, merge, and import with full support for additions, modifications, and deletions.
 
 ## Why These Tools?
 
@@ -15,10 +15,23 @@ A complete DevOps toolchain for CODESYS PLC projects: export, diff, merge, and i
 
 ## Quick Start (PowerShell Driver Scripts)
 
-### Export Project
+### CODESYS Projects
+
+#### Export Project
 ```powershell
 # From PLCOpenXML file (no CODESYS needed)
 .\codesys-export.ps1 -FromXml "MyProject.xml" -OutputDir ".\export"
+```
+
+### Rockwell/Allen-Bradley Projects
+
+#### Export L5X Files
+```powershell
+# Export single L5X file
+.\l5x-export.ps1 -Input "Motor_Control.L5X" -OutputDir ".\export"
+
+# Export all L5X files in directory
+.\l5x-export.ps1 -Input ".\PLC" -OutputDir ".\export"
 ```
 
 ### Generate Diff
@@ -50,18 +63,21 @@ A complete DevOps toolchain for CODESYS PLC projects: export, diff, merge, and i
 
 ```
 .
-├── codesys-export.ps1    # Driver: Export project to text files
+├── codesys-export.ps1    # Driver: Export CODESYS project to text files
 ├── codesys-diff.ps1      # Driver: Generate diffs between exports
 ├── codesys-apply.ps1     # Driver: Apply diffs to exports
-├── codesys-import.ps1    # Driver: Import text files to project
+├── codesys-import.ps1    # Driver: Import text files to CODESYS project
 ├── codesys-merge.ps1     # Driver: Complete merge workflow
+├── l5x-export.ps1        # Driver: Export Rockwell L5X files to text
 ├── scripts/              # Python implementation
 │   ├── codesys_export.py           # Export (runs in CODESYS)
 │   ├── codesys_export_from_xml.py  # Export from PLCOpenXML
 │   ├── codesys_import.py           # Import (runs in CODESYS)
 │   ├── codesys_import_external.py  # Import wrapper (headless)
 │   ├── codesys_diff.py             # Generate unified diffs
-│   └── codesys_apply.py            # Apply diffs to text files
+│   ├── codesys_apply.py            # Apply diffs to text files
+│   └── l5x_export.py               # Export Rockwell L5X files
+├── PLC/                  # Sample Rockwell L5X files
 ├── legacy/               # Deprecated XML-based tools
 ├── tests/                # Test files and outputs
 └── docs/                 # Documentation
@@ -69,7 +85,7 @@ A complete DevOps toolchain for CODESYS PLC projects: export, diff, merge, and i
 
 ## File Formats
 
-### Exported Text Files (.st)
+### CODESYS Exported Text Files (.st)
 
 | Extension | Type |
 |-----------|------|
@@ -78,6 +94,13 @@ A complete DevOps toolchain for CODESYS PLC projects: export, diff, merge, and i
 | `NAME.fun.st` | Function |
 | `NAME.gvl.st` | Global Variable List |
 | `POU_METHOD.meth.st` | Method (in POU) |
+
+### Rockwell/Allen-Bradley Exported Files (.sc)
+
+| Extension | Type |
+|-----------|------|
+| `NAME.aoi.sc` | Add-On Instruction |
+| `NAME.udt.sc` | User Defined Type |
 
 ### Diff Files
 
@@ -118,6 +141,87 @@ A complete DevOps toolchain for CODESYS PLC projects: export, diff, merge, and i
 .\codesys-import.ps1 -ProjectPath "MyProject.project" -ImportDir ".\modified"
 ```
 
+### 4. Export Rockwell L5X Files for Version Control
+```powershell
+# Export all L5X files from PLC directory
+.\l5x-export.ps1 -Input ".\PLC" -OutputDir ".\export"
+
+# Commit the .sc files to version control
+git add export/
+git commit -m "Add PLC logic from Rockwell project"
+```
+
+## Rockwell/Allen-Bradley L5X Export
+
+The L5X export tool converts Rockwell Logix 5000 L5X files to structured code (.sc) format for version control and code review.
+
+### What Gets Exported
+
+- **Add-On Instructions (AOIs)**: Complete instruction definitions including parameters, local tags, and ladder logic
+- **User Defined Types (UDTs)**: Custom data structures with member definitions
+- **Ladder Logic**: RLL rungs with comments preserved
+- **Structured Text**: ST code blocks (when present)
+
+### Output Format
+
+Each L5X file is exported to a subdirectory containing:
+
+```
+export/
+├── Motor_Reversing/
+│   ├── Motor_Reversing.aoi.sc      # Main AOI
+│   ├── HMI_MotorControl.udt.sc     # Custom data type
+│   ├── Error_Motor.udt.sc          # Error structure
+│   └── HMIBitEnable.aoi.sc         # Dependency AOI
+└── IO_DigitalInput/
+    ├── IO_DigitalInput.aoi.sc
+    └── HMI_DigitalInput.udt.sc
+```
+
+### .sc File Structure
+
+```
+(* AOI: Motor_Reversing *)
+(* Type: AddOnInstruction *)
+(* Revision: 1.0 *)
+(* Vendor: De Clerck Arnaud *)
+(* Description: Controls a reversing motor contactor *)
+
+(* PARAMETERS *)
+VAR_INPUT
+    tInTimeout: INT;  // Timeout time
+    bInEstop: BOOL;   // Estop
+END_VAR
+
+VAR_OUTPUT
+    bOutCommandForward: BOOL;  // Output for motor relay forward
+    bOutError: BOOL;           // Motor Error Exists
+END_VAR
+
+(* LOCAL TAGS *)
+VAR
+    bTemp: BOOL;
+    TON_TimeOut: TIMER;
+END_VAR
+
+(* IMPLEMENTATION *)
+(* ROUTINE: Logic [RLL] *)
+
+// Rung 0: Inputs
+OTU(bTemp);
+
+// Rung 1: Read HMI input buttons
+[EQU(mode,2) OTE(bTemp) ,HMIBitEnable(...) ];
+```
+
+### Benefits
+
+- **Version Control**: Track changes to PLC logic over time
+- **Code Review**: Review ladder logic in pull requests
+- **Documentation**: Self-documenting with comments preserved
+- **Diffing**: Use standard diff tools to compare versions
+- **Search**: Grep through PLC logic to find specific tags/instructions
+
 ## Authoritative Import Behavior
 
 The import is **authoritative** - the import directory is the source of truth:
@@ -137,6 +241,7 @@ Use `--dry-run` to preview deletions before applying!
 
 ## Python Scripts (Direct Usage)
 
+### CODESYS
 ```bash
 # Export from XML
 python scripts/codesys_export_from_xml.py "Project.xml" "output_dir"
@@ -149,6 +254,15 @@ python scripts/codesys_apply.py "diff_dir" "target_dir" "project.project" "outpu
 
 # Import (runs CODESYS headless)
 python scripts/codesys_import_external.py "Project.project" "import_dir" --dry-run
+```
+
+### Rockwell/Allen-Bradley
+```bash
+# Export L5X file
+python scripts/l5x_export.py "Motor_Control.L5X" "output_dir"
+
+# Export all L5X files in directory
+python scripts/l5x_export.py "PLC" "output_dir"
 ```
 
 ## See Also
