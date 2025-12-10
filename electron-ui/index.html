@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
+  <title>PLC Ontology Assistant</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="logo">
+        <div class="logo-icon">⚙️</div>
+        <h1>Ontology<br>Assistant</h1>
+      </div>
+      
+      <nav class="nav">
+        <button class="nav-btn active" data-tab="ingest">
+          <span class="icon">📥</span>
+          <span>Ingest Data</span>
+        </button>
+        <button class="nav-btn" data-tab="troubleshoot">
+          <span class="icon">🔧</span>
+          <span>Troubleshoot</span>
+        </button>
+        <button class="nav-btn" data-tab="database">
+          <span class="icon">🗄️</span>
+          <span>Database</span>
+        </button>
+      </nav>
+      
+      <div class="sidebar-footer">
+        <div class="status" id="neo4j-status">
+          <span class="status-dot"></span>
+          <span>Checking Neo4j...</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main">
+      <!-- Ingest Tab -->
+      <section class="tab-content active" id="tab-ingest">
+        <header class="tab-header">
+          <h2>Ingest Data</h2>
+          <p>Import PLC and SCADA configurations into the ontology database</p>
+        </header>
+        
+        <div class="cards">
+          <div class="card">
+            <div class="card-icon">🔌</div>
+            <h3>PLC Files</h3>
+            <p>Import Rockwell L5X exports (.sc files or directories)</p>
+            <button class="btn primary" id="btn-ingest-plc">
+              Select PLC File/Folder
+            </button>
+          </div>
+          
+          <div class="card">
+            <div class="card-icon">📊</div>
+            <h3>Ignition SCADA</h3>
+            <p>Import Ignition project backup JSON files</p>
+            <button class="btn primary" id="btn-ingest-ignition">
+              Select Ignition Backup
+            </button>
+          </div>
+          
+          <div class="card">
+            <div class="card-icon">🔗</div>
+            <h3>Link & Enrich</h3>
+            <p>Create PLC↔SCADA mappings and add troubleshooting data</p>
+            <button class="btn secondary" id="btn-run-unified">
+              Run Unified Analysis
+            </button>
+            <button class="btn secondary" id="btn-run-enrichment">
+              Add Troubleshooting
+            </button>
+          </div>
+        </div>
+        
+        <div class="output-panel" id="ingest-output">
+          <div class="output-header">
+            <h4>Output</h4>
+            <button class="btn-small" id="btn-clear-ingest-output">Clear</button>
+          </div>
+          <pre class="output-content"></pre>
+        </div>
+      </section>
+
+      <!-- Troubleshoot Tab -->
+      <section class="tab-content" id="tab-troubleshoot">
+        <header class="tab-header">
+          <h2>Troubleshooting Assistant</h2>
+          <p>Ask questions about your PLC/SCADA system and get AI-powered diagnostics</p>
+        </header>
+        
+        <div class="chat-container">
+          <div class="chat-messages" id="chat-messages">
+            <div class="message assistant">
+              <div class="message-content">
+                <p>👋 Hi! I'm your PLC/SCADA troubleshooting assistant. Describe your problem and I'll help diagnose it.</p>
+                <p class="examples">Try asking things like:</p>
+                <ul>
+                  <li>"The motor won't start"</li>
+                  <li>"Valve stuck in manual mode"</li>
+                  <li>"Getting timeout errors on the conveyor"</li>
+                  <li>"What does the Motor_Reversing AOI do?"</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          
+          <div class="chat-input-container">
+            <button class="btn-small" id="btn-clear-chat" title="Clear conversation">🗑️ Clear</button>
+            <input type="text" 
+                   id="chat-input" 
+                   class="chat-input" 
+                   placeholder="Describe your problem..."
+                   autocomplete="off">
+            <button class="btn primary" id="btn-send">
+              <span>Send</span>
+              <span class="icon">→</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Database Tab -->
+      <section class="tab-content" id="tab-database">
+        <header class="tab-header">
+          <h2>Database Management</h2>
+          <p>Manage the Neo4j ontology database</p>
+        </header>
+        
+        <div class="cards">
+          <div class="card">
+            <div class="card-icon">📈</div>
+            <h3>Statistics</h3>
+            <p>View current database contents</p>
+            <button class="btn secondary" id="btn-get-stats">
+              Refresh Stats
+            </button>
+            <pre class="stats-display" id="stats-display">Click "Refresh Stats" to load...</pre>
+          </div>
+          
+          <div class="card">
+            <div class="card-icon">🌐</div>
+            <h3>Visualization</h3>
+            <p>Generate interactive graph visualization</p>
+            <button class="btn secondary" id="btn-generate-viz">
+              Generate HTML View
+            </button>
+          </div>
+          
+          <div class="card danger">
+            <div class="card-icon">⚠️</div>
+            <h3>Clear Database</h3>
+            <p>Remove all data from the ontology database</p>
+            <button class="btn danger" id="btn-clear-db">
+              Clear All Data
+            </button>
+            <button class="btn secondary" id="btn-init-db">
+              Initialize Schema
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div class="loading-overlay" id="loading-overlay">
+    <div class="loading-spinner"></div>
+    <p id="loading-text">Processing...</p>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
+

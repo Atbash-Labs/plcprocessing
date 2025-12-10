@@ -1,0 +1,14 @@
+# PLC/SCADA Ontology Processing Dependencies
+
+# Neo4j graph database driver
+neo4j>=5.0.0
+
+# Anthropic Claude API for LLM analysis
+anthropic>=0.18.0
+
+# Environment variable management
+python-dotenv>=1.0.0
+
+# XML parsing (for PLC files)
+lxml>=4.9.0
+

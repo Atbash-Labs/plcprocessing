@@ -2,6 +2,7 @@
 """
 Interactive HTML graph visualization for PLC/SCADA ontologies.
 Generates an expandable, zoomable graph using D3.js.
+Reads data from Neo4j graph database.
 """
 
 import json
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
+
+from neo4j_ontology import OntologyGraph, get_ontology_graph
 
 
 class OntologyType(Enum):
@@ -37,7 +40,7 @@ class Edge:
 
 
 class OntologyViewer:
-    """Generate interactive HTML visualization from ontology JSON."""
+    """Generate interactive HTML visualization from Neo4j ontology."""
 
     COLORS = {
         'plc': '#1976D2',
@@ -50,18 +53,137 @@ class OntologyViewer:
         'safety': '#D32F2F',
         'integration': '#3F51B5',
         'overview': '#607D8B',
+        'endtoendflow': '#E91E63',
+        'tag': '#009688',
+        'faultsymptom': '#FF5722',
+        'controlpattern': '#795548',
     }
 
-    def __init__(self):
+    def __init__(self, graph: Optional[OntologyGraph] = None):
         self.nodes: List[Node] = []
         self.edges: List[Edge] = []
         self.node_counter = 0
+        self._graph = graph
+        self._owns_graph = False
+
+    def _get_graph(self) -> OntologyGraph:
+        """Get or create Neo4j connection."""
+        if self._graph is None:
+            self._graph = get_ontology_graph()
+            self._owns_graph = True
+        return self._graph
+
+    def close(self):
+        """Close Neo4j connection if we own it."""
+        if self._owns_graph and self._graph:
+            self._graph.close()
+            self._graph = None
 
     def _node_id(self, prefix: str = "n") -> str:
         self.node_counter += 1
         return f"{prefix}_{self.node_counter}"
 
+    def load_from_neo4j(self, include_details: bool = True) -> None:
+        """Load graph data from Neo4j."""
+        graph = self._get_graph()
+        
+        with graph.session() as session:
+            # Get all main nodes
+            nodes_result = session.run("""
+                MATCH (n)
+                WHERE n:AOI OR n:UDT OR n:Equipment OR n:View OR n:EndToEndFlow OR n:SystemOverview
+                RETURN elementId(n) as id, labels(n)[0] as type, 
+                       coalesce(n.name, n.key, 'unknown') as label,
+                       properties(n) as props
+            """)
+            
+            for record in nodes_result:
+                node_type = record['type'].lower()
+                group = 'plc' if node_type == 'aoi' else 'scada' if node_type in ('udt', 'equipment', 'view') else 'flows'
+                
+                self.nodes.append(Node(
+                    id=str(record['id']),
+                    label=record['label'],
+                    type=node_type,
+                    group=group,
+                    details=dict(record['props']) if include_details else {},
+                ))
+            
+            # Get relationships between main nodes
+            edges_result = session.run("""
+                MATCH (a)-[r]->(b)
+                WHERE (a:AOI OR a:UDT OR a:Equipment OR a:View OR a:EndToEndFlow)
+                  AND (b:AOI OR b:UDT OR b:Equipment OR b:View OR b:EndToEndFlow)
+                RETURN elementId(a) as source, elementId(b) as target, type(r) as type,
+                       properties(r) as props
+            """)
+            
+            for record in edges_result:
+                self.edges.append(Edge(
+                    source=str(record['source']),
+                    target=str(record['target']),
+                    label=record['props'].get('mapping_type', record['type']),
+                    type=record['type'],
+                ))
+        
+        # If we want more detail, load tags, patterns, etc.
+        if include_details:
+            self._load_extended_data()
+
+    def _load_extended_data(self) -> None:
+        """Load extended data like tags, patterns, etc."""
+        graph = self._get_graph()
+        
+        with graph.session() as session:
+            # Load fault symptoms for troubleshooting view
+            symptoms_result = session.run("""
+                MATCH (a:AOI)-[:HAS_SYMPTOM]->(s:FaultSymptom)
+                RETURN elementId(a) as aoi_id, elementId(s) as symptom_id, s.symptom as symptom,
+                       s.resolution_steps as steps
+            """)
+            
+            for record in symptoms_result:
+                self.nodes.append(Node(
+                    id=str(record['symptom_id']),
+                    label=record['symptom'][:40] + '...' if len(record['symptom']) > 40 else record['symptom'],
+                    type='faultsymptom',
+                    group='troubleshooting',
+                    details={
+                        'symptom': record['symptom'],
+                        'resolution_steps': record['steps'],
+                    },
+                ))
+                self.edges.append(Edge(
+                    source=str(record['aoi_id']),
+                    target=str(record['symptom_id']),
+                    label='HAS_SYMPTOM',
+                    type='troubleshooting',
+                ))
+            
+            # Load control patterns
+            patterns_result = session.run("""
+                MATCH (a:AOI)-[:HAS_PATTERN]->(p:ControlPattern)
+                RETURN elementId(a) as aoi_id, elementId(p) as pattern_id, 
+                       p.name as name, p.description as description
+            """)
+            
+            for record in patterns_result:
+                self.nodes.append(Node(
+                    id=str(record['pattern_id']),
+                    label=record['name'],
+                    type='controlpattern',
+                    group='patterns',
+                    details={'description': record['description']},
+                ))
+                self.edges.append(Edge(
+                    source=str(record['aoi_id']),
+                    target=str(record['pattern_id']),
+                    label='HAS_PATTERN',
+                    type='pattern',
+                ))
+
     def detect_type(self, data: Any) -> OntologyType:
+        """Legacy method for JSON compatibility."""
         if isinstance(data, list):
             return OntologyType.L5X
         if data.get('type') == 'unified_system_ontology':
@@ -71,7 +193,7 @@ class OntologyViewer:
         return OntologyType.L5X
 
     def parse(self, data: Dict) -> None:
-        """Parse ontology data into nodes and edges."""
+        """Legacy: Parse ontology data from JSON into nodes and edges."""
         ont_type = self.detect_type(data)
 
         if ont_type == OntologyType.UNIFIED:
@@ -82,7 +204,7 @@ class OntologyViewer:
             self._parse_l5x(data)
 
     def _parse_l5x(self, data: Any) -> None:
-        """Parse L5X ontology."""
+        """Parse L5X ontology from JSON."""
         aois = data if isinstance(data, list) else [data]
 
         for aoi in aois:
@@ -104,7 +226,7 @@ class OntologyViewer:
             self.nodes.append(node)
 
     def _parse_ignition(self, data: Dict) -> None:
-        """Parse Ignition ontology."""
+        """Parse Ignition ontology from JSON."""
         analysis = data.get('analysis', {})
 
         # UDTs
@@ -144,7 +266,7 @@ class OntologyViewer:
             self.nodes.append(node)
 
     def _parse_unified(self, data: Dict) -> None:
-        """Parse unified ontology."""
+        """Parse unified ontology from JSON."""
         ua = data.get('unified_analysis', {})
 
         # System overview
@@ -498,6 +620,16 @@ class OntologyViewer:
         .dimmed {{
             opacity: 0.2;
         }}
+        #neo4j-info {{
+            position: absolute;
+            bottom: 20px;
+            right: 420px;
+            background: rgba(22, 33, 62, 0.9);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 11px;
+            color: #888;
+        }}
     </style>
 </head>
 <body>
@@ -510,15 +642,16 @@ class OntologyViewer:
                     <option value="plc">PLC Layer</option>
                     <option value="scada">SCADA Layer</option>
                     <option value="flows">Data Flows</option>
+                    <option value="troubleshooting">Troubleshooting</option>
+                    <option value="patterns">Patterns</option>
                     <option value="safety">Safety</option>
-                    <option value="responsibilities">Responsibilities</option>
-                    <option value="recommendations">Recommendations</option>
                 </select>
                 <button id="reset-zoom">Reset Zoom</button>
                 <button id="expand-all">Expand All</button>
                 <button id="collapse-all">Collapse All</button>
             </div>
             <div id="legend"></div>
+            <div id="neo4j-info">Data source: Neo4j Graph Database</div>
         </div>
         <div id="sidebar">
             <div id="details">
@@ -790,35 +923,47 @@ class OntologyViewer:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate interactive HTML visualization from ontology JSON"
+        description="Generate interactive HTML visualization from Neo4j ontology"
     )
-    parser.add_argument('input', help='Path to ontology JSON file')
-    parser.add_argument('-o', '--output', help='Output HTML file path')
-    parser.add_argument('-t', '--title', default='Ontology Viewer',
+    parser.add_argument('--output', '-o', default='ontologies/neo4j_viewer.html',
+                       help='Output HTML file path')
+    parser.add_argument('--title', '-t', default='PLC/SCADA Ontology Viewer',
                        help='Page title')
-    parser.add_argument('-v', '--verbose', action='store_true',
+    parser.add_argument('--verbose', '-v', action='store_true',
                        help='Verbose output')
+    parser.add_argument('--no-details', action='store_true',
+                       help='Exclude extended details (faster)')
+    
+    # Legacy JSON support
+    parser.add_argument('--json', metavar='FILE',
+                       help='Load from JSON file instead of Neo4j (legacy)')
 
     args = parser.parse_args()
 
-    # Load ontology
-    with open(args.input, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    # Parse and generate
     viewer = OntologyViewer()
-    viewer.parse(data)
 
-    if args.verbose:
-        print(f"[INFO] Parsed {len(viewer.nodes)} nodes and {len(viewer.edges)} edges")
+    try:
+        if args.json:
+            # Legacy JSON mode
+            with open(args.json, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            viewer.parse(data)
+            if args.verbose:
+                print(f"[INFO] Loaded from JSON: {len(viewer.nodes)} nodes, {len(viewer.edges)} edges")
+        else:
+            # Neo4j mode
+            if args.verbose:
+                print("[INFO] Loading from Neo4j...")
+            viewer.load_from_neo4j(include_details=not args.no_details)
+            if args.verbose:
+                print(f"[INFO] Loaded from Neo4j: {len(viewer.nodes)} nodes, {len(viewer.edges)} edges")
 
-    # Output path
-    input_path = Path(args.input)
-    output_path = args.output or str(input_path.with_suffix('.html'))
-
-    viewer.save(output_path, args.title)
-    print(f"[OK] Generated interactive viewer: {output_path}")
-    print(f"[INFO] Open in browser to view")
+        viewer.save(args.output, args.title)
+        print(f"[OK] Generated interactive viewer: {args.output}")
+        print(f"[INFO] Open in browser to view")
+    
+    finally:
+        viewer.close()
 
 
 if __name__ == "__main__":
