@@ -812,6 +812,66 @@ class OntologyGraph:
             )
         return name
 
+    def create_view_udt_mapping(
+        self, view_name: str, udt_name: str, binding_type: str = "displays"
+    ) -> bool:
+        """Create a DISPLAYS relationship between a View and a UDT.
+        
+        Args:
+            view_name: Name of the view
+            udt_name: Name of the UDT the view displays/controls
+            binding_type: Type of binding (displays, controls, monitors)
+            
+        Returns:
+            True if relationship was created, False if nodes not found
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (v:View {name: $view_name})
+                MATCH (u:UDT {name: $udt_name})
+                MERGE (v)-[r:DISPLAYS]->(u)
+                SET r.binding_type = $binding_type
+                RETURN v.name as view, u.name as udt
+            """,
+                {
+                    "view_name": view_name,
+                    "udt_name": udt_name,
+                    "binding_type": binding_type,
+                },
+            )
+            return result.single() is not None
+
+    def create_view_equipment_mapping(
+        self, view_name: str, equipment_name: str, binding_type: str = "displays"
+    ) -> bool:
+        """Create a DISPLAYS relationship between a View and Equipment.
+        
+        Args:
+            view_name: Name of the view
+            equipment_name: Name of the equipment the view displays/controls
+            binding_type: Type of binding (displays, controls, monitors)
+            
+        Returns:
+            True if relationship was created, False if nodes not found
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (v:View {name: $view_name})
+                MATCH (e:Equipment {name: $equipment_name})
+                MERGE (v)-[r:DISPLAYS]->(e)
+                SET r.binding_type = $binding_type
+                RETURN v.name as view, e.name as equipment
+            """,
+                {
+                    "view_name": view_name,
+                    "equipment_name": equipment_name,
+                    "binding_type": binding_type,
+                },
+            )
+            return result.single() is not None
+
     # =========================================================================
     # Unified Ontology / Cross-System Mappings
     # =========================================================================

@@ -6,6 +6,7 @@ the ontology database with maximum flexibility.
 """
 
 import os
+import sys
 import json
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, field
@@ -498,7 +499,11 @@ class ClaudeClient:
 
         for tool_round in range(max_tool_rounds + 1):
             if verbose:
-                print(f"[DEBUG] Round {tool_round + 1}, messages: {len(messages)}")
+                print(
+                    f"[DEBUG] Round {tool_round + 1}, messages: {len(messages)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             # Make API call
             response = self.client.messages.create(
@@ -513,8 +518,16 @@ class ClaudeClient:
             total_output_tokens += response.usage.output_tokens
 
             if verbose:
-                print(f"[DEBUG] Stop reason: {response.stop_reason}")
-                print(f"[DEBUG] Content blocks: {len(response.content)}")
+                print(
+                    f"[DEBUG] Stop reason: {response.stop_reason}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                print(
+                    f"[DEBUG] Content blocks: {len(response.content)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             # Check if we need to handle tool use
             if response.stop_reason == "tool_use":
@@ -546,7 +559,11 @@ class ClaudeClient:
                         tool_input_str = json.dumps(tool_use.input, default=str)
                         if len(tool_input_str) > 100:
                             tool_input_str = tool_input_str[:100] + "..."
-                        print(f"[TOOL] {tool_use.name}: {tool_input_str}")
+                        print(
+                            f"[TOOL] {tool_use.name}: {tool_input_str}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
 
                     result = self._tools.execute(tool_use.name, tool_use.input)
                     tool_calls_made.append(
@@ -560,7 +577,11 @@ class ClaudeClient:
                     )
 
                     if verbose:
-                        print(f"[TOOL] Result: {len(result)} chars")
+                        print(
+                            f"[TOOL] Result: {len(result)} chars",
+                            file=sys.stderr,
+                            flush=True,
+                        )
 
                     tool_results.append(
                         {
@@ -574,14 +595,20 @@ class ClaudeClient:
                 messages.append({"role": "user", "content": tool_results})
 
                 if verbose:
-                    print(f"[DEBUG] Continuing to next round...")
+                    print(
+                        f"[DEBUG] Continuing to next round...",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 # Continue to next round
                 continue
 
             # No tool use - extract final text
             if verbose:
                 print(
-                    f"[DEBUG] Extracting final response, content blocks: {[b.type for b in response.content]}"
+                    f"[DEBUG] Extracting final response, content blocks: {[b.type for b in response.content]}",
+                    file=sys.stderr,
+                    flush=True,
                 )
             full_response = ""
             for block in response.content:
@@ -589,14 +616,20 @@ class ClaudeClient:
                     full_response += block.text
 
             if verbose:
-                print(f"[DEBUG] Final response length: {len(full_response)} chars")
+                print(
+                    f"[DEBUG] Final response length: {len(full_response)} chars",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             # Handle continuation if needed
             if response.stop_reason == "max_tokens":
                 for cont in range(max_continuations):
                     if verbose:
                         print(
-                            f"[INFO] Continuing response ({cont + 1}/{max_continuations})..."
+                            f"[INFO] Continuing response ({cont + 1}/{max_continuations})...",
+                            file=sys.stderr,
+                            flush=True,
                         )
 
                     messages.append({"role": "assistant", "content": full_response})

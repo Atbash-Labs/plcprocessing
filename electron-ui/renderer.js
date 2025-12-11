@@ -42,10 +42,14 @@ function hideLoading() {
 }
 
 // ============================================
-// Output Panel
+// Output Panel with Streaming Support
 // ============================================
 
 const ingestOutput = document.querySelector('#ingest-output .output-content');
+const toolCallsPanel = document.getElementById('tool-calls-panel');
+
+// Track if an ingest operation is active (for streaming)
+let isIngestActive = false;
 
 function appendOutput(text, clear = false) {
   if (clear) {
@@ -60,17 +64,54 @@ function appendOutput(text, clear = false) {
   ingestOutput.scrollTop = ingestOutput.scrollHeight;
 }
 
+function appendToolCall(toolInfo, targetElement = null) {
+  const target = targetElement || ingestOutput;
+  if (!target) return;
+  
+  // Append tool call as formatted text
+  target.textContent += `  🔧 ${toolInfo}\n`;
+  target.scrollTop = target.scrollHeight;
+}
+
+// Set up streaming listeners for ingest operations
+window.api.onStreamOutput((data) => {
+  // Only process ingest streams when an ingest operation is active
+  if (!isIngestActive) return;
+  if (data.streamId && data.streamId.startsWith('troubleshoot-')) return;
+  
+  if (data.type === 'output' || data.type === 'stderr') {
+    appendOutput(data.text + '\n');
+  }
+});
+
+window.api.onToolCall((data) => {
+  // Only handle ingest tool calls when ingest is active
+  if (!isIngestActive) return;
+  if (data.streamId && data.streamId.startsWith('troubleshoot-')) return;
+  
+  appendToolCall(data.tool);
+});
+
 document.getElementById('btn-clear-ingest-output').addEventListener('click', () => {
   ingestOutput.textContent = '';
 });
+
+// Disable/enable ingest buttons during operations
+function disableIngestButtons(disabled) {
+  document.getElementById('btn-ingest-plc').disabled = disabled;
+  document.getElementById('btn-ingest-ignition').disabled = disabled;
+  document.getElementById('btn-run-unified').disabled = disabled;
+  document.getElementById('btn-run-enrichment').disabled = disabled;
+}
 
 // ============================================
 // Ingest Tab Handlers
 // ============================================
 
-// PLC Ingest
+// PLC Ingest (with streaming - no blocking overlay)
 document.getElementById('btn-ingest-plc').addEventListener('click', async () => {
   const filePath = await window.api.selectFile({
+    allowDirectory: true,  // Allow selecting folders of .sc files
     filters: [
       { name: 'PLC Files', extensions: ['sc', 'L5X'] },
       { name: 'All Files', extensions: ['*'] }
@@ -79,13 +120,17 @@ document.getElementById('btn-ingest-plc').addEventListener('click', async () => 
   
   if (!filePath) return;
   
-  showLoading('Analyzing PLC file...');
+  // No blocking overlay - streaming output shows progress
   appendOutput(`\n📥 Ingesting: ${filePath}\n`, false);
+  appendOutput('⏳ Processing...\n');
+  isIngestActive = true;
+  disableIngestButtons(true);
   
   try {
+    // Result streams to output panel via listeners
     const result = await window.api.ingestPLC(filePath);
+    
     if (result.success) {
-      appendOutput(result.output);
       appendOutput('\n✅ PLC ingestion complete!\n');
     } else {
       appendOutput(`\n❌ Error: ${result.error}\n`);
@@ -94,11 +139,12 @@ document.getElementById('btn-ingest-plc').addEventListener('click', async () => 
     appendOutput(`\n❌ Error: ${error.message}\n`);
   }
   
-  hideLoading();
+  isIngestActive = false;
+  disableIngestButtons(false);
   updateStats();
 });
 
-// Ignition Ingest
+// Ignition Ingest (with streaming - no blocking overlay)
 document.getElementById('btn-ingest-ignition').addEventListener('click', async () => {
   const filePath = await window.api.selectFile({
     filters: [
@@ -109,13 +155,15 @@ document.getElementById('btn-ingest-ignition').addEventListener('click', async (
   
   if (!filePath) return;
   
-  showLoading('Analyzing Ignition backup...');
   appendOutput(`\n📊 Ingesting: ${filePath}\n`, false);
+  appendOutput('⏳ Processing...\n');
+  isIngestActive = true;
+  disableIngestButtons(true);
   
   try {
     const result = await window.api.ingestIgnition(filePath);
+    
     if (result.success) {
-      appendOutput(result.output);
       appendOutput('\n✅ Ignition ingestion complete!\n');
     } else {
       appendOutput(`\n❌ Error: ${result.error}\n`);
@@ -124,19 +172,22 @@ document.getElementById('btn-ingest-ignition').addEventListener('click', async (
     appendOutput(`\n❌ Error: ${error.message}\n`);
   }
   
-  hideLoading();
+  isIngestActive = false;
+  disableIngestButtons(false);
   updateStats();
 });
 
-// Unified Analysis
+// Unified Analysis (with streaming - no blocking overlay)
 document.getElementById('btn-run-unified').addEventListener('click', async () => {
-  showLoading('Running unified analysis (linking PLC ↔ SCADA)...');
-  appendOutput('\n🔗 Running unified analysis...\n', false);
+  appendOutput('\n🔗 Running unified analysis (linking PLC ↔ SCADA)...\n', false);
+  appendOutput('⏳ Processing...\n');
+  isIngestActive = true;
+  disableIngestButtons(true);
   
   try {
     const result = await window.api.runUnified();
+    
     if (result.success) {
-      appendOutput(result.output);
       appendOutput('\n✅ Unified analysis complete!\n');
     } else {
       appendOutput(`\n❌ Error: ${result.error}\n`);
@@ -145,19 +196,22 @@ document.getElementById('btn-run-unified').addEventListener('click', async () =>
     appendOutput(`\n❌ Error: ${error.message}\n`);
   }
   
-  hideLoading();
+  isIngestActive = false;
+  disableIngestButtons(false);
   updateStats();
 });
 
-// Troubleshooting Enrichment
+// Troubleshooting Enrichment (with streaming - no blocking overlay)
 document.getElementById('btn-run-enrichment').addEventListener('click', async () => {
-  showLoading('Adding troubleshooting data...');
   appendOutput('\n🔧 Running troubleshooting enrichment...\n', false);
+  appendOutput('⏳ Processing...\n');
+  isIngestActive = true;
+  disableIngestButtons(true);
   
   try {
     const result = await window.api.runEnrichment();
+    
     if (result.success) {
-      appendOutput(result.output);
       appendOutput('\n✅ Troubleshooting enrichment complete!\n');
     } else {
       appendOutput(`\n❌ Error: ${result.error}\n`);
@@ -166,12 +220,13 @@ document.getElementById('btn-run-enrichment').addEventListener('click', async ()
     appendOutput(`\n❌ Error: ${error.message}\n`);
   }
   
-  hideLoading();
+  isIngestActive = false;
+  disableIngestButtons(false);
   updateStats();
 });
 
 // ============================================
-// Chat/Troubleshooting
+// Chat/Troubleshooting with Streaming Tool Calls
 // ============================================
 
 const chatMessages = document.getElementById('chat-messages');
@@ -180,6 +235,8 @@ const btnSend = document.getElementById('btn-send');
 
 // Maintain conversation history for multi-turn dialogue
 let conversationHistory = [];
+let isChatActive = false;
+let currentToolCallsDiv = null;
 
 function clearConversation() {
   conversationHistory = [];
@@ -208,6 +265,53 @@ function addMessage(content, isUser = false) {
   messageDiv.appendChild(contentDiv);
   chatMessages.appendChild(messageDiv);
   chatMessages.scrollTop = chatMessages.scrollHeight;
+  
+  return messageDiv;
+}
+
+function createThinkingIndicator() {
+  const thinkingDiv = document.createElement('div');
+  thinkingDiv.className = 'message assistant thinking';
+  thinkingDiv.innerHTML = `
+    <div class="message-content">
+      <div class="thinking-header">
+        <span class="thinking-spinner">🔄</span>
+        <span>Analyzing your question...</span>
+      </div>
+      <div class="tool-calls-container"></div>
+    </div>
+  `;
+  return thinkingDiv;
+}
+
+function addToolCallToThinking(thinkingDiv, toolInfo) {
+  const container = thinkingDiv.querySelector('.tool-calls-container');
+  if (container) {
+    const toolDiv = document.createElement('div');
+    toolDiv.className = 'tool-call-chip';
+    
+    // Parse tool info to make it more readable
+    let displayText = toolInfo;
+    if (toolInfo.includes(':')) {
+      const [toolName, ...rest] = toolInfo.split(':');
+      const params = rest.join(':').trim();
+      if (params.length > 60) {
+        displayText = `${toolName}: ${params.substring(0, 60)}...`;
+      } else {
+        displayText = `${toolName}: ${params}`;
+      }
+    }
+    
+    toolDiv.innerHTML = `<span class="tool-icon">🔧</span> ${escapeHtml(displayText)}`;
+    container.appendChild(toolDiv);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 function formatResponse(text) {
@@ -237,6 +341,16 @@ function formatResponse(text) {
     .replace(/\n/g, '<br>');
 }
 
+// Streaming listener for chat tool calls
+window.api.onToolCall((data) => {
+  // Only handle troubleshoot streams when chat is active
+  if (data.streamId && data.streamId.startsWith('troubleshoot-')) {
+    if (isChatActive && currentToolCallsDiv) {
+      addToolCallToThinking(currentToolCallsDiv, data.tool);
+    }
+  }
+});
+
 async function sendMessage() {
   const question = chatInput.value.trim();
   if (!question) return;
@@ -245,23 +359,23 @@ async function sendMessage() {
   addMessage(question, true);
   chatInput.value = '';
   
-  // Show thinking indicator
-  const thinkingDiv = document.createElement('div');
-  thinkingDiv.className = 'message assistant';
-  thinkingDiv.innerHTML = `
-    <div class="message-content">
-      <p>🤔 Analyzing your question...</p>
-    </div>
-  `;
+  // Show thinking indicator with tool calls container
+  const thinkingDiv = createThinkingIndicator();
   chatMessages.appendChild(thinkingDiv);
   chatMessages.scrollTop = chatMessages.scrollHeight;
+  currentToolCallsDiv = thinkingDiv;
+  isChatActive = true;
   
   try {
     // Send question with full conversation history
     const result = await window.api.troubleshoot(question, conversationHistory);
     
     // Remove thinking indicator
-    chatMessages.removeChild(thinkingDiv);
+    if (thinkingDiv.parentNode) {
+      chatMessages.removeChild(thinkingDiv);
+    }
+    currentToolCallsDiv = null;
+    isChatActive = false;
     
     if (result.success) {
       // Update conversation history from response
@@ -281,7 +395,11 @@ async function sendMessage() {
       addMessage(`❌ Error: ${result.error}`, false);
     }
   } catch (error) {
-    chatMessages.removeChild(thinkingDiv);
+    if (thinkingDiv.parentNode) {
+      chatMessages.removeChild(thinkingDiv);
+    }
+    currentToolCallsDiv = null;
+    isChatActive = false;
     addMessage(`❌ Error: ${error.message}`, false);
   }
 }

@@ -44,13 +44,16 @@ app.on('activate', () => {
   }
 });
 
-// Helper to run Python scripts
-function runPythonScript(scriptName, args = [], onData = null) {
+// Helper to run Python scripts with optional streaming
+function runPythonScript(scriptName, args = [], options = {}) {
+  const { streaming = false, streamId = null } = options;
+  
   return new Promise((resolve, reject) => {
     const scriptPath = path.join(scriptsDir, scriptName);
-    const pythonProcess = spawn('python', [scriptPath, ...args], {
+    // Use -u for unbuffered output to enable real-time streaming
+    const pythonProcess = spawn('python', ['-u', scriptPath, ...args], {
       cwd: path.join(__dirname, '..'),
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
     });
 
     let stdout = '';
@@ -59,14 +62,56 @@ function runPythonScript(scriptName, args = [], onData = null) {
     pythonProcess.stdout.on('data', (data) => {
       const text = data.toString();
       stdout += text;
-      if (onData) onData(text);
+      
+      // Send streaming output to renderer if enabled
+      if (streaming && mainWindow) {
+        // Parse and emit tool calls separately
+        const lines = text.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('[TOOL]')) {
+            mainWindow.webContents.send('tool-call', {
+              streamId,
+              tool: line.replace('[TOOL]', '').trim()
+            });
+          } else if (line.startsWith('[DEBUG]')) {
+            mainWindow.webContents.send('stream-output', {
+              streamId,
+              text: line,
+              type: 'debug'
+            });
+          } else if (line.trim()) {
+            mainWindow.webContents.send('stream-output', {
+              streamId,
+              text: line,
+              type: 'output'
+            });
+          }
+        }
+      }
     });
 
     pythonProcess.stderr.on('data', (data) => {
-      stderr += data.toString();
+      const text = data.toString();
+      stderr += text;
+      
+      // Stream stderr too (useful for verbose output)
+      if (streaming && mainWindow) {
+        mainWindow.webContents.send('stream-output', {
+          streamId,
+          text,
+          type: 'stderr'
+        });
+      }
     });
 
     pythonProcess.on('close', (code) => {
+      if (streaming && mainWindow) {
+        mainWindow.webContents.send('stream-complete', {
+          streamId,
+          success: code === 0
+        });
+      }
+      
       if (code === 0) {
         resolve(stdout);
       } else {
@@ -82,10 +127,17 @@ function runPythonScript(scriptName, args = [], onData = null) {
 
 // IPC Handlers
 
-// Select file dialog
+// Select file dialog (supports optional directory selection)
 ipcMain.handle('select-file', async (event, options) => {
+  const properties = ['openFile'];
+  
+  // Allow directory selection if requested
+  if (options.allowDirectory) {
+    properties.push('openDirectory');
+  }
+  
   const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
+    properties,
     filters: options.filters || [
       { name: 'All Supported', extensions: ['json', 'sc', 'L5X'] },
       { name: 'Ignition Backup', extensions: ['json'] },
@@ -103,43 +155,59 @@ ipcMain.handle('select-directory', async () => {
   return result.filePaths[0] || null;
 });
 
-// Ingest PLC files
+// Ingest PLC files (with streaming)
 ipcMain.handle('ingest-plc', async (event, filePath) => {
+  const streamId = `ingest-plc-${Date.now()}`;
   try {
-    const output = await runPythonScript('ontology_analyzer.py', [filePath, '-v']);
-    return { success: true, output };
+    const output = await runPythonScript('ontology_analyzer.py', [filePath, '-v'], {
+      streaming: true,
+      streamId
+    });
+    return { success: true, output, streamId };
   } catch (error) {
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, streamId };
   }
 });
 
-// Ingest Ignition files
+// Ingest Ignition files (with streaming)
 ipcMain.handle('ingest-ignition', async (event, filePath) => {
+  const streamId = `ingest-ignition-${Date.now()}`;
   try {
-    const output = await runPythonScript('ignition_ontology.py', [filePath, '-v']);
-    return { success: true, output };
+    const output = await runPythonScript('ignition_ontology.py', [filePath, '-v'], {
+      streaming: true,
+      streamId
+    });
+    return { success: true, output, streamId };
   } catch (error) {
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, streamId };
   }
 });
 
-// Run unified analysis
+// Run unified analysis (with streaming)
 ipcMain.handle('run-unified', async () => {
+  const streamId = `unified-${Date.now()}`;
   try {
-    const output = await runPythonScript('unified_ontology.py', ['--analyze', '-v']);
-    return { success: true, output };
+    const output = await runPythonScript('unified_ontology.py', ['--analyze', '-v'], {
+      streaming: true,
+      streamId
+    });
+    return { success: true, output, streamId };
   } catch (error) {
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, streamId };
   }
 });
 
-// Run troubleshooting enrichment
+// Run troubleshooting enrichment (with streaming)
 ipcMain.handle('run-enrichment', async () => {
+  const streamId = `enrichment-${Date.now()}`;
   try {
-    const output = await runPythonScript('troubleshooting_ontology.py', ['--enrich-all', '-v']);
-    return { success: true, output };
+    const output = await runPythonScript('troubleshooting_ontology.py', ['--enrich-all', '-v'], {
+      streaming: true,
+      streamId
+    });
+    return { success: true, output, streamId };
   } catch (error) {
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, streamId };
   }
 });
 
@@ -150,9 +218,9 @@ ipcMain.handle('clear-database', async () => {
     const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
     
     return new Promise((resolve, reject) => {
-      const proc = spawn('python', [scriptPath, 'clear'], {
+      const proc = spawn('python', ['-u', scriptPath, 'clear'], {
         cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
       });
       
       // Send 'yes' to confirm
@@ -198,8 +266,10 @@ ipcMain.handle('get-stats', async () => {
   }
 });
 
-// Troubleshooting query with conversation history
+// Troubleshooting query with conversation history (with streaming tool calls)
 ipcMain.handle('troubleshoot', async (event, question, history) => {
+  const streamId = `troubleshoot-${Date.now()}`;
+  
   try {
     const scriptPath = path.join(scriptsDir, 'troubleshoot.py');
     
@@ -210,9 +280,10 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
     });
     
     return new Promise((resolve, reject) => {
-      const proc = spawn('python', [scriptPath, '--history'], {
+      // Use -u for unbuffered output to enable real-time streaming
+      const proc = spawn('python', ['-u', scriptPath, '--history', '-v'], {
         cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
       });
       
       // Send JSON to stdin
@@ -222,33 +293,72 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
       let stdout = '';
       let stderr = '';
       
-      proc.stdout.on('data', (data) => { stdout += data.toString(); });
-      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      proc.stdout.on('data', (data) => { 
+        stdout += data.toString(); 
+      });
+      
+      proc.stderr.on('data', (data) => { 
+        const text = data.toString();
+        stderr += text;
+        
+        // Stream tool calls and debug info from stderr to frontend
+        if (mainWindow) {
+          const lines = text.split('\n');
+          for (const line of lines) {
+            if (line.startsWith('[TOOL]')) {
+              mainWindow.webContents.send('tool-call', {
+                streamId,
+                tool: line.replace('[TOOL]', '').trim()
+              });
+            } else if (line.startsWith('[DEBUG]')) {
+              mainWindow.webContents.send('stream-output', {
+                streamId,
+                text: line,
+                type: 'debug'
+              });
+            }
+          }
+        }
+      });
       
       proc.on('close', (code) => {
+        if (mainWindow) {
+          mainWindow.webContents.send('stream-complete', {
+            streamId,
+            success: code === 0
+          });
+        }
+        
         if (code === 0) {
           try {
             const result = JSON.parse(stdout);
             resolve({ 
               success: true, 
               response: result.response,
-              history: result.history 
+              history: result.history,
+              streamId
             });
           } catch (e) {
             // Fallback if JSON parsing fails
-            resolve({ success: true, response: stdout, history: [] });
+            resolve({ success: true, response: stdout, history: [], streamId });
           }
         } else {
-          resolve({ success: false, error: stderr || 'Query failed' });
+          // Filter out tool call lines from error message
+          const cleanError = stderr
+            .split('\n')
+            .filter(line => !line.startsWith('[TOOL]') && !line.startsWith('[DEBUG]'))
+            .join('\n')
+            .trim();
+          resolve({ success: false, error: cleanError || 'Query failed', streamId });
         }
       });
       
       proc.on('error', (err) => {
-        resolve({ success: false, error: err.message });
+        resolve({ success: false, error: err.message, streamId });
       });
     });
   } catch (error) {
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, streamId };
   }
 });
 

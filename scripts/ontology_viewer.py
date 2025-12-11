@@ -43,20 +43,32 @@ class OntologyViewer:
     """Generate interactive HTML visualization from Neo4j ontology."""
 
     COLORS = {
-        'plc': '#1976D2',
-        'scada': '#388E3C',
-        'aoi': '#F57C00',
-        'udt': '#7B1FA2',
-        'equipment': '#FBC02D',
-        'view': '#00ACC1',
-        'flow': '#C2185B',
-        'safety': '#D32F2F',
-        'integration': '#3F51B5',
-        'overview': '#607D8B',
-        'endtoendflow': '#E91E63',
-        'tag': '#009688',
-        'faultsymptom': '#FF5722',
-        'controlpattern': '#795548',
+        # Groups
+        "plc": "#1976D2",
+        "scada": "#388E3C",
+        "flows": "#C2185B",
+        "troubleshooting": "#FF5722",
+        "patterns": "#795548",
+        "overview": "#607D8B",
+        "other": "#9E9E9E",
+        # Node types
+        "aoi": "#F57C00",
+        "aoiinstance": "#F57C00",
+        "tag": "#009688",
+        "udt": "#7B1FA2",
+        "udttype": "#7B1FA2",
+        "equipment": "#FBC02D",
+        "view": "#00ACC1",
+        "perspectiveview": "#00ACC1",
+        "project": "#3F51B5",
+        "endtoendflow": "#E91E63",
+        "dataflow": "#E91E63",
+        "faultsymptom": "#FF5722",
+        "operatorphrase": "#FF7043",
+        "commonphrase": "#FFAB91",
+        "controlpattern": "#795548",
+        "safetyelement": "#D32F2F",
+        "systemoverview": "#607D8B",
     }
 
     def __init__(self, graph: Optional[OntologyGraph] = None):
@@ -84,111 +96,155 @@ class OntologyViewer:
         return f"{prefix}_{self.node_counter}"
 
     def load_from_neo4j(self, include_details: bool = True) -> None:
-        """Load graph data from Neo4j."""
+        """Load graph data from Neo4j - grabs ALL nodes and relationships."""
         graph = self._get_graph()
-        
+
         with graph.session() as session:
-            # Get all main nodes
-            nodes_result = session.run("""
+            # Get ALL nodes from the database
+            nodes_result = session.run(
+                """
                 MATCH (n)
-                WHERE n:AOI OR n:UDT OR n:Equipment OR n:View OR n:EndToEndFlow OR n:SystemOverview
-                RETURN elementId(n) as id, labels(n)[0] as type, 
-                       coalesce(n.name, n.key, 'unknown') as label,
+                RETURN elementId(n) as id, 
+                       labels(n)[0] as type, 
+                       coalesce(n.name, n.symptom, n.phrase, n.key, n.pattern_name, 'unknown') as label,
                        properties(n) as props
-            """)
-            
+            """
+            )
+
             for record in nodes_result:
-                node_type = record['type'].lower()
-                group = 'plc' if node_type == 'aoi' else 'scada' if node_type in ('udt', 'equipment', 'view') else 'flows'
-                
-                self.nodes.append(Node(
-                    id=str(record['id']),
-                    label=record['label'],
-                    type=node_type,
-                    group=group,
-                    details=dict(record['props']) if include_details else {},
-                ))
-            
-            # Get relationships between main nodes
-            edges_result = session.run("""
+                node_type = record["type"].lower() if record["type"] else "unknown"
+
+                # Determine group based on node type
+                if node_type in ("aoi", "aoiinstance", "tag"):
+                    group = "plc"
+                elif node_type in (
+                    "udt",
+                    "udtype",
+                    "equipment",
+                    "view",
+                    "perspectiveview",
+                    "project",
+                ):
+                    group = "scada"
+                elif node_type in ("faultsymptom", "operatorphrase", "commonphrase"):
+                    group = "troubleshooting"
+                elif node_type in ("controlpattern", "safetyelement"):
+                    group = "patterns"
+                elif node_type in ("endtoendflow", "dataflow"):
+                    group = "flows"
+                elif node_type in ("systemoverview",):
+                    group = "overview"
+                else:
+                    group = "other"
+
+                self.nodes.append(
+                    Node(
+                        id=str(record["id"]),
+                        label=record["label"],
+                        type=node_type,
+                        group=group,
+                        details=dict(record["props"]) if include_details else {},
+                    )
+                )
+
+            # Get ALL relationships
+            edges_result = session.run(
+                """
                 MATCH (a)-[r]->(b)
-                WHERE (a:AOI OR a:UDT OR a:Equipment OR a:View OR a:EndToEndFlow)
-                  AND (b:AOI OR b:UDT OR b:Equipment OR b:View OR b:EndToEndFlow)
                 RETURN elementId(a) as source, elementId(b) as target, type(r) as type,
                        properties(r) as props
-            """)
-            
+            """
+            )
+
             for record in edges_result:
-                self.edges.append(Edge(
-                    source=str(record['source']),
-                    target=str(record['target']),
-                    label=record['props'].get('mapping_type', record['type']),
-                    type=record['type'],
-                ))
-        
-        # If we want more detail, load tags, patterns, etc.
-        if include_details:
-            self._load_extended_data()
+                self.edges.append(
+                    Edge(
+                        source=str(record["source"]),
+                        target=str(record["target"]),
+                        label=(
+                            record["props"].get("mapping_type", record["type"])
+                            if record["props"]
+                            else record["type"]
+                        ),
+                        type=record["type"],
+                    )
+                )
 
     def _load_extended_data(self) -> None:
         """Load extended data like tags, patterns, etc."""
         graph = self._get_graph()
-        
+
         with graph.session() as session:
             # Load fault symptoms for troubleshooting view
-            symptoms_result = session.run("""
+            symptoms_result = session.run(
+                """
                 MATCH (a:AOI)-[:HAS_SYMPTOM]->(s:FaultSymptom)
                 RETURN elementId(a) as aoi_id, elementId(s) as symptom_id, s.symptom as symptom,
                        s.resolution_steps as steps
-            """)
-            
+            """
+            )
+
             for record in symptoms_result:
-                self.nodes.append(Node(
-                    id=str(record['symptom_id']),
-                    label=record['symptom'][:40] + '...' if len(record['symptom']) > 40 else record['symptom'],
-                    type='faultsymptom',
-                    group='troubleshooting',
-                    details={
-                        'symptom': record['symptom'],
-                        'resolution_steps': record['steps'],
-                    },
-                ))
-                self.edges.append(Edge(
-                    source=str(record['aoi_id']),
-                    target=str(record['symptom_id']),
-                    label='HAS_SYMPTOM',
-                    type='troubleshooting',
-                ))
-            
+                self.nodes.append(
+                    Node(
+                        id=str(record["symptom_id"]),
+                        label=(
+                            record["symptom"][:40] + "..."
+                            if len(record["symptom"]) > 40
+                            else record["symptom"]
+                        ),
+                        type="faultsymptom",
+                        group="troubleshooting",
+                        details={
+                            "symptom": record["symptom"],
+                            "resolution_steps": record["steps"],
+                        },
+                    )
+                )
+                self.edges.append(
+                    Edge(
+                        source=str(record["aoi_id"]),
+                        target=str(record["symptom_id"]),
+                        label="HAS_SYMPTOM",
+                        type="troubleshooting",
+                    )
+                )
+
             # Load control patterns
-            patterns_result = session.run("""
+            patterns_result = session.run(
+                """
                 MATCH (a:AOI)-[:HAS_PATTERN]->(p:ControlPattern)
                 RETURN elementId(a) as aoi_id, elementId(p) as pattern_id, 
                        p.name as name, p.description as description
-            """)
-            
+            """
+            )
+
             for record in patterns_result:
-                self.nodes.append(Node(
-                    id=str(record['pattern_id']),
-                    label=record['name'],
-                    type='controlpattern',
-                    group='patterns',
-                    details={'description': record['description']},
-                ))
-                self.edges.append(Edge(
-                    source=str(record['aoi_id']),
-                    target=str(record['pattern_id']),
-                    label='HAS_PATTERN',
-                    type='pattern',
-                ))
+                self.nodes.append(
+                    Node(
+                        id=str(record["pattern_id"]),
+                        label=record["name"],
+                        type="controlpattern",
+                        group="patterns",
+                        details={"description": record["description"]},
+                    )
+                )
+                self.edges.append(
+                    Edge(
+                        source=str(record["aoi_id"]),
+                        target=str(record["pattern_id"]),
+                        label="HAS_PATTERN",
+                        type="pattern",
+                    )
+                )
 
     def detect_type(self, data: Any) -> OntologyType:
         """Legacy method for JSON compatibility."""
         if isinstance(data, list):
             return OntologyType.L5X
-        if data.get('type') == 'unified_system_ontology':
+        if data.get("type") == "unified_system_ontology":
             return OntologyType.UNIFIED
-        if data.get('source') == 'ignition':
+        if data.get("source") == "ignition":
             return OntologyType.IGNITION
         return OntologyType.L5X
 
@@ -208,133 +264,141 @@ class OntologyViewer:
         aois = data if isinstance(data, list) else [data]
 
         for aoi in aois:
-            name = aoi.get('name', 'Unknown')
-            analysis = aoi.get('analysis', {})
+            name = aoi.get("name", "Unknown")
+            analysis = aoi.get("analysis", {})
 
             node = Node(
-                id=self._node_id('aoi'),
+                id=self._node_id("aoi"),
                 label=name,
-                type='aoi',
-                group='plc',
+                type="aoi",
+                group="plc",
                 details={
-                    'purpose': analysis.get('purpose', ''),
-                    'tags': analysis.get('tags', {}),
-                    'relationships': analysis.get('relationships', []),
-                    'category': analysis.get('category', ''),
-                }
+                    "purpose": analysis.get("purpose", ""),
+                    "tags": analysis.get("tags", {}),
+                    "relationships": analysis.get("relationships", []),
+                    "category": analysis.get("category", ""),
+                },
             )
             self.nodes.append(node)
 
     def _parse_ignition(self, data: Dict) -> None:
         """Parse Ignition ontology from JSON."""
-        analysis = data.get('analysis', {})
+        analysis = data.get("analysis", {})
 
         # UDTs
-        for udt_name, udt_purpose in analysis.get('udt_semantics', {}).items():
+        for udt_name, udt_purpose in analysis.get("udt_semantics", {}).items():
             node = Node(
-                id=self._node_id('udt'),
+                id=self._node_id("udt"),
                 label=udt_name,
-                type='udt',
-                group='scada',
-                details={'purpose': udt_purpose}
+                type="udt",
+                group="scada",
+                details={"purpose": udt_purpose},
             )
             self.nodes.append(node)
 
         # Equipment instances
-        for equip in analysis.get('equipment_instances', []):
+        for equip in analysis.get("equipment_instances", []):
             node = Node(
-                id=self._node_id('equip'),
-                label=equip.get('name', 'Unknown'),
-                type='equipment',
-                group='scada',
+                id=self._node_id("equip"),
+                label=equip.get("name", "Unknown"),
+                type="equipment",
+                group="scada",
                 details={
-                    'type': equip.get('type', ''),
-                    'purpose': equip.get('purpose', ''),
-                }
+                    "type": equip.get("type", ""),
+                    "purpose": equip.get("purpose", ""),
+                },
             )
             self.nodes.append(node)
 
         # Views
-        for view_name, view_purpose in analysis.get('view_purposes', {}).items():
+        for view_name, view_purpose in analysis.get("view_purposes", {}).items():
             node = Node(
-                id=self._node_id('view'),
+                id=self._node_id("view"),
                 label=view_name,
-                type='view',
-                group='scada',
-                details={'purpose': view_purpose}
+                type="view",
+                group="scada",
+                details={"purpose": view_purpose},
             )
             self.nodes.append(node)
 
     def _parse_unified(self, data: Dict) -> None:
         """Parse unified ontology from JSON."""
-        ua = data.get('unified_analysis', {})
+        ua = data.get("unified_analysis", {})
 
         # System overview
-        self.nodes.append(Node(
-            id='overview',
-            label='System Overview',
-            type='overview',
-            group='overview',
-            details={'description': ua.get('system_overview', '')}
-        ))
+        self.nodes.append(
+            Node(
+                id="overview",
+                label="System Overview",
+                type="overview",
+                group="overview",
+                details={"description": ua.get("system_overview", "")},
+            )
+        )
 
         # PLC components
-        plc_ontology = data.get('component_ontologies', {}).get('plc', [])
+        plc_ontology = data.get("component_ontologies", {}).get("plc", [])
         plc_node_map = {}
         if isinstance(plc_ontology, list):
             for aoi in plc_ontology:
-                name = aoi.get('name', 'Unknown')
-                analysis = aoi.get('analysis', {})
-                node_id = self._node_id('plc')
+                name = aoi.get("name", "Unknown")
+                analysis = aoi.get("analysis", {})
+                node_id = self._node_id("plc")
                 plc_node_map[name] = node_id
 
-                self.nodes.append(Node(
-                    id=node_id,
-                    label=name,
-                    type='aoi',
-                    group='plc',
-                    details={
-                        'purpose': analysis.get('purpose', ''),
-                        'tags': analysis.get('tags', {}),
-                        'relationships': analysis.get('relationships', []),
-                    }
-                ))
+                self.nodes.append(
+                    Node(
+                        id=node_id,
+                        label=name,
+                        type="aoi",
+                        group="plc",
+                        details={
+                            "purpose": analysis.get("purpose", ""),
+                            "tags": analysis.get("tags", {}),
+                            "relationships": analysis.get("relationships", []),
+                        },
+                    )
+                )
 
         # SCADA components
-        scada_ontology = data.get('component_ontologies', {}).get('scada', {})
-        scada_analysis = scada_ontology.get('analysis', {})
+        scada_ontology = data.get("component_ontologies", {}).get("scada", {})
+        scada_analysis = scada_ontology.get("analysis", {})
         scada_node_map = {}
 
-        for udt_name, udt_purpose in scada_analysis.get('udt_semantics', {}).items():
-            node_id = self._node_id('scada')
+        for udt_name, udt_purpose in scada_analysis.get("udt_semantics", {}).items():
+            node_id = self._node_id("scada")
             scada_node_map[udt_name] = node_id
-            self.nodes.append(Node(
-                id=node_id,
-                label=udt_name,
-                type='udt',
-                group='scada',
-                details={'purpose': udt_purpose}
-            ))
+            self.nodes.append(
+                Node(
+                    id=node_id,
+                    label=udt_name,
+                    type="udt",
+                    group="scada",
+                    details={"purpose": udt_purpose},
+                )
+            )
 
-        for equip in scada_analysis.get('equipment_instances', []):
-            name = equip.get('name', '')
-            node_id = self._node_id('equip')
+        for equip in scada_analysis.get("equipment_instances", []):
+            name = equip.get("name", "")
+            node_id = self._node_id("equip")
             scada_node_map[name] = node_id
-            self.nodes.append(Node(
-                id=node_id,
-                label=name,
-                type='equipment',
-                group='scada',
-                details={
-                    'type': equip.get('type', ''),
-                    'purpose': equip.get('purpose', ''),
-                }
-            ))
+            self.nodes.append(
+                Node(
+                    id=node_id,
+                    label=name,
+                    type="equipment",
+                    group="scada",
+                    details={
+                        "type": equip.get("type", ""),
+                        "purpose": equip.get("purpose", ""),
+                    },
+                )
+            )
 
         # PLC-to-SCADA mappings
-        for mapping in ua.get('plc_to_scada_mappings', []):
-            plc_comp = mapping.get('plc_component', '')
-            scada_comp = mapping.get('scada_component', '')
+        for mapping in ua.get("plc_to_scada_mappings", []):
+            plc_comp = mapping.get("plc_component", "")
+            scada_comp = mapping.get("scada_component", "")
 
             # Find matching nodes
             plc_node = None
@@ -351,85 +415,109 @@ class OntologyViewer:
                     break
 
             if plc_node and scada_node:
-                self.edges.append(Edge(
-                    source=plc_node,
-                    target=scada_node,
-                    label=mapping.get('mapping_type', ''),
-                    type='mapping'
-                ))
+                self.edges.append(
+                    Edge(
+                        source=plc_node,
+                        target=scada_node,
+                        label=mapping.get("mapping_type", ""),
+                        type="mapping",
+                    )
+                )
 
         # End-to-end flows
-        for i, flow in enumerate(ua.get('end_to_end_flows', [])):
-            flow_name = flow.get('flow_name', flow.get('name', f'Flow_{i}'))
-            self.nodes.append(Node(
-                id=self._node_id('flow'),
-                label=flow_name,
-                type='flow',
-                group='flows',
-                details=flow
-            ))
+        for i, flow in enumerate(ua.get("end_to_end_flows", [])):
+            flow_name = flow.get("flow_name", flow.get("name", f"Flow_{i}"))
+            self.nodes.append(
+                Node(
+                    id=self._node_id("flow"),
+                    label=flow_name,
+                    type="flow",
+                    group="flows",
+                    details=flow,
+                )
+            )
 
         # Safety architecture
-        safety = ua.get('safety_architecture', {})
+        safety = ua.get("safety_architecture", {})
         for layer_name, layer_details in safety.items():
-            self.nodes.append(Node(
-                id=self._node_id('safety'),
-                label=layer_name.replace('_', ' ').title(),
-                type='safety',
-                group='safety',
-                details=layer_details if isinstance(layer_details, dict) else {'description': str(layer_details)}
-            ))
+            self.nodes.append(
+                Node(
+                    id=self._node_id("safety"),
+                    label=layer_name.replace("_", " ").title(),
+                    type="safety",
+                    group="safety",
+                    details=(
+                        layer_details
+                        if isinstance(layer_details, dict)
+                        else {"description": str(layer_details)}
+                    ),
+                )
+            )
 
         # Control responsibilities
-        ctrl = ua.get('control_responsibilities', {})
+        ctrl = ua.get("control_responsibilities", {})
         for layer, funcs in ctrl.items():
-            self.nodes.append(Node(
-                id=self._node_id('ctrl'),
-                label=layer.replace('_', ' ').title(),
-                type='responsibility',
-                group='responsibilities',
-                details=funcs if isinstance(funcs, dict) else {'functions': funcs}
-            ))
+            self.nodes.append(
+                Node(
+                    id=self._node_id("ctrl"),
+                    label=layer.replace("_", " ").title(),
+                    type="responsibility",
+                    group="responsibilities",
+                    details=funcs if isinstance(funcs, dict) else {"functions": funcs},
+                )
+            )
 
         # Recommendations
-        for i, rec in enumerate(ua.get('recommendations', [])):
+        for i, rec in enumerate(ua.get("recommendations", [])):
             if isinstance(rec, dict):
-                label = rec.get('category', rec.get('title', f'Recommendation {i+1}'))
+                label = rec.get("category", rec.get("title", f"Recommendation {i+1}"))
                 details = rec
             else:
-                label = f'Recommendation {i+1}'
-                details = {'text': str(rec)}
+                label = f"Recommendation {i+1}"
+                details = {"text": str(rec)}
 
-            self.nodes.append(Node(
-                id=self._node_id('rec'),
-                label=label,
-                type='recommendation',
-                group='recommendations',
-                details=details
-            ))
+            self.nodes.append(
+                Node(
+                    id=self._node_id("rec"),
+                    label=label,
+                    type="recommendation",
+                    group="recommendations",
+                    details=details,
+                )
+            )
 
     def generate_html(self, title: str = "Ontology Viewer") -> str:
         """Generate interactive HTML visualization."""
 
         # Convert nodes and edges to JSON
-        nodes_json = json.dumps([{
-            'id': n.id,
-            'label': n.label,
-            'type': n.type,
-            'group': n.group,
-            'details': n.details,
-        } for n in self.nodes])
+        nodes_json = json.dumps(
+            [
+                {
+                    "id": n.id,
+                    "label": n.label,
+                    "type": n.type,
+                    "group": n.group,
+                    "details": n.details,
+                }
+                for n in self.nodes
+            ]
+        )
 
-        edges_json = json.dumps([{
-            'source': e.source,
-            'target': e.target,
-            'label': e.label,
-            'type': e.type,
-        } for e in self.edges])
+        edges_json = json.dumps(
+            [
+                {
+                    "source": e.source,
+                    "target": e.target,
+                    "label": e.label,
+                    "type": e.type,
+                }
+                for e in self.edges
+            ]
+        )
 
         colors_json = json.dumps(self.COLORS)
 
-        html = f'''<!DOCTYPE html>
+        html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -643,8 +731,9 @@ class OntologyViewer:
                     <option value="scada">SCADA Layer</option>
                     <option value="flows">Data Flows</option>
                     <option value="troubleshooting">Troubleshooting</option>
-                    <option value="patterns">Patterns</option>
-                    <option value="safety">Safety</option>
+                    <option value="patterns">Patterns & Safety</option>
+                    <option value="overview">Overview</option>
+                    <option value="other">Other</option>
                 </select>
                 <button id="reset-zoom">Reset Zoom</button>
                 <button id="expand-all">Expand All</button>
@@ -910,14 +999,14 @@ class OntologyViewer:
         }});
     </script>
 </body>
-</html>'''
+</html>"""
         return html
 
     def save(self, output_path: str, title: str = "Ontology Viewer") -> None:
         """Save HTML visualization to file."""
         html = self.generate_html(title)
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w', encoding='utf-8') as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             f.write(html)
 
 
@@ -925,18 +1014,24 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate interactive HTML visualization from Neo4j ontology"
     )
-    parser.add_argument('--output', '-o', default='ontologies/neo4j_viewer.html',
-                       help='Output HTML file path')
-    parser.add_argument('--title', '-t', default='PLC/SCADA Ontology Viewer',
-                       help='Page title')
-    parser.add_argument('--verbose', '-v', action='store_true',
-                       help='Verbose output')
-    parser.add_argument('--no-details', action='store_true',
-                       help='Exclude extended details (faster)')
-    
+    parser.add_argument(
+        "--output",
+        "-o",
+        default="ontologies/neo4j_viewer.html",
+        help="Output HTML file path",
+    )
+    parser.add_argument(
+        "--title", "-t", default="PLC/SCADA Ontology Viewer", help="Page title"
+    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    parser.add_argument(
+        "--no-details", action="store_true", help="Exclude extended details (faster)"
+    )
+
     # Legacy JSON support
-    parser.add_argument('--json', metavar='FILE',
-                       help='Load from JSON file instead of Neo4j (legacy)')
+    parser.add_argument(
+        "--json", metavar="FILE", help="Load from JSON file instead of Neo4j (legacy)"
+    )
 
     args = parser.parse_args()
 
@@ -945,23 +1040,27 @@ def main():
     try:
         if args.json:
             # Legacy JSON mode
-            with open(args.json, 'r', encoding='utf-8') as f:
+            with open(args.json, "r", encoding="utf-8") as f:
                 data = json.load(f)
             viewer.parse(data)
             if args.verbose:
-                print(f"[INFO] Loaded from JSON: {len(viewer.nodes)} nodes, {len(viewer.edges)} edges")
+                print(
+                    f"[INFO] Loaded from JSON: {len(viewer.nodes)} nodes, {len(viewer.edges)} edges"
+                )
         else:
             # Neo4j mode
             if args.verbose:
                 print("[INFO] Loading from Neo4j...")
             viewer.load_from_neo4j(include_details=not args.no_details)
             if args.verbose:
-                print(f"[INFO] Loaded from Neo4j: {len(viewer.nodes)} nodes, {len(viewer.edges)} edges")
+                print(
+                    f"[INFO] Loaded from Neo4j: {len(viewer.nodes)} nodes, {len(viewer.edges)} edges"
+                )
 
         viewer.save(args.output, args.title)
         print(f"[OK] Generated interactive viewer: {args.output}")
         print(f"[INFO] Open in browser to view")
-    
+
     finally:
         viewer.close()
 
