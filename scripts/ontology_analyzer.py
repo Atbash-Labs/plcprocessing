@@ -58,17 +58,28 @@ class OntologyAnalyzer:
             self._client.close()
             self._client = None
 
-    def analyze_sc_file(self, sc_file: SCFile, verbose: bool = False) -> Dict[str, Any]:
-        """Analyze a parsed SC file and store ontology in Neo4j."""
+    def analyze_sc_file(
+        self, sc_file: SCFile, verbose: bool = False, skip_ai: bool = False
+    ) -> Dict[str, Any]:
+        """Analyze a parsed SC file and store ontology in Neo4j.
+        
+        Args:
+            sc_file: Parsed SC file
+            verbose: Print detailed progress
+            skip_ai: If True, skip AI analysis and just create the AOI node with pending status
+        """
 
         if verbose:
-            print(f"[INFO] Analyzing {sc_file.name}...")
+            print(f"[INFO] {'Creating' if skip_ai else 'Analyzing'} {sc_file.name}...")
 
-        # Build context for LLM
-        context = self._build_analysis_context(sc_file)
-
-        # Generate analysis using Claude with tool support
-        analysis = self._query_llm(context, sc_file.name, verbose)
+        if skip_ai:
+            # Just create the node without AI analysis
+            analysis = {}
+        else:
+            # Build context for LLM
+            context = self._build_analysis_context(sc_file)
+            # Generate analysis using Claude with tool support
+            analysis = self._query_llm(context, sc_file.name, verbose)
 
         # Structure the response
         ontology = {
@@ -83,17 +94,18 @@ class OntologyAnalyzer:
             "analysis": analysis,
         }
 
-        # Store in Neo4j
+        # Store in Neo4j (with semantic_status='pending' if skip_ai)
         self.graph.create_aoi(
             name=ontology["name"],
             aoi_type=ontology["type"],
             source_file=ontology["source_file"],
             metadata=ontology["metadata"],
             analysis=ontology["analysis"],
+            semantic_status="pending" if skip_ai else "complete",
         )
 
         if verbose:
-            print(f"[OK] Stored {sc_file.name} in Neo4j")
+            print(f"[OK] {'Created' if skip_ai else 'Stored'} {sc_file.name} in Neo4j")
 
         return ontology
 
@@ -245,9 +257,16 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
             }
 
     def analyze_directory(
-        self, directory: str, pattern: str = "*.aoi.sc", verbose: bool = False
+        self, directory: str, pattern: str = "*.aoi.sc", verbose: bool = False, skip_ai: bool = False
     ) -> List[Dict[str, Any]]:
-        """Analyze all SC files in a directory and store in Neo4j."""
+        """Analyze all SC files in a directory and store in Neo4j.
+        
+        Args:
+            directory: Directory path
+            pattern: File pattern to match
+            verbose: Print detailed progress
+            skip_ai: If True, skip AI analysis (for incremental mode)
+        """
 
         dir_path = Path(directory)
         sc_files = list(dir_path.rglob(pattern))
@@ -256,7 +275,8 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
             print(f"[WARNING] No files matching '{pattern}' found in {directory}")
             return []
 
-        print(f"[INFO] Found {len(sc_files)} files to analyze")
+        action = "import" if skip_ai else "analyze"
+        print(f"[INFO] Found {len(sc_files)} files to {action}")
 
         parser = SCParser()
         ontologies = []
@@ -269,7 +289,7 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
                 sc_file = parser.parse_file(str(sc_path))
 
                 # Analyze with LLM and store in Neo4j
-                ontology = self.analyze_sc_file(sc_file, verbose)
+                ontology = self.analyze_sc_file(sc_file, verbose, skip_ai=skip_ai)
                 ontologies.append(ontology)
 
                 print(f"[OK] Completed {sc_path.name}")
@@ -322,6 +342,16 @@ def main():
         action="store_true",
         help="Disable Neo4j tool calls (analyze without context)",
     )
+    parser.add_argument(
+        "--skip-ai",
+        action="store_true",
+        help="Skip AI analysis, only create AOI nodes with pending status (for incremental mode)",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show semantic analysis status for AOIs",
+    )
 
     args = parser.parse_args()
 
@@ -335,7 +365,27 @@ def main():
         sys.exit(1)
 
     try:
-        if args.list:
+        if args.status:
+            # Show semantic analysis status
+            status = analyzer.graph.get_semantic_status_counts()
+            print("\n=== Semantic Analysis Status (AOIs) ===\n")
+            aoi_counts = status.get("AOI", {})
+            pending = aoi_counts.get("pending", 0) + aoi_counts.get(None, 0)
+            complete = aoi_counts.get("complete", 0)
+            in_progress = aoi_counts.get("in_progress", 0)
+            total = pending + complete + in_progress
+            if total > 0:
+                pct = (complete / total * 100) if total > 0 else 0
+                print(f"  AOI:  {complete}/{total} complete ({pct:.0f}%)")
+                if pending > 0:
+                    print(f"        {pending} pending")
+                if in_progress > 0:
+                    print(f"        {in_progress} in progress")
+            else:
+                print("  No AOIs found. Import PLC files first.")
+            print()
+        
+        elif args.list:
             # List all AOIs
             aois = analyzer.get_all_ontologies()
             print(f"\n[INFO] Found {len(aois)} AOIs in Neo4j:\n")
@@ -365,20 +415,25 @@ def main():
             # Process directory or single file
             if input_path.is_dir():
                 ontologies = analyzer.analyze_directory(
-                    str(input_path), pattern=args.pattern, verbose=args.verbose
+                    str(input_path), pattern=args.pattern, verbose=args.verbose, skip_ai=args.skip_ai
                 )
-                print(f"\n[OK] Analyzed {len(ontologies)} files and stored in Neo4j")
+                action = "Imported" if args.skip_ai else "Analyzed"
+                print(f"\n[OK] {action} {len(ontologies)} files and stored in Neo4j")
+                if args.skip_ai:
+                    print("[INFO] Use incremental analyzer to add semantic descriptions")
 
             elif input_path.is_file():
                 # Parse and analyze single file
                 sc_parser = SCParser()
                 sc_file = sc_parser.parse_file(str(input_path))
-                ontology = analyzer.analyze_sc_file(sc_file, verbose=args.verbose)
+                ontology = analyzer.analyze_sc_file(sc_file, verbose=args.verbose, skip_ai=args.skip_ai)
 
                 # Print summary
                 print(f"\n=== Ontology: {ontology['name']} ===")
-                print(f"Purpose: {ontology['analysis'].get('purpose', 'N/A')}")
-                print(f"\n[OK] Stored in Neo4j")
+                if not args.skip_ai:
+                    print(f"Purpose: {ontology['analysis'].get('purpose', 'N/A')}")
+                action = "Created" if args.skip_ai else "Stored"
+                print(f"\n[OK] {action} in Neo4j")
 
             else:
                 print(f"[ERROR] Input path not found: {args.input}")

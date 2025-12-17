@@ -7,15 +7,27 @@ contextBridge.exposeInMainWorld('api', {
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
   
   // Ingestion (with streaming support)
+  // skipAI: if true, only create entities without AI analysis (for incremental mode)
   ingestPLC: (filePath) => ipcRenderer.invoke('ingest-plc', filePath),
-  ingestIgnition: (filePath) => ipcRenderer.invoke('ingest-ignition', filePath),
+  ingestIgnition: (filePath, skipAI = false) => ipcRenderer.invoke('ingest-ignition', filePath, skipAI),
   
   // Analysis
   runUnified: () => ipcRenderer.invoke('run-unified'),
-  runEnrichment: () => ipcRenderer.invoke('run-enrichment'),
+  runEnrichment: (options) => ipcRenderer.invoke('run-enrichment', options),
+  runEnrichmentViews: (options) => ipcRenderer.invoke('run-enrichment-views', options),
+  getEnrichmentStatus: () => ipcRenderer.invoke('get-enrichment-status'),
+  
+  // Incremental Semantic Analysis
+  getSemanticStatus: () => ipcRenderer.invoke('get-semantic-status'),
+  runIncrementalAnalysis: (options) => ipcRenderer.invoke('run-incremental-analysis', options),
+  resetSemanticStatus: (itemType) => ipcRenderer.invoke('reset-semantic-status', itemType),
+  recoverStuck: () => ipcRenderer.invoke('recover-stuck'),
   
   // Database
   clearDatabase: () => ipcRenderer.invoke('clear-database'),
+  clearIgnition: () => ipcRenderer.invoke('clear-ignition'),
+  clearPLC: () => ipcRenderer.invoke('clear-plc'),
+  clearUnification: () => ipcRenderer.invoke('clear-unification'),
   initDatabase: () => ipcRenderer.invoke('init-database'),
   getStats: () => ipcRenderer.invoke('get-stats'),
   
@@ -24,6 +36,11 @@ contextBridge.exposeInMainWorld('api', {
   
   // Visualization
   generateViz: () => ipcRenderer.invoke('generate-viz'),
+  
+  // Diff Processing
+  selectDiffFile: () => ipcRenderer.invoke('select-diff-file'),
+  previewDiff: (diffPath, backupPath) => ipcRenderer.invoke('preview-diff', diffPath, backupPath),
+  applyDiff: (diffPath, backupPath) => ipcRenderer.invoke('apply-diff', diffPath, backupPath),
   
   // Streaming output listeners
   onStreamOutput: (callback) => {

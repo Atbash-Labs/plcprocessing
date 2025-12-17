@@ -5,6 +5,7 @@ Replaces JSON file storage with a proper graph database.
 """
 
 import os
+import json
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from contextlib import contextmanager
@@ -119,6 +120,19 @@ class OntologyGraph:
                 "CREATE INDEX tag_aoi IF NOT EXISTS FOR (t:Tag) ON (t.aoi_name)",
                 "CREATE INDEX symptom_text IF NOT EXISTS FOR (s:FaultSymptom) ON (s.symptom)",
                 "CREATE INDEX phrase_text IF NOT EXISTS FOR (p:OperatorPhrase) ON (p.phrase)",
+                # Semantic status indexes for incremental analysis
+                "CREATE INDEX aoi_semantic_status IF NOT EXISTS FOR (a:AOI) ON (a.semantic_status)",
+                "CREATE INDEX udt_semantic_status IF NOT EXISTS FOR (u:UDT) ON (u.semantic_status)",
+                "CREATE INDEX view_semantic_status IF NOT EXISTS FOR (v:View) ON (v.semantic_status)",
+                "CREATE INDEX equipment_semantic_status IF NOT EXISTS FOR (e:Equipment) ON (e.semantic_status)",
+                "CREATE INDEX viewcomponent_semantic_status IF NOT EXISTS FOR (c:ViewComponent) ON (c.semantic_status)",
+                "CREATE INDEX scadatag_semantic_status IF NOT EXISTS FOR (t:ScadaTag) ON (t.semantic_status)",
+                # Soft delete indexes
+                "CREATE INDEX aoi_deleted IF NOT EXISTS FOR (a:AOI) ON (a.deleted)",
+                "CREATE INDEX udt_deleted IF NOT EXISTS FOR (u:UDT) ON (u.deleted)",
+                "CREATE INDEX view_deleted IF NOT EXISTS FOR (v:View) ON (v.deleted)",
+                "CREATE INDEX equipment_deleted IF NOT EXISTS FOR (e:Equipment) ON (e.deleted)",
+                "CREATE INDEX viewcomponent_deleted IF NOT EXISTS FOR (c:ViewComponent) ON (c.deleted)",
             ]
 
             for constraint in constraints:
@@ -140,6 +154,166 @@ class OntologyGraph:
         with self.session() as session:
             session.run("MATCH (n) DETACH DELETE n")
 
+    def clear_ignition(self) -> Dict[str, int]:
+        """Clear all Ignition/SCADA-related nodes and cross-system mappings.
+        
+        Deletes: UDT, Equipment, View, ViewComponent nodes and any MAPS_TO_SCADA relationships.
+        
+        Returns:
+            Dict with counts of deleted nodes by type
+        """
+        with self.session() as session:
+            counts = {}
+            
+            # Delete MAPS_TO_SCADA relationships first (cross-system links)
+            result = session.run(
+                "MATCH ()-[r:MAPS_TO_SCADA]->() DELETE r RETURN count(r) as count"
+            )
+            counts["MAPS_TO_SCADA_relationships"] = result.single()["count"]
+            
+            # Delete ViewComponents and their relationships
+            result = session.run(
+                "MATCH (c:ViewComponent) DETACH DELETE c RETURN count(c) as count"
+            )
+            counts["ViewComponent"] = result.single()["count"]
+            
+            # Delete Views and their relationships
+            result = session.run(
+                "MATCH (v:View) DETACH DELETE v RETURN count(v) as count"
+            )
+            counts["View"] = result.single()["count"]
+            
+            # Delete Equipment and their relationships
+            result = session.run(
+                "MATCH (e:Equipment) DETACH DELETE e RETURN count(e) as count"
+            )
+            counts["Equipment"] = result.single()["count"]
+            
+            # Delete UDTs and their member tags
+            result = session.run(
+                """
+                MATCH (u:UDT)
+                OPTIONAL MATCH (u)-[:HAS_MEMBER]->(t:Tag)
+                DETACH DELETE u, t
+                RETURN count(DISTINCT u) as count
+                """
+            )
+            counts["UDT"] = result.single()["count"]
+            
+            # Delete ScadaTags (standalone SCADA tags)
+            result = session.run(
+                "MATCH (t:ScadaTag) DETACH DELETE t RETURN count(t) as count"
+            )
+            counts["ScadaTag"] = result.single()["count"]
+            
+            # Delete EndToEndFlow nodes (cross-system)
+            result = session.run(
+                "MATCH (f:EndToEndFlow) DETACH DELETE f RETURN count(f) as count"
+            )
+            counts["EndToEndFlow"] = result.single()["count"]
+            
+            # Delete SystemOverview (cross-system)
+            result = session.run(
+                "MATCH (s:SystemOverview) DETACH DELETE s RETURN count(s) as count"
+            )
+            counts["SystemOverview"] = result.single()["count"]
+            
+            return counts
+
+    def clear_plc(self) -> Dict[str, int]:
+        """Clear all PLC-related nodes and cross-system mappings.
+        
+        Deletes: AOI, Tag (AOI-related), ControlPattern, DataFlow, SafetyElement,
+        FaultSymptom, FaultCause, Intent, OperatorPhrase nodes and MAPS_TO_SCADA relationships.
+        
+        Returns:
+            Dict with counts of deleted nodes by type
+        """
+        with self.session() as session:
+            counts = {}
+            
+            # Delete MAPS_TO_SCADA relationships first (cross-system links)
+            result = session.run(
+                "MATCH ()-[r:MAPS_TO_SCADA]->() DELETE r RETURN count(r) as count"
+            )
+            counts["MAPS_TO_SCADA_relationships"] = result.single()["count"]
+            
+            # Delete EndToEndFlow nodes (cross-system)
+            result = session.run(
+                "MATCH (f:EndToEndFlow) DETACH DELETE f RETURN count(f) as count"
+            )
+            counts["EndToEndFlow"] = result.single()["count"]
+            
+            # Delete SystemOverview (cross-system)
+            result = session.run(
+                "MATCH (s:SystemOverview) DETACH DELETE s RETURN count(s) as count"
+            )
+            counts["SystemOverview"] = result.single()["count"]
+            
+            # Delete AOIs and all their related nodes
+            result = session.run(
+                """
+                MATCH (a:AOI)
+                OPTIONAL MATCH (a)-[:HAS_TAG]->(t:Tag)
+                OPTIONAL MATCH (a)-[:HAS_PATTERN]->(p:ControlPattern)
+                OPTIONAL MATCH (a)-[:HAS_FLOW]->(f:DataFlow)
+                OPTIONAL MATCH (a)-[:SAFETY_CRITICAL]->(s:SafetyElement)
+                OPTIONAL MATCH (a)-[:HAS_SYMPTOM]->(sym:FaultSymptom)
+                OPTIONAL MATCH (sym)-[:CAUSED_BY]->(c:FaultCause)
+                OPTIONAL MATCH (a)-[:HAS_INTENT]->(i:Intent)
+                OPTIONAL MATCH (a)-[:HAS_PHRASE]->(op:OperatorPhrase)
+                DETACH DELETE a, t, p, f, s, sym, c, i, op
+                RETURN count(DISTINCT a) as count
+                """
+            )
+            counts["AOI"] = result.single()["count"]
+            
+            # Delete CommonPhrases (operator dictionary)
+            result = session.run(
+                "MATCH (p:CommonPhrase) DETACH DELETE p RETURN count(p) as count"
+            )
+            counts["CommonPhrase"] = result.single()["count"]
+            
+            return counts
+
+    def clear_unification(self) -> Dict[str, int]:
+        """Clear all unification/cross-system data without touching PLC or Ignition data.
+        
+        Deletes: MAPS_TO_SCADA relationships, EndToEndFlow, SystemOverview, CommonPhrase nodes.
+        Preserves: AOIs, UDTs, Views, Equipment, ViewComponents.
+        
+        Returns:
+            Dict with counts of deleted items
+        """
+        with self.session() as session:
+            counts = {}
+            
+            # Delete MAPS_TO_SCADA relationships
+            result = session.run(
+                "MATCH ()-[r:MAPS_TO_SCADA]->() DELETE r RETURN count(r) as count"
+            )
+            counts["MAPS_TO_SCADA_relationships"] = result.single()["count"]
+            
+            # Delete EndToEndFlow nodes
+            result = session.run(
+                "MATCH (f:EndToEndFlow) DETACH DELETE f RETURN count(f) as count"
+            )
+            counts["EndToEndFlow"] = result.single()["count"]
+            
+            # Delete SystemOverview
+            result = session.run(
+                "MATCH (s:SystemOverview) DETACH DELETE s RETURN count(s) as count"
+            )
+            counts["SystemOverview"] = result.single()["count"]
+            
+            # Delete CommonPhrases (operator dictionary)
+            result = session.run(
+                "MATCH (p:CommonPhrase) DETACH DELETE p RETURN count(p) as count"
+            )
+            counts["CommonPhrase"] = result.single()["count"]
+            
+            return counts
+
     # =========================================================================
     # AOI Operations
     # =========================================================================
@@ -151,13 +325,26 @@ class OntologyGraph:
         source_file: str,
         metadata: Optional[Dict] = None,
         analysis: Optional[Dict] = None,
+        semantic_status: str = "pending",
     ) -> str:
         """
         Create an AOI node with all its related data.
-        Returns the AOI name.
+        
+        Args:
+            name: AOI name
+            aoi_type: Type of AOI (AOI, UDT, etc.)
+            source_file: Source file path
+            metadata: Metadata dict (revision, vendor, description)
+            analysis: Analysis dict (purpose, tags, patterns, etc.)
+            semantic_status: One of 'pending', 'in_progress', 'complete', 'review'
+        
+        Returns:
+            The AOI name.
         """
+        purpose = (analysis or {}).get("purpose", "")
+        
         with self.session() as session:
-            # Create main AOI node
+            # Create main AOI node with semantic_status tracking
             result = session.run(
                 """
                 MERGE (a:AOI {name: $name})
@@ -165,8 +352,17 @@ class OntologyGraph:
                     a.source_file = $source_file,
                     a.revision = $revision,
                     a.vendor = $vendor,
-                    a.description = $description,
-                    a.purpose = $purpose
+                    a.description = $description
+                WITH a
+                // Set semantic_status to 'pending' only if not already set
+                SET a.semantic_status = COALESCE(a.semantic_status, $semantic_status)
+                WITH a
+                // Update purpose and mark complete if purpose is provided
+                FOREACH (_ IN CASE WHEN $purpose <> '' THEN [1] ELSE [] END |
+                    SET a.purpose = $purpose,
+                        a.semantic_status = 'complete',
+                        a.analyzed_at = datetime()
+                )
                 RETURN a.name as name
             """,
                 {
@@ -176,7 +372,8 @@ class OntologyGraph:
                     "revision": (metadata or {}).get("revision", ""),
                     "vendor": (metadata or {}).get("vendor", ""),
                     "description": (metadata or {}).get("description", ""),
-                    "purpose": (analysis or {}).get("purpose", ""),
+                    "purpose": purpose,
+                    "semantic_status": semantic_status,
                 },
             )
 
@@ -476,8 +673,18 @@ class OntologyGraph:
     # =========================================================================
 
     def add_troubleshooting(self, aoi_name: str, troubleshooting: Dict) -> None:
-        """Add troubleshooting data to an AOI."""
+        """Add troubleshooting data to an AOI and mark it as enriched."""
         with self.session() as session:
+            # Mark AOI as enriched
+            session.run(
+                """
+                MATCH (a:AOI {name: $aoi_name})
+                SET a.troubleshooting_enriched = true,
+                    a.enriched_at = datetime()
+                """,
+                {"aoi_name": aoi_name},
+            )
+            
             # Fault tree
             fault_tree = troubleshooting.get("fault_tree", [])
             for fault in fault_tree:
@@ -728,18 +935,40 @@ class OntologyGraph:
         purpose: str,
         source_file: str = "",
         members: Optional[List[Dict]] = None,
+        semantic_status: str = "pending",
     ) -> str:
-        """Create a UDT node."""
+        """Create a UDT node.
+        
+        Args:
+            name: UDT name
+            purpose: Semantic description (empty if not yet analyzed)
+            source_file: Source file path
+            members: List of member tag definitions
+            semantic_status: One of 'pending', 'in_progress', 'complete', 'review'
+        """
         with self.session() as session:
+            # Only update semantic_status if purpose is being set (analysis complete)
+            # or if this is a new node
             session.run(
                 """
                 MERGE (u:UDT {name: $name})
-                SET u.purpose = $purpose, u.source_file = $source_file
+                SET u.source_file = $source_file
+                WITH u
+                // Set semantic_status to 'pending' only if not already set
+                SET u.semantic_status = COALESCE(u.semantic_status, $semantic_status)
+                WITH u
+                // Update purpose and mark complete if purpose is provided
+                FOREACH (_ IN CASE WHEN $purpose <> '' THEN [1] ELSE [] END |
+                    SET u.purpose = $purpose,
+                        u.semantic_status = 'complete',
+                        u.analyzed_at = datetime()
+                )
             """,
                 {
                     "name": name,
                     "purpose": purpose,
                     "source_file": source_file,
+                    "semantic_status": semantic_status,
                 },
             )
 
@@ -767,18 +996,36 @@ class OntologyGraph:
         equipment_type: str,
         purpose: str,
         udt_name: Optional[str] = None,
+        semantic_status: str = "pending",
     ) -> str:
-        """Create an equipment instance node."""
+        """Create an equipment instance node.
+        
+        Args:
+            name: Equipment instance name
+            equipment_type: Type of equipment
+            purpose: Semantic description (empty if not yet analyzed)
+            udt_name: Name of the UDT this equipment instantiates
+            semantic_status: One of 'pending', 'in_progress', 'complete', 'review'
+        """
         with self.session() as session:
             session.run(
                 """
                 MERGE (e:Equipment {name: $name})
-                SET e.type = $type, e.purpose = $purpose
+                SET e.type = $type
+                WITH e
+                SET e.semantic_status = COALESCE(e.semantic_status, $semantic_status)
+                WITH e
+                FOREACH (_ IN CASE WHEN $purpose <> '' THEN [1] ELSE [] END |
+                    SET e.purpose = $purpose,
+                        e.semantic_status = 'complete',
+                        e.analyzed_at = datetime()
+                )
             """,
                 {
                     "name": name,
                     "type": equipment_type,
                     "purpose": purpose,
+                    "semantic_status": semantic_status,
                 },
             )
 
@@ -796,18 +1043,40 @@ class OntologyGraph:
                 )
         return name
 
-    def create_view(self, name: str, path: str, purpose: str) -> str:
-        """Create a SCADA view node."""
+    def create_view(
+        self,
+        name: str,
+        path: str,
+        purpose: str,
+        semantic_status: str = "pending",
+    ) -> str:
+        """Create a SCADA view node.
+        
+        Args:
+            name: View name
+            path: View path in Ignition
+            purpose: Semantic description (empty if not yet analyzed)
+            semantic_status: One of 'pending', 'in_progress', 'complete', 'review'
+        """
         with self.session() as session:
             session.run(
                 """
                 MERGE (v:View {name: $name})
-                SET v.path = $path, v.purpose = $purpose
+                SET v.path = $path
+                WITH v
+                SET v.semantic_status = COALESCE(v.semantic_status, $semantic_status)
+                WITH v
+                FOREACH (_ IN CASE WHEN $purpose <> '' THEN [1] ELSE [] END |
+                    SET v.purpose = $purpose,
+                        v.semantic_status = 'complete',
+                        v.analyzed_at = datetime()
+                )
             """,
                 {
                     "name": name,
                     "path": path,
                     "purpose": purpose,
+                    "semantic_status": semantic_status,
                 },
             )
         return name
@@ -816,12 +1085,12 @@ class OntologyGraph:
         self, view_name: str, udt_name: str, binding_type: str = "displays"
     ) -> bool:
         """Create a DISPLAYS relationship between a View and a UDT.
-        
+
         Args:
             view_name: Name of the view
             udt_name: Name of the UDT the view displays/controls
             binding_type: Type of binding (displays, controls, monitors)
-            
+
         Returns:
             True if relationship was created, False if nodes not found
         """
@@ -846,12 +1115,12 @@ class OntologyGraph:
         self, view_name: str, equipment_name: str, binding_type: str = "displays"
     ) -> bool:
         """Create a DISPLAYS relationship between a View and Equipment.
-        
+
         Args:
             view_name: Name of the view
             equipment_name: Name of the equipment the view displays/controls
             binding_type: Type of binding (displays, controls, monitors)
-            
+
         Returns:
             True if relationship was created, False if nodes not found
         """
@@ -868,6 +1137,299 @@ class OntologyGraph:
                     "view_name": view_name,
                     "equipment_name": equipment_name,
                     "binding_type": binding_type,
+                },
+            )
+            return result.single() is not None
+
+    def create_scada_tag(
+        self,
+        name: str,
+        tag_type: str,
+        folder_name: str = "",
+        data_type: str = "",
+        datasource: str = "",
+        query: str = "",
+        opc_item_path: str = "",
+        expression: str = "",
+        initial_value: str = "",
+        semantic_status: str = "pending",
+    ) -> str:
+        """Create a standalone SCADA tag node.
+
+        Args:
+            name: Tag name
+            tag_type: Type of tag (query, memory, opc, expression)
+            folder_name: Folder path in Ignition
+            data_type: Data type (DataSet, Int, Float, Boolean, etc.)
+            datasource: Database datasource for query tags
+            query: SQL query for query tags
+            opc_item_path: OPC path for opc tags
+            expression: Expression for expression tags
+            initial_value: Initial value for memory tags
+            semantic_status: One of 'pending', 'in_progress', 'complete', 'review'
+
+        Returns:
+            Tag name
+        """
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (t:ScadaTag {name: $name})
+                SET t.tag_type = $tag_type,
+                    t.folder_name = $folder_name,
+                    t.data_type = $data_type,
+                    t.datasource = $datasource,
+                    t.query = $query,
+                    t.opc_item_path = $opc_item_path,
+                    t.expression = $expression,
+                    t.initial_value = $initial_value
+                WITH t
+                SET t.semantic_status = COALESCE(t.semantic_status, $semantic_status)
+                """,
+                {
+                    "name": name,
+                    "tag_type": tag_type,
+                    "folder_name": folder_name or "",
+                    "data_type": data_type or "",
+                    "datasource": datasource or "",
+                    "query": query or "",
+                    "opc_item_path": opc_item_path or "",
+                    "expression": expression or "",
+                    "initial_value": str(initial_value) if initial_value else "",
+                    "semantic_status": semantic_status,
+                },
+            )
+        return name
+
+    def create_view_component(
+        self,
+        view_name: str,
+        component_name: str,
+        component_type: str,
+        component_path: str = "",
+        inferred_purpose: str = "",
+        props: dict = None,
+        semantic_status: str = "pending",
+    ) -> bool:
+        """Create a ViewComponent node and link it to a View.
+
+        Args:
+            view_name: Name of the parent view
+            component_name: Name/label of the component
+            component_type: Type (Button, Label, LED, Input, etc.)
+            component_path: Hierarchical path within the view
+            inferred_purpose: Type-based inferred purpose (deterministic, not AI)
+            props: Additional properties (text, style, etc.)
+            semantic_status: One of 'pending', 'in_progress', 'complete', 'review'
+
+        Returns:
+            True if component was created and linked
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (v:View {name: $view_name})
+                MERGE (c:ViewComponent {view: $view_name, path: $component_path})
+                SET c.name = $component_name,
+                    c.type = $component_type,
+                    c.inferred_purpose = $inferred_purpose,
+                    c.props = $props
+                WITH c
+                SET c.semantic_status = COALESCE(c.semantic_status, $semantic_status)
+                WITH c
+                MATCH (v:View {name: $view_name})
+                MERGE (v)-[:HAS_COMPONENT]->(c)
+                RETURN c.path as created
+            """,
+                {
+                    "view_name": view_name,
+                    "component_name": component_name,
+                    "component_type": component_type,
+                    "component_path": component_path,
+                    "inferred_purpose": inferred_purpose,
+                    "props": json.dumps(props or {}),
+                    "semantic_status": semantic_status,
+                },
+            )
+            return result.single() is not None
+
+    def create_component_udt_binding(
+        self,
+        view_name: str,
+        component_path: str,
+        udt_name: str,
+        binding_property: str,
+        tag_path: str = "",
+    ) -> bool:
+        """Create a BINDS_TO relationship between a ViewComponent and a UDT.
+
+        Args:
+            view_name: Name of the parent view
+            component_path: Path of the component within the view
+            udt_name: Name of the UDT being bound
+            binding_property: Which property is bound (e.g., 'value', 'text', 'visible')
+            tag_path: Full tag path of the binding
+
+        Returns:
+            True if relationship was created
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (c:ViewComponent {view: $view_name, path: $component_path})
+                MATCH (u:UDT {name: $udt_name})
+                MERGE (c)-[r:BINDS_TO]->(u)
+                SET r.property = $binding_property,
+                    r.tag_path = $tag_path
+                RETURN c.path as component, u.name as udt
+            """,
+                {
+                    "view_name": view_name,
+                    "component_path": component_path,
+                    "udt_name": udt_name,
+                    "binding_property": binding_property,
+                    "tag_path": tag_path,
+                },
+            )
+            return result.single() is not None
+
+    def create_component_tag_binding(
+        self,
+        view_name: str,
+        component_path: str,
+        tag_name: str,
+        binding_property: str,
+        tag_path: str = "",
+    ) -> bool:
+        """Create a BINDS_TO relationship between a ViewComponent and a ScadaTag.
+
+        Args:
+            view_name: Name of the parent view
+            component_path: Path of the component within the view
+            tag_name: Name of the ScadaTag being bound
+            binding_property: Which property is bound (e.g., 'value', 'text', 'visible')
+            tag_path: Full tag path of the binding
+
+        Returns:
+            True if relationship was created
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (c:ViewComponent {view: $view_name, path: $component_path})
+                MATCH (t:ScadaTag {name: $tag_name})
+                MERGE (c)-[r:BINDS_TO]->(t)
+                SET r.property = $binding_property,
+                    r.tag_path = $tag_path
+                RETURN c.path as component, t.name as tag
+            """,
+                {
+                    "view_name": view_name,
+                    "component_path": component_path,
+                    "tag_name": tag_name,
+                    "binding_property": binding_property,
+                    "tag_path": tag_path,
+                },
+            )
+            return result.single() is not None
+
+    def create_tag_reference(
+        self,
+        source_tag: str,
+        target_tag: str,
+        reference_type: str = "expression",
+    ) -> bool:
+        """Create a REFERENCES relationship between two ScadaTags.
+        
+        Used when one tag references another (e.g., expression tags).
+
+        Args:
+            source_tag: Name of the tag that contains the reference
+            target_tag: Name of the tag being referenced
+            reference_type: Type of reference (expression, derived, etc.)
+
+        Returns:
+            True if relationship was created
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (s:ScadaTag {name: $source})
+                MATCH (t:ScadaTag {name: $target})
+                MERGE (s)-[r:REFERENCES]->(t)
+                SET r.type = $ref_type
+                RETURN s.name as source, t.name as target
+            """,
+                {
+                    "source": source_tag,
+                    "target": target_tag,
+                    "ref_type": reference_type,
+                },
+            )
+            return result.single() is not None
+
+    def create_udt_nested_type(
+        self,
+        parent_udt: str,
+        member_name: str,
+        child_udt: str,
+    ) -> bool:
+        """Create a CONTAINS_TYPE relationship when a UDT member is another UDT.
+
+        Args:
+            parent_udt: Name of the parent UDT
+            member_name: Name of the member that uses the nested UDT
+            child_udt: Name of the nested UDT type
+
+        Returns:
+            True if relationship was created
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (p:UDT {name: $parent})
+                MATCH (c:UDT {name: $child})
+                MERGE (p)-[r:CONTAINS_TYPE]->(c)
+                SET r.member_name = $member
+                RETURN p.name as parent, c.name as child
+            """,
+                {
+                    "parent": parent_udt,
+                    "member": member_name,
+                    "child": child_udt,
+                },
+            )
+            return result.single() is not None
+
+    def create_udt_tag_reference(
+        self,
+        udt_name: str,
+        member_name: str,
+        tag_name: str,
+    ) -> bool:
+        """Create a REFERENCES relationship when a UDT member references a ScadaTag.
+
+        Args:
+            udt_name: Name of the UDT
+            member_name: Name of the member that references the tag
+            tag_name: Name of the ScadaTag being referenced
+
+        Returns:
+            True if relationship was created
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (u:UDT {name: $udt})
+                MATCH (t:ScadaTag {name: $tag})
+                MERGE (u)-[r:REFERENCES]->(t)
+                SET r.member_name = $member
+                RETURN u.name as udt, t.name as tag
+            """,
+                {
+                    "udt": udt_name,
+                    "member": member_name,
+                    "tag": tag_name,
                 },
             )
             return result.single() is not None
@@ -1011,6 +1573,303 @@ class OntologyGraph:
                     "follow_up": phrase_data.get("follow_up_questions", []),
                 },
             )
+
+    # =========================================================================
+    # Semantic Status Operations (for incremental analysis)
+    # =========================================================================
+
+    def get_pending_items(
+        self, item_type: str, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Get items that haven't been semantically analyzed yet.
+        
+        Args:
+            item_type: One of 'AOI', 'UDT', 'View', 'Equipment', 'ViewComponent', 'ScadaTag'
+            limit: Maximum number of items to return
+            
+        Returns:
+            List of dicts with 'name' and other relevant properties
+        """
+        valid_types = {"AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag"}
+        if item_type not in valid_types:
+            raise ValueError(f"item_type must be one of {valid_types}")
+        
+        with self.session() as session:
+            if item_type == "ViewComponent":
+                result = session.run(
+                    f"""
+                    MATCH (n:{item_type})
+                    WHERE (n.semantic_status = 'pending' OR n.semantic_status IS NULL)
+                      AND (n.deleted IS NULL OR n.deleted = false)
+                    RETURN n.view as view, n.path as path, n.name as name, 
+                           n.type as type, n.props as props,
+                           n.inferred_purpose as inferred_purpose
+                    LIMIT $limit
+                    """,
+                    {"limit": limit},
+                )
+                return [dict(r) for r in result]
+            elif item_type == "ScadaTag":
+                result = session.run(
+                    """
+                    MATCH (n:ScadaTag)
+                    WHERE (n.semantic_status = 'pending' OR n.semantic_status IS NULL)
+                      AND (n.deleted IS NULL OR n.deleted = false)
+                    RETURN n.name as name, n.tag_type as tag_type, 
+                           n.data_type as data_type, n.folder_name as folder_name,
+                           n.query as query, n.datasource as datasource,
+                           n.opc_item_path as opc_item_path, n.expression as expression
+                    LIMIT $limit
+                    """,
+                    {"limit": limit},
+                )
+                return [dict(r) for r in result]
+            else:
+                result = session.run(
+                    f"""
+                    MATCH (n:{item_type})
+                    WHERE (n.semantic_status = 'pending' OR n.semantic_status IS NULL)
+                      AND (n.deleted IS NULL OR n.deleted = false)
+                    RETURN n.name as name, n.source_file as source_file, 
+                           n.type as type, n.path as path
+                    LIMIT $limit
+                    """,
+                    {"limit": limit},
+                )
+                return [dict(r) for r in result]
+
+    def set_semantic_status(
+        self, item_type: str, name: str, status: str, purpose: str = None
+    ) -> bool:
+        """Update the semantic status of an item.
+        
+        Args:
+            item_type: One of 'AOI', 'UDT', 'View', 'Equipment', 'ViewComponent', 'ScadaTag'
+            name: Name of the item (or path for ViewComponent)
+            status: One of 'pending', 'in_progress', 'complete', 'review'
+            purpose: Semantic description to set (only used when status='complete')
+            
+        Returns:
+            True if item was found and updated
+        """
+        valid_types = {"AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag"}
+        valid_statuses = {"pending", "in_progress", "complete", "review"}
+        
+        if item_type not in valid_types:
+            raise ValueError(f"item_type must be one of {valid_types}")
+        if status not in valid_statuses:
+            raise ValueError(f"status must be one of {valid_statuses}")
+        
+        with self.session() as session:
+            if item_type == "ViewComponent":
+                # ViewComponent uses path as identifier
+                result = session.run(
+                    f"""
+                    MATCH (n:{item_type} {{path: $name}})
+                    SET n.semantic_status = $status
+                    WITH n
+                    FOREACH (_ IN CASE WHEN $purpose IS NOT NULL THEN [1] ELSE [] END |
+                        SET n.purpose = $purpose, n.analyzed_at = datetime()
+                    )
+                    RETURN n.path as name
+                    """,
+                    {"name": name, "status": status, "purpose": purpose},
+                )
+            else:
+                result = session.run(
+                    f"""
+                    MATCH (n:{item_type} {{name: $name}})
+                    SET n.semantic_status = $status
+                    WITH n
+                    FOREACH (_ IN CASE WHEN $purpose IS NOT NULL THEN [1] ELSE [] END |
+                        SET n.purpose = $purpose, n.analyzed_at = datetime()
+                    )
+                    RETURN n.name as name
+                    """,
+                    {"name": name, "status": status, "purpose": purpose},
+                )
+            return result.single() is not None
+
+    def get_semantic_status_counts(self, include_deleted: bool = False) -> Dict[str, Dict[str, int]]:
+        """Get counts of items by semantic status for each type.
+        
+        Args:
+            include_deleted: If True, include deleted items in counts
+        
+        Returns:
+            Dict like {'UDT': {'pending': 5, 'complete': 3, 'deleted': 1}, ...}
+        """
+        with self.session() as session:
+            result = {}
+            for item_type in ["AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag"]:
+                if include_deleted:
+                    counts_result = session.run(
+                        f"""
+                        MATCH (n:{item_type})
+                        WITH COALESCE(n.semantic_status, 'pending') as status
+                        RETURN status, count(*) as count
+                        """
+                    )
+                else:
+                    counts_result = session.run(
+                        f"""
+                        MATCH (n:{item_type})
+                        WHERE n.deleted IS NULL OR n.deleted = false
+                        WITH COALESCE(n.semantic_status, 'pending') as status
+                        RETURN status, count(*) as count
+                        """
+                    )
+                result[item_type] = {r["status"]: r["count"] for r in counts_result}
+            return result
+
+    def get_enrichment_status_counts(self) -> Dict[str, Dict[str, int]]:
+        """Get counts of items by troubleshooting enrichment status.
+        
+        Returns:
+            Dict like {'AOI': {'enriched': 5, 'pending': 3}, 'View': {'enriched': 2, 'pending': 4}}
+        """
+        with self.session() as session:
+            result = {}
+            
+            # AOI enrichment status
+            aoi_result = session.run("""
+                MATCH (a:AOI)
+                RETURN 
+                    sum(CASE WHEN a.troubleshooting_enriched = true THEN 1 ELSE 0 END) as enriched,
+                    sum(CASE WHEN a.troubleshooting_enriched IS NULL OR a.troubleshooting_enriched = false THEN 1 ELSE 0 END) as pending
+            """)
+            aoi_record = aoi_result.single()
+            result["AOI"] = {
+                "enriched": aoi_record["enriched"] if aoi_record else 0,
+                "pending": aoi_record["pending"] if aoi_record else 0
+            }
+            
+            # View enrichment status
+            view_result = session.run("""
+                MATCH (v:View)
+                RETURN 
+                    sum(CASE WHEN v.troubleshooting_enriched = true THEN 1 ELSE 0 END) as enriched,
+                    sum(CASE WHEN v.troubleshooting_enriched IS NULL OR v.troubleshooting_enriched = false THEN 1 ELSE 0 END) as pending
+            """)
+            view_record = view_result.single()
+            result["View"] = {
+                "enriched": view_record["enriched"] if view_record else 0,
+                "pending": view_record["pending"] if view_record else 0
+            }
+            
+            return result
+
+    def get_item_with_context(
+        self, item_type: str, name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get an item with its related context for semantic analysis.
+        
+        For AOI: includes tags, patterns, flows, SCADA mappings
+        For UDT: includes member tags, related views, any AOI mappings
+        For View: includes components, bound UDTs
+        For Equipment: includes UDT type, related views
+        
+        Args:
+            item_type: One of 'AOI', 'UDT', 'View', 'Equipment', 'ViewComponent'
+            name: Name of the item
+            
+        Returns:
+            Dict with item data and context, or None if not found
+        """
+        with self.session() as session:
+            if item_type == "AOI":
+                result = session.run(
+                    """
+                    MATCH (a:AOI {name: $name})
+                    OPTIONAL MATCH (a)-[:HAS_TAG]->(t:Tag)
+                    OPTIONAL MATCH (a)-[:HAS_PATTERN]->(p:ControlPattern)
+                    OPTIONAL MATCH (a)-[:MAPS_TO_SCADA]->(s)
+                    RETURN a as item,
+                           collect(DISTINCT {name: t.name, description: t.description}) as tags,
+                           collect(DISTINCT p.name) as patterns,
+                           collect(DISTINCT s.name) as scada_mappings
+                    """,
+                    {"name": name},
+                )
+            elif item_type == "UDT":
+                result = session.run(
+                    """
+                    MATCH (u:UDT {name: $name})
+                    OPTIONAL MATCH (u)<-[:DISPLAYS]-(v:View)
+                    OPTIONAL MATCH (u)<-[:INSTANCE_OF]-(e:Equipment)
+                    OPTIONAL MATCH (u)<-[:MAPS_TO_SCADA]-(a:AOI)
+                    OPTIONAL MATCH (u)-[:HAS_MEMBER]->(t:Tag)
+                    RETURN u as item,
+                           collect(DISTINCT v.name) as views,
+                           collect(DISTINCT e.name) as equipment,
+                           collect(DISTINCT a.name) as aois,
+                           collect(DISTINCT {name: t.name, data_type: t.data_type}) as members
+                    """,
+                    {"name": name},
+                )
+            elif item_type == "View":
+                result = session.run(
+                    """
+                    MATCH (v:View {name: $name})
+                    OPTIONAL MATCH (v)-[:DISPLAYS]->(u:UDT)
+                    OPTIONAL MATCH (v)-[:HAS_COMPONENT]->(c:ViewComponent)
+                    RETURN v as item,
+                           collect(DISTINCT u.name) as udts,
+                           collect(DISTINCT {name: c.name, type: c.type, path: c.path}) as components
+                    """,
+                    {"name": name},
+                )
+            elif item_type == "Equipment":
+                result = session.run(
+                    """
+                    MATCH (e:Equipment {name: $name})
+                    OPTIONAL MATCH (e)-[:INSTANCE_OF]->(u:UDT)
+                    OPTIONAL MATCH (e)<-[:DISPLAYS]-(v:View)
+                    RETURN e as item,
+                           u.name as udt_type,
+                           collect(DISTINCT v.name) as views
+                    """,
+                    {"name": name},
+                )
+            elif item_type == "ViewComponent":
+                # For ViewComponent, name is actually the path
+                result = session.run(
+                    """
+                    MATCH (c:ViewComponent {path: $name})
+                    OPTIONAL MATCH (c)-[:BINDS_TO]->(u:UDT)
+                    OPTIONAL MATCH (c)-[:BINDS_TO]->(t:ScadaTag)
+                    OPTIONAL MATCH (v:View)-[:HAS_COMPONENT]->(c)
+                    RETURN c as item,
+                           v.name as parent_view,
+                           collect(DISTINCT u.name) as bound_udts,
+                           collect(DISTINCT t.name) as bound_tags
+                    """,
+                    {"name": name},
+                )
+            elif item_type == "ScadaTag":
+                result = session.run(
+                    """
+                    MATCH (t:ScadaTag {name: $name})
+                    OPTIONAL MATCH (t)-[:REFERENCES]->(ref:ScadaTag)
+                    OPTIONAL MATCH (t)<-[:BINDS_TO]-(c:ViewComponent)
+                    OPTIONAL MATCH (v:View)-[:HAS_COMPONENT]->(c)
+                    RETURN t as item,
+                           collect(DISTINCT ref.name) as referenced_tags,
+                           collect(DISTINCT c.path) as bound_components,
+                           collect(DISTINCT v.name) as used_in_views
+                    """,
+                    {"name": name},
+                )
+            else:
+                return None
+            
+            record = result.single()
+            if not record:
+                return None
+            
+            item_data = dict(record["item"])
+            context = {k: v for k, v in dict(record).items() if k != "item"}
+            return {"item": item_data, "context": context}
 
     # =========================================================================
     # Query Operations
@@ -1290,14 +2149,16 @@ def main():
     parser = argparse.ArgumentParser(description="Neo4j ontology management")
     parser.add_argument(
         "command",
-        choices=["init", "clear", "import", "export", "query"],
+        choices=["init", "clear", "clear-ignition", "clear-plc", "clear-unification", "import", "export", "query"],
         help="Command to execute",
     )
     parser.add_argument("--file", "-f", help="JSON file for import/export")
     parser.add_argument("--query", "-q", help="Query string for search")
+    parser.add_argument("--enrichment-status", action="store_true", help="Show troubleshooting enrichment status")
     parser.add_argument("--uri", default=DEFAULT_URI, help="Neo4j URI")
     parser.add_argument("--user", default=DEFAULT_USER, help="Neo4j user")
     parser.add_argument("--password", default=DEFAULT_PASSWORD, help="Neo4j password")
+    parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
 
     args = parser.parse_args()
 
@@ -1309,12 +2170,49 @@ def main():
             print("[OK] Initialized Neo4j schema with indexes and constraints")
 
         elif args.command == "clear":
-            confirm = input("This will delete ALL data. Type 'yes' to confirm: ")
-            if confirm.lower() == "yes":
-                graph.clear_all()
-                print("[OK] Cleared all data from Neo4j")
-            else:
-                print("[CANCELLED]")
+            if not args.yes:
+                confirm = input("This will delete ALL data. Type 'yes' to confirm: ")
+                if confirm.lower() != "yes":
+                    print("[CANCELLED]")
+                    return
+            graph.clear_all()
+            print("[OK] Cleared all data from Neo4j")
+
+        elif args.command == "clear-ignition":
+            if not args.yes:
+                confirm = input("This will delete all Ignition/SCADA data and cross-system mappings. Type 'yes' to confirm: ")
+                if confirm.lower() != "yes":
+                    print("[CANCELLED]")
+                    return
+            counts = graph.clear_ignition()
+            print("[OK] Cleared Ignition data from Neo4j:")
+            for node_type, count in counts.items():
+                if count > 0:
+                    print(f"  - {node_type}: {count}")
+
+        elif args.command == "clear-plc":
+            if not args.yes:
+                confirm = input("This will delete all PLC data and cross-system mappings. Type 'yes' to confirm: ")
+                if confirm.lower() != "yes":
+                    print("[CANCELLED]")
+                    return
+            counts = graph.clear_plc()
+            print("[OK] Cleared PLC data from Neo4j:")
+            for node_type, count in counts.items():
+                if count > 0:
+                    print(f"  - {node_type}: {count}")
+
+        elif args.command == "clear-unification":
+            if not args.yes:
+                confirm = input("This will delete all unification data (mappings, flows, overview). Type 'yes' to confirm: ")
+                if confirm.lower() != "yes":
+                    print("[CANCELLED]")
+                    return
+            counts = graph.clear_unification()
+            print("[OK] Cleared unification data from Neo4j:")
+            for node_type, count in counts.items():
+                if count > 0:
+                    print(f"  - {node_type}: {count}")
 
         elif args.command == "import":
             if not args.file:
@@ -1334,7 +2232,16 @@ def main():
                 print(json.dumps(aois, indent=2))
 
         elif args.command == "query":
-            if args.query:
+            if args.enrichment_status:
+                # Show troubleshooting enrichment status
+                counts = graph.get_enrichment_status_counts()
+                print("Troubleshooting Enrichment Status:")
+                print("-" * 40)
+                for item_type, status in counts.items():
+                    total = status["enriched"] + status["pending"]
+                    pct = (status["enriched"] / total * 100) if total > 0 else 0
+                    print(f"  {item_type:15} {status['enriched']}/{total} enriched ({pct:.0f}%)")
+            elif args.query:
                 results = graph.find_by_symptom(args.query)
                 if results:
                     for r in results:

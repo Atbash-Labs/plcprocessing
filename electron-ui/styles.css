@@ -242,6 +242,229 @@ body {
   line-height: 1.5;
 }
 
+/* Button rows in cards */
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.btn-row:last-child {
+  margin-bottom: 0;
+}
+
+/* Semantic Status Display */
+.semantic-status {
+  background: var(--bg-dark);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  margin-bottom: 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.semantic-status .status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.semantic-status .status-label {
+  color: var(--text-muted);
+}
+
+.semantic-status .status-value {
+  color: var(--text-primary);
+}
+
+.semantic-status .status-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.semantic-status .status-item:last-child {
+  border-bottom: none;
+}
+
+.semantic-status .status-item .type-name {
+  color: var(--text-secondary);
+}
+
+.semantic-status .status-item .progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.semantic-status .progress-bar {
+  width: 60px;
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.semantic-status .progress-fill {
+  height: 100%;
+  background: var(--accent-cyan);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.semantic-status .progress-fill.complete {
+  background: var(--accent-green);
+}
+
+.semantic-status .progress-text {
+  color: var(--text-muted);
+  font-size: 11px;
+  min-width: 45px;
+  text-align: right;
+}
+
+.semantic-status .status-warning {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: rgba(255, 153, 68, 0.15);
+  border: 1px solid rgba(255, 153, 68, 0.3);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--accent-orange);
+}
+
+/* Enrichment Status - reuse semantic-status styles */
+.enrichment-status {
+  background: var(--bg-dark);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  margin-bottom: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.enrichment-status .status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.enrichment-status .status-label {
+  color: var(--text-muted);
+}
+
+.enrichment-status .status-value {
+  color: var(--text-primary);
+}
+
+.enrichment-status .status-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+}
+
+.enrichment-status .status-item .type-name {
+  color: var(--text-secondary);
+}
+
+.enrichment-status .status-item .progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.enrichment-status .progress-bar {
+  width: 50px;
+  height: 5px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.enrichment-status .progress-fill {
+  height: 100%;
+  background: var(--accent-purple);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.enrichment-status .progress-fill.enriched {
+  background: var(--accent-purple);
+}
+
+.enrichment-status .progress-fill.complete {
+  background: var(--accent-green);
+}
+
+.enrichment-status .progress-text {
+  color: var(--text-muted);
+  font-size: 11px;
+  min-width: 40px;
+  text-align: right;
+}
+
+/* Batch Controls */
+.batch-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.batch-controls label {
+  color: var(--text-secondary);
+}
+
+.batch-controls input[type="number"] {
+  width: 70px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  text-align: center;
+}
+
+.batch-controls input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.batch-controls input[type="number"]::-webkit-inner-spin-button,
+.batch-controls input[type="number"]::-webkit-outer-spin-button {
+  opacity: 1;
+}
+
+/* Diff File Display */
+.diff-file-display {
+  background: var(--bg-dark);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.diff-file-display .placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.diff-file-display .file-name {
+  color: var(--accent-cyan);
+}
+
 /* Buttons */
 .btn {
   display: inline-flex;
@@ -289,6 +512,16 @@ body {
 
 .btn.danger:hover {
   background: rgba(255, 68, 102, 0.25);
+}
+
+.btn.warning {
+  background: rgba(255, 153, 68, 0.15);
+  color: var(--accent-orange);
+  border: 1px solid rgba(255, 153, 68, 0.3);
+}
+
+.btn.warning:hover {
+  background: rgba(255, 153, 68, 0.25);
 }
 
 .btn:disabled {

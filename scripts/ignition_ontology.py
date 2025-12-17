@@ -54,44 +54,75 @@ class IgnitionOntologyAnalyzer:
             self._client = None
 
     def analyze_backup(
-        self, backup: IgnitionBackup, verbose: bool = False
+        self, backup: IgnitionBackup, verbose: bool = False, skip_ai: bool = False
     ) -> Dict[str, Any]:
-        """Analyze an Ignition backup and store ontology in Neo4j."""
+        """Analyze an Ignition backup and store ontology in Neo4j.
+
+        Strategy: Create all entities from parsed data first (deterministic),
+        then optionally use Claude's analysis to enrich with semantic descriptions.
+
+        Args:
+            backup: Parsed Ignition backup
+            verbose: Print detailed progress
+            skip_ai: If True, skip Phase 3 AI analysis (use incremental analyzer later)
+
+        Returns:
+            Dict with ontology summary and analysis results
+        """
 
         if verbose:
             print(f"[INFO] Analyzing Ignition backup...")
 
-        # Build context for LLM
-        context = self._build_analysis_context(backup)
+        # === PHASE 1: Create entities from parsed data (deterministic) ===
+        if verbose:
+            print(f"[INFO] Creating entities from parsed data...")
 
-        # Generate analysis with tool support
-        analysis = self._query_llm(context, verbose)
-
-        # Store in Neo4j
-        # Store UDTs from Claude's analysis (with semantic descriptions)
-        for udt_name, udt_purpose in analysis.get("udt_semantics", {}).items():
-            self.graph.create_udt(udt_name, udt_purpose, backup.file_path)
-
-        # Also ensure UDTs from backup definitions exist (for view mapping)
+        # Create all UDTs from parsed definitions (semantic_status='pending')
         for udt_def in backup.udt_definitions:
-            # Create if not already in Claude's analysis
-            if udt_def.name not in analysis.get("udt_semantics", {}):
-                self.graph.create_udt(udt_def.name, "", backup.file_path)
+            self.graph.create_udt(udt_def.name, "", backup.file_path)
 
-        # Store equipment instances
-        for equip in analysis.get("equipment_instances", []):
-            self.graph.create_equipment(
-                equip.get("name", ""),
-                equip.get("type", ""),
-                equip.get("purpose", ""),
-                equip.get("udt_name"),  # Link to UDT if specified
+        # Create all Views from parsed windows (semantic_status='pending')
+        for window in backup.windows:
+            self.graph.create_view(window.name, window.path, "")
+
+        # Create UDT instances (equipment) from parsed data (semantic_status='pending')
+        for inst in backup.udt_instances:
+            udt_type = self._normalize_udt_name(inst.type_id)
+            self.graph.create_equipment(inst.name, udt_type, "", udt_type)
+
+        # Create standalone SCADA tags (query, memory, opc, expression tags)
+        for tag in backup.tags:
+            self.graph.create_scada_tag(
+                name=tag.name,
+                tag_type=tag.tag_type,
+                folder_name=tag.folder_name or "",
+                data_type=tag.data_type or "",
+                datasource=tag.datasource or "",
+                query=tag.query or "",
+                opc_item_path=tag.opc_item_path or "",
+                expression=tag.expression or "",
+                initial_value=tag.initial_value or "",
             )
 
-        # Store views
-        for view_name, view_purpose in analysis.get("view_purposes", {}).items():
-            self.graph.create_view(view_name, "", view_purpose)
+        if verbose:
+            print(
+                f"[OK] Created {len(backup.udt_definitions)} UDTs, {len(backup.windows)} views, "
+                f"{len(backup.udt_instances)} equipment, {len(backup.tags)} standalone tags"
+            )
 
-        # Automatically map views to UDTs based on tag bindings
+        # Create inter-entity relationships
+        relationship_count = self._create_entity_relationships(backup, verbose)
+        if verbose and relationship_count > 0:
+            print(f"[OK] Created {relationship_count} inter-entity relationships")
+
+        # Create ViewComponents from parsed windows
+        component_count, binding_count = self._create_view_components(backup, verbose)
+        if verbose:
+            print(
+                f"[OK] Created {component_count} components with {binding_count} bindings"
+            )
+
+        # === PHASE 2: Extract view-to-UDT mappings (deterministic) ===
         view_udt_mappings = self._extract_view_udt_mappings(backup, verbose)
         mappings_created = 0
         for view_name, udt_names in view_udt_mappings.items():
@@ -109,8 +140,61 @@ class IgnitionOntologyAnalyzer:
                         )
 
         if verbose:
-            print(f"[OK] Stored Ignition ontology in Neo4j")
             print(f"[INFO] Created {mappings_created} view-to-UDT mappings")
+
+        # === PHASE 3: Enrich with AI analysis (semantic) ===
+        analysis = {}
+
+        if skip_ai:
+            if verbose:
+                print(
+                    f"[INFO] Skipping AI analysis (use incremental_analyzer.py to analyze items)"
+                )
+                # Show status
+                status = self.graph.get_semantic_status_counts()
+                pending_total = sum(
+                    counts.get("pending", 0) for counts in status.values()
+                )
+                print(f"[INFO] {pending_total} items pending semantic analysis")
+        else:
+            if verbose:
+                print(f"[INFO] Enriching with AI analysis...")
+
+            # Build context for LLM
+            context = self._build_analysis_context(backup)
+
+            # Generate analysis with tool support
+            analysis = self._query_llm(context, verbose)
+
+            # Enrich UDTs with semantic descriptions
+            for udt_name, udt_data in analysis.get("udt_semantics", {}).items():
+                # Handle both string and dict formats from Claude
+                if isinstance(udt_data, dict):
+                    udt_purpose = udt_data.get("purpose", "")
+                else:
+                    udt_purpose = str(udt_data) if udt_data else ""
+                self.graph.create_udt(udt_name, udt_purpose, backup.file_path)
+
+            # Enrich views with semantic descriptions
+            for view_name, view_data in analysis.get("view_purposes", {}).items():
+                # Handle both string and dict formats from Claude
+                if isinstance(view_data, dict):
+                    view_purpose = view_data.get("purpose", "")
+                else:
+                    view_purpose = str(view_data) if view_data else ""
+                self.graph.create_view(view_name, "", view_purpose)
+
+            # Add any equipment Claude discovered that we didn't parse
+            for equip in analysis.get("equipment_instances", []):
+                self.graph.create_equipment(
+                    equip.get("name", ""),
+                    equip.get("type", ""),
+                    equip.get("purpose", ""),
+                    equip.get("udt_name"),
+                )
+
+            if verbose:
+                print(f"[OK] Stored Ignition ontology in Neo4j")
 
         ontology = {
             "source": "ignition",
@@ -180,7 +264,7 @@ class IgnitionOntologyAnalyzer:
         # Windows/Views
         if backup.windows:
             parts.append("## Views/Windows")
-            for window in backup.windows[:10]:  # Limit to first 10
+            for window in backup.windows:
                 parts.append(f"\n### {window.name} ({window.path})")
                 self._describe_components(window.components, parts, indent=0)
             parts.append("")
@@ -217,6 +301,336 @@ class IgnitionOntologyAnalyzer:
 
             if comp.children:
                 self._describe_components(comp.children, parts, indent + 1)
+
+    def _create_view_components(
+        self, backup: IgnitionBackup, verbose: bool = False
+    ) -> tuple:
+        """Create ViewComponent nodes from parsed windows and link to UDTs/Tags.
+
+        Returns:
+            Tuple of (component_count, binding_count)
+        """
+        # Build UDT lookup maps for binding resolution
+        udt_names = {udt.name for udt in backup.udt_definitions}
+        member_to_udt = {}
+        for udt_def in backup.udt_definitions:
+            for member in udt_def.members:
+                member_to_udt[member.name] = udt_def.name
+
+        # Build ScadaTag lookup for direct tag bindings
+        tag_names = {tag.name for tag in backup.tags}
+
+        component_count = 0
+        binding_count = 0
+
+        for window in backup.windows:
+            # Process all components in this view
+            components_created, bindings_created = self._process_components(
+                window.name,
+                window.components,
+                "",
+                udt_names,
+                member_to_udt,
+                tag_names,
+                verbose,
+            )
+            component_count += components_created
+            binding_count += bindings_created
+
+        return component_count, binding_count
+
+    def _process_components(
+        self,
+        view_name: str,
+        components: list,
+        parent_path: str,
+        udt_names: set,
+        member_to_udt: dict,
+        tag_names: set,
+        verbose: bool = False,
+    ) -> tuple:
+        """Recursively process UI components and create nodes.
+
+        Returns:
+            Tuple of (components_created, bindings_created)
+        """
+        component_count = 0
+        binding_count = 0
+
+        for comp in components:
+            # Build component path
+            comp_path = f"{parent_path}/{comp.name}" if parent_path else comp.name
+
+            # Determine component purpose from type
+            comp_purpose = self._infer_component_purpose(comp)
+
+            # Extract relevant props for troubleshooting
+            relevant_props = self._extract_relevant_props(comp)
+
+            # Create component node
+            success = self.graph.create_view_component(
+                view_name=view_name,
+                component_name=comp.name,
+                component_type=comp.component_type,
+                component_path=comp_path,
+                inferred_purpose=comp_purpose,
+                props=relevant_props,
+            )
+            if success:
+                component_count += 1
+
+            # Process bindings to link component to UDTs or Tags
+            for binding in comp.bindings:
+                # First try to resolve to a UDT
+                udt_name = self._resolve_binding_to_udt(
+                    binding.target, udt_names, member_to_udt
+                )
+                if udt_name:
+                    bind_success = self.graph.create_component_udt_binding(
+                        view_name=view_name,
+                        component_path=comp_path,
+                        udt_name=udt_name,
+                        binding_property=binding.property_path,
+                        tag_path=binding.target,
+                    )
+                    if bind_success:
+                        binding_count += 1
+                        if verbose:
+                            print(
+                                f"[DEBUG] Component '{comp_path}' binds to UDT '{udt_name}' via {binding.property_path}"
+                            )
+                else:
+                    # Try to resolve to a standalone ScadaTag
+                    tag_name = self._resolve_binding_to_tag(binding.target, tag_names)
+                    if tag_name:
+                        bind_success = self.graph.create_component_tag_binding(
+                            view_name=view_name,
+                            component_path=comp_path,
+                            tag_name=tag_name,
+                            binding_property=binding.property_path,
+                            tag_path=binding.target,
+                        )
+                        if bind_success:
+                            binding_count += 1
+                            if verbose:
+                                print(
+                                    f"[DEBUG] Component '{comp_path}' binds to Tag '{tag_name}' via {binding.property_path}"
+                                )
+
+            # Recurse into children
+            if comp.children:
+                child_comps, child_binds = self._process_components(
+                    view_name,
+                    comp.children,
+                    comp_path,
+                    udt_names,
+                    member_to_udt,
+                    tag_names,
+                    verbose,
+                )
+                component_count += child_comps
+                binding_count += child_binds
+
+        return component_count, binding_count
+
+    def _resolve_binding_to_tag(self, tag_path: str, tag_names: set) -> str:
+        """Try to resolve a binding target to a standalone ScadaTag.
+
+        Args:
+            tag_path: Full tag path from the binding (e.g., "[default]GetEquipmentOrders")
+            tag_names: Set of known ScadaTag names
+
+        Returns:
+            Tag name if found, empty string otherwise
+        """
+        if not tag_path:
+            return ""
+
+        # Remove provider prefix like [default] or [System]
+        clean_path = tag_path
+        if clean_path.startswith("["):
+            bracket_end = clean_path.find("]")
+            if bracket_end != -1:
+                clean_path = clean_path[bracket_end + 1 :]
+
+        # Check for exact match
+        if clean_path in tag_names:
+            return clean_path
+
+        # Try the last segment (after last /)
+        if "/" in clean_path:
+            last_segment = clean_path.split("/")[-1]
+            if last_segment in tag_names:
+                return last_segment
+
+        return ""
+
+    def _create_entity_relationships(
+        self, backup: IgnitionBackup, verbose: bool = False
+    ) -> int:
+        """Create relationships between entities.
+
+        - Tag → Tag references (expression tags referencing other tags)
+        - UDT → UDT nested types (UDT members that are other UDT types)
+        - UDT → Tag references (UDT members referencing specific tags)
+
+        Returns:
+            Count of relationships created
+        """
+        import re
+
+        count = 0
+        udt_names = {udt.name for udt in backup.udt_definitions}
+        tag_names = {tag.name for tag in backup.tags}
+
+        # 1. Tag-to-tag references from expression tags
+        for tag in backup.tags:
+            if tag.tag_type == "expression" and tag.expression:
+                # Parse expression for tag references like {[default]TagName} or {TagName}
+                refs = re.findall(r"\{(?:\[[^\]]+\])?([^}]+)\}", tag.expression)
+                for ref in refs:
+                    # Clean up the reference (might have .value or /path suffixes)
+                    ref_name = ref.split("/")[0].split(".")[0]
+                    if ref_name in tag_names and ref_name != tag.name:
+                        if self.graph.create_tag_reference(
+                            tag.name, ref_name, "expression"
+                        ):
+                            count += 1
+                            if verbose:
+                                print(
+                                    f"[DEBUG] Tag '{tag.name}' references Tag '{ref_name}'"
+                                )
+
+        # 2. UDT-to-UDT nested types (when a member's data_type is another UDT)
+        for udt_def in backup.udt_definitions:
+            for member in udt_def.members:
+                member_type = member.data_type or ""
+                # Normalize the type name (remove paths like ROL_DataTypes/)
+                clean_type = self._normalize_udt_name(member_type)
+                if clean_type in udt_names and clean_type != udt_def.name:
+                    if self.graph.create_udt_nested_type(
+                        udt_def.name, member.name, clean_type
+                    ):
+                        count += 1
+                        if verbose:
+                            print(
+                                f"[DEBUG] UDT '{udt_def.name}' contains type '{clean_type}' via member '{member.name}'"
+                            )
+
+        # 3. UDT-to-Tag references (for members with default values referencing tags)
+        # This is less common but supported
+        for udt_def in backup.udt_definitions:
+            for member in udt_def.members:
+                default_val = (
+                    str(member.default_value or "")
+                    if hasattr(member, "default_value")
+                    else ""
+                )
+                if default_val and default_val.startswith("{"):
+                    # Parse tag reference from default value
+                    ref_match = re.match(r"\{(?:\[[^\]]+\])?([^}]+)\}", default_val)
+                    if ref_match:
+                        ref_name = ref_match.group(1).split("/")[0].split(".")[0]
+                        if ref_name in tag_names:
+                            if self.graph.create_udt_tag_reference(
+                                udt_def.name, member.name, ref_name
+                            ):
+                                count += 1
+                                if verbose:
+                                    print(
+                                        f"[DEBUG] UDT '{udt_def.name}' references Tag '{ref_name}' via member '{member.name}'"
+                                    )
+
+        return count
+
+    def _infer_component_purpose(self, comp) -> str:
+        """Infer semantic purpose from component type and props."""
+        comp_type = comp.component_type.lower()
+
+        # Common component type patterns
+        if "button" in comp_type:
+            return "User action trigger"
+        elif "label" in comp_type or "text" in comp_type:
+            return "Information display"
+        elif "led" in comp_type or "indicator" in comp_type:
+            return "Status indicator"
+        elif "input" in comp_type or "field" in comp_type or "numeric" in comp_type:
+            return "User data entry"
+        elif "dropdown" in comp_type or "select" in comp_type:
+            return "User selection"
+        elif "toggle" in comp_type or "switch" in comp_type or "checkbox" in comp_type:
+            return "Binary control"
+        elif "table" in comp_type or "grid" in comp_type:
+            return "Data table display"
+        elif "chart" in comp_type or "graph" in comp_type or "trend" in comp_type:
+            return "Data visualization"
+        elif "image" in comp_type or "icon" in comp_type:
+            return "Visual representation"
+        elif "container" in comp_type or "view" in comp_type or "flex" in comp_type:
+            return "Layout container"
+        else:
+            return ""
+
+    def _extract_relevant_props(self, comp) -> dict:
+        """Extract props relevant for troubleshooting."""
+        relevant = {}
+
+        # Keys that are useful for understanding UI issues
+        useful_keys = [
+            "text",
+            "label",
+            "title",
+            "placeholder",
+            "tooltip",
+            "enabled",
+            "visible",
+            "editable",
+            "readonly",
+            "min",
+            "max",
+            "step",
+            "format",
+            "style",
+            "classes",
+        ]
+
+        for key in useful_keys:
+            if key in comp.props:
+                val = comp.props[key]
+                # Only include simple values, not complex objects
+                if isinstance(val, (str, int, float, bool)):
+                    relevant[key] = val
+
+        return relevant
+
+    def _resolve_binding_to_udt(
+        self, tag_ref: str, udt_names: set, member_to_udt: dict
+    ) -> Optional[str]:
+        """Resolve a tag binding to its UDT type."""
+        # Clean and split the tag reference
+        cleaned = (
+            tag_ref.replace("{", "")
+            .replace("}", "")
+            .replace("[default]", "")
+            .replace("[.]", "")
+        )
+        segments = []
+        for part in cleaned.split("/"):
+            segments.extend(part.split("."))
+
+        for segment in segments:
+            # Check member map
+            if segment in member_to_udt:
+                return member_to_udt[segment]
+
+            # Check HMI patterns
+            if segment.startswith("HMI_"):
+                hmi_type = segment[4:]
+                matched = self._match_hmi_to_udt(hmi_type, udt_names, verbose=False)
+                if matched:
+                    return matched
+
+        return None
 
     def _extract_view_udt_mappings(
         self, backup: IgnitionBackup, verbose: bool = False
@@ -260,7 +674,9 @@ class IgnitionOntologyAnalyzer:
         # Build member-to-UDT map from UDT definitions
         # Maps member names like "HMI_MotorControl" to their parent UDT "MotorReversingControl"
         member_to_udt = {}
+        udt_names = set()
         for udt_def in backup.udt_definitions:
+            udt_names.add(udt_def.name)
             for member in udt_def.members:
                 member_to_udt[member.name] = udt_def.name
                 if verbose:
@@ -292,10 +708,10 @@ class IgnitionOntologyAnalyzer:
                     udts_used.add(udt_type)
                     continue
 
-                # Strategy 2: UDT member matching for parameterized views
-                # e.g., "{TagPath}/HMI_MotorControl/iStatus" -> look for "HMI_MotorControl" in member_to_udt
+                # Strategy 2: UDT member or HMI structure matching for parameterized views
+                # e.g., "{TagPath}/HMI_MotorControl/iStatus" -> matches "HMI_MotorControl" to "MotorReversingControl"
                 matched_udt = self._match_tag_to_udt_member(
-                    tag_ref, member_to_udt, verbose
+                    tag_ref, member_to_udt, udt_names, verbose
                 )
                 if matched_udt:
                     udts_used.add(matched_udt)
@@ -317,12 +733,21 @@ class IgnitionOntologyAnalyzer:
         return view_udt_map
 
     def _match_tag_to_udt_member(
-        self, tag_ref: str, member_to_udt: Dict[str, str], verbose: bool = False
+        self,
+        tag_ref: str,
+        member_to_udt: Dict[str, str],
+        udt_names: set,
+        verbose: bool = False,
     ) -> Optional[str]:
-        """Match a tag reference to a UDT via member name.
+        """Match a tag reference to a UDT via member name or HMI structure.
 
         For parameterized views like "{TagPath}/HMI_MotorControl/iStatus",
         extract path segments and look for matches in member_to_udt map.
+
+        Also matches HMI_* patterns to infer UDT types:
+        - HMI_DigitalInput -> DigitalInput
+        - HMI_MotorControl -> MotorReversingControl (via fuzzy match)
+        - HMI_ValveControl -> ValveSolenoidControl (via fuzzy match)
         """
         # Split on / and . to get all path segments
         # "{TagPath}/HMI_MotorControl/iStatus" -> ["TagPath", "HMI_MotorControl", "iStatus"]
@@ -337,12 +762,73 @@ class IgnitionOntologyAnalyzer:
             segments.extend(part.split("."))
 
         for segment in segments:
+            # Strategy 1: Direct member match
             if segment in member_to_udt:
                 if verbose:
                     print(
                         f"[DEBUG]   Matched member '{segment}' -> UDT '{member_to_udt[segment]}'"
                     )
                 return member_to_udt[segment]
+
+            # Strategy 2: HMI structure name matching
+            if segment.startswith("HMI_"):
+                hmi_type = segment[4:]  # Remove "HMI_" prefix
+                matched = self._match_hmi_to_udt(hmi_type, udt_names, verbose)
+                if matched:
+                    return matched
+
+        return None
+
+    def _match_hmi_to_udt(
+        self, hmi_type: str, udt_names: set, verbose: bool = False
+    ) -> Optional[str]:
+        """Match an HMI structure name to a UDT.
+
+        Handles patterns like:
+        - DigitalInput -> DigitalInput (exact)
+        - MotorControl -> MotorReversingControl (prefix)
+        - ValveControl -> ValveSolenoidControl (contains)
+        """
+        hmi_lower = hmi_type.lower()
+
+        for udt_name in udt_names:
+            udt_lower = udt_name.lower()
+
+            # Exact match
+            if hmi_lower == udt_lower:
+                if verbose:
+                    print(
+                        f"[DEBUG]   Matched HMI '{hmi_type}' -> UDT '{udt_name}' (exact)"
+                    )
+                return udt_name
+
+            # HMI type is prefix of UDT (MotorControl -> MotorReversingControl)
+            if udt_lower.startswith(hmi_lower):
+                if verbose:
+                    print(
+                        f"[DEBUG]   Matched HMI '{hmi_type}' -> UDT '{udt_name}' (prefix)"
+                    )
+                return udt_name
+
+            # HMI type contained in UDT name (Valve -> ValveSolenoidControl)
+            # Only if hmi_type is reasonably long to avoid false matches
+            if len(hmi_lower) >= 5 and hmi_lower in udt_lower:
+                if verbose:
+                    print(
+                        f"[DEBUG]   Matched HMI '{hmi_type}' -> UDT '{udt_name}' (contains)"
+                    )
+                return udt_name
+
+            # Check for common abbreviation patterns
+            # ValveControl -> ValveSolenoidControl (Valve matches)
+            if hmi_lower.endswith("control"):
+                base = hmi_lower[:-7]  # Remove "control"
+                if base and udt_lower.startswith(base):
+                    if verbose:
+                        print(
+                            f"[DEBUG]   Matched HMI '{hmi_type}' -> UDT '{udt_name}' (base prefix)"
+                        )
+                    return udt_name
 
         return None
 
@@ -518,6 +1004,11 @@ def main():
         "--no-tools", action="store_true", help="Disable Neo4j tool calls"
     )
     parser.add_argument(
+        "--skip-ai",
+        action="store_true",
+        help="Skip AI analysis (create entities only, use incremental_analyzer.py later)",
+    )
+    parser.add_argument(
         "--list-udts", action="store_true", help="List all UDTs in Neo4j"
     )
     parser.add_argument(
@@ -525,6 +1016,9 @@ def main():
     )
     parser.add_argument(
         "--list-views", action="store_true", help="List all views in Neo4j"
+    )
+    parser.add_argument(
+        "--status", action="store_true", help="Show semantic analysis status"
     )
     parser.add_argument("--export", metavar="FILE", help="Export analysis to JSON file")
 
@@ -534,7 +1028,27 @@ def main():
     analyzer = IgnitionOntologyAnalyzer(client=client)
 
     try:
-        if args.list_udts:
+        if args.status:
+            status = analyzer.graph.get_semantic_status_counts()
+            print("\n=== Semantic Analysis Status ===\n")
+            for item_type in ["UDT", "Equipment", "View", "ViewComponent"]:
+                counts = status.get(item_type, {})
+                pending = counts.get("pending", 0)
+                complete = counts.get("complete", 0)
+                total = (
+                    pending
+                    + complete
+                    + counts.get("in_progress", 0)
+                    + counts.get("review", 0)
+                )
+                if total > 0:
+                    pct = (complete / total * 100) if total > 0 else 0
+                    print(
+                        f"  {item_type:15} {complete:3}/{total:<3} complete ({pct:.0f}%)"
+                    )
+            print()
+
+        elif args.list_udts:
             udts = analyzer.get_all_udts()
             print(f"\n[INFO] Found {len(udts)} UDTs:\n")
             for udt in udts:
@@ -563,14 +1077,16 @@ def main():
             )
 
             # Analyze and store in Neo4j
-            ontology = analyzer.analyze_backup(backup, verbose=args.verbose)
+            ontology = analyzer.analyze_backup(
+                backup, verbose=args.verbose, skip_ai=args.skip_ai
+            )
 
             # Export if requested
             if args.export:
                 with open(args.export, "w", encoding="utf-8") as f:
                     json.dump(ontology, f, indent=2)
                 print(f"[OK] Exported analysis to {args.export}")
-            else:
+            elif not args.skip_ai:
                 print("\n=== Ignition Ontology ===")
                 print(
                     f"System Purpose: {ontology['analysis'].get('system_purpose', 'N/A')}"

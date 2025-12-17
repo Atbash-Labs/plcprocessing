@@ -55,8 +55,9 @@ function appendOutput(text, clear = false) {
   if (clear) {
     ingestOutput.textContent = '';
   }
+  if (!text) return;
   // Clean up Neo4j deprecation warnings
-  const cleaned = text
+  const cleaned = (text || '')
     .split('\n')
     .filter(line => !line.includes('GqlStatusObject') && !line.includes('Received notification'))
     .join('\n');
@@ -100,9 +101,14 @@ document.getElementById('btn-clear-ingest-output').addEventListener('click', () 
 function disableIngestButtons(disabled) {
   document.getElementById('btn-ingest-plc').disabled = disabled;
   document.getElementById('btn-ingest-ignition').disabled = disabled;
+  document.getElementById('btn-ingest-ignition-incremental').disabled = disabled;
   document.getElementById('btn-run-unified').disabled = disabled;
   document.getElementById('btn-run-enrichment').disabled = disabled;
+  document.getElementById('btn-run-incremental').disabled = disabled;
 }
+
+// Store last selected Ignition file for incremental analysis
+let lastIgnitionFile = null;
 
 // ============================================
 // Ingest Tab Handlers
@@ -144,7 +150,7 @@ document.getElementById('btn-ingest-plc').addEventListener('click', async () => 
   updateStats();
 });
 
-// Ignition Ingest (with streaming - no blocking overlay)
+// Ignition Ingest - Full analysis (with streaming - no blocking overlay)
 document.getElementById('btn-ingest-ignition').addEventListener('click', async () => {
   const filePath = await window.api.selectFile({
     filters: [
@@ -155,13 +161,14 @@ document.getElementById('btn-ingest-ignition').addEventListener('click', async (
   
   if (!filePath) return;
   
+  lastIgnitionFile = filePath;  // Store for incremental analysis
   appendOutput(`\n📊 Ingesting: ${filePath}\n`, false);
-  appendOutput('⏳ Processing...\n');
+  appendOutput('⏳ Processing with full AI analysis...\n');
   isIngestActive = true;
   disableIngestButtons(true);
   
   try {
-    const result = await window.api.ingestIgnition(filePath);
+    const result = await window.api.ingestIgnition(filePath, false);
     
     if (result.success) {
       appendOutput('\n✅ Ignition ingestion complete!\n');
@@ -175,6 +182,42 @@ document.getElementById('btn-ingest-ignition').addEventListener('click', async (
   isIngestActive = false;
   disableIngestButtons(false);
   updateStats();
+  updateSemanticStatus();
+});
+
+// Ignition Ingest - Import only, skip AI (for incremental analysis)
+document.getElementById('btn-ingest-ignition-incremental').addEventListener('click', async () => {
+  const filePath = await window.api.selectFile({
+    filters: [
+      { name: 'Ignition Backup', extensions: ['json'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  
+  if (!filePath) return;
+  
+  lastIgnitionFile = filePath;  // Store for incremental analysis
+  appendOutput(`\n📊 Importing: ${filePath}\n`, false);
+  appendOutput('⏳ Creating entities (skipping AI analysis)...\n');
+  isIngestActive = true;
+  disableIngestButtons(true);
+  
+  try {
+    const result = await window.api.ingestIgnition(filePath, true);
+    
+    if (result.success) {
+      appendOutput('\n✅ Import complete! Use "Analyze Next Batch" to add semantic descriptions.\n');
+    } else {
+      appendOutput(`\n❌ Error: ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`\n❌ Error: ${error.message}\n`);
+  }
+  
+  isIngestActive = false;
+  disableIngestButtons(false);
+  updateStats();
+  updateSemanticStatus();
 });
 
 // Unified Analysis (with streaming - no blocking overlay)
@@ -201,18 +244,22 @@ document.getElementById('btn-run-unified').addEventListener('click', async () =>
   updateStats();
 });
 
-// Troubleshooting Enrichment (with streaming - no blocking overlay)
+// Troubleshooting Enrichment for AOIs (with streaming - no blocking overlay)
 document.getElementById('btn-run-enrichment').addEventListener('click', async () => {
-  appendOutput('\n🔧 Running troubleshooting enrichment...\n', false);
-  appendOutput('⏳ Processing...\n');
+  // Get batch size from input if available
+  const batchSizeInput = document.getElementById('batch-size');
+  const batchSize = batchSizeInput ? parseInt(batchSizeInput.value) || 10 : 10;
+  
+  appendOutput('\n🔧 Running AOI troubleshooting enrichment...\n', false);
+  appendOutput(`⏳ Processing (batch size: ${batchSize})...\n`);
   isIngestActive = true;
   disableIngestButtons(true);
   
   try {
-    const result = await window.api.runEnrichment();
+    const result = await window.api.runEnrichment({ batchSize });
     
     if (result.success) {
-      appendOutput('\n✅ Troubleshooting enrichment complete!\n');
+      appendOutput('\n✅ AOI troubleshooting enrichment complete!\n');
     } else {
       appendOutput(`\n❌ Error: ${result.error}\n`);
     }
@@ -223,6 +270,346 @@ document.getElementById('btn-run-enrichment').addEventListener('click', async ()
   isIngestActive = false;
   disableIngestButtons(false);
   updateStats();
+  updateEnrichmentStatus();
+});
+
+// Troubleshooting Enrichment for Views/HMIs (with streaming)
+document.getElementById('btn-run-enrichment-views').addEventListener('click', async () => {
+  // Get batch size from input if available
+  const batchSizeInput = document.getElementById('batch-size');
+  const batchSize = batchSizeInput ? parseInt(batchSizeInput.value) || 10 : 10;
+  
+  appendOutput('\n🔧 Running View/HMI troubleshooting enrichment...\n', false);
+  appendOutput(`⏳ Processing (batch size: ${batchSize})...\n`);
+  isIngestActive = true;
+  disableIngestButtons(true);
+  
+  try {
+    const result = await window.api.runEnrichmentViews({ batchSize });
+    
+    if (result.success) {
+      appendOutput('\n✅ View troubleshooting enrichment complete!\n');
+    } else {
+      appendOutput(`\n❌ Error: ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`\n❌ Error: ${error.message}\n`);
+  }
+  
+  isIngestActive = false;
+  disableIngestButtons(false);
+  updateStats();
+  updateEnrichmentStatus();
+});
+
+// ============================================
+// Troubleshooting Enrichment Status
+// ============================================
+
+async function updateEnrichmentStatus() {
+  const statusContainer = document.getElementById('enrichment-status');
+  
+  try {
+    const result = await window.api.getEnrichmentStatus();
+    
+    if (result.success) {
+      // Parse the output
+      const output = result.output || '';
+      const lines = output.split('\n').filter(l => l.trim());
+      
+      let html = '';
+      for (const line of lines) {
+        // Match lines like "  AOI             3/5 enriched (60%)"
+        const match = line.match(/^\s*(\w+)\s+(\d+)\/(\d+)\s+enriched\s+\((\d+)%\)/);
+        if (match) {
+          const [, type, enriched, total, pct] = match;
+          const isComplete = pct === '100';
+          html += `
+            <div class="status-item">
+              <span class="type-name">${type}</span>
+              <div class="progress">
+                <div class="progress-bar">
+                  <div class="progress-fill enriched ${isComplete ? 'complete' : ''}" style="width: ${pct}%"></div>
+                </div>
+                <span class="progress-text">${enriched}/${total}</span>
+              </div>
+            </div>
+          `;
+        }
+      }
+      
+      if (html) {
+        statusContainer.innerHTML = html;
+      } else {
+        statusContainer.innerHTML = `
+          <div class="status-row">
+            <span class="status-label">Status:</span>
+            <span class="status-value">No items to enrich</span>
+          </div>
+        `;
+      }
+    } else {
+      statusContainer.innerHTML = `
+        <div class="status-row">
+          <span class="status-label">Error:</span>
+          <span class="status-value">${result.error}</span>
+        </div>
+      `;
+    }
+  } catch (error) {
+    statusContainer.innerHTML = `
+      <div class="status-row">
+        <span class="status-label">Error:</span>
+        <span class="status-value">${error.message}</span>
+      </div>
+    `;
+  }
+}
+
+// Refresh enrichment status button
+document.getElementById('btn-refresh-enrichment').addEventListener('click', () => {
+  updateEnrichmentStatus();
+});
+
+// ============================================
+// Incremental Semantic Analysis
+// ============================================
+
+// Update semantic status display
+async function updateSemanticStatus() {
+  const statusContainer = document.getElementById('semantic-status');
+  const statusText = document.getElementById('semantic-status-text');
+  
+  try {
+    const result = await window.api.getSemanticStatus();
+    
+    if (result.success) {
+      // Parse the output to extract status info
+      const output = result.output || '';
+      const lines = output.split('\n').filter(l => l.trim());
+      
+      // Build status display
+      let html = '';
+      let totalPending = 0;
+      let totalComplete = 0;
+      
+      let hasStuck = false;
+      for (const line of lines) {
+        // Match lines like "  UDT             3/5   complete (60%)"
+        // Also capture optional "⚠️  X stuck in_progress" suffix
+        const match = line.match(/^\s*(\w+)\s+(\d+)\/(\d+)\s+complete\s+\((\d+)%\)/);
+        const stuckMatch = line.match(/(\d+)\s+stuck\s+in_progress/);
+        
+        if (match) {
+          const [, type, complete, total, pct] = match;
+          const pending = parseInt(total) - parseInt(complete);
+          const stuck = stuckMatch ? parseInt(stuckMatch[1]) : 0;
+          totalPending += pending;
+          totalComplete += parseInt(complete);
+          
+          if (stuck > 0) hasStuck = true;
+          
+          const isComplete = pct === '100';
+          html += `
+            <div class="status-item">
+              <span class="type-name">${type}</span>
+              <div class="progress">
+                <div class="progress-bar">
+                  <div class="progress-fill ${isComplete ? 'complete' : ''}" style="width: ${pct}%"></div>
+                </div>
+                <span class="progress-text">${complete}/${total}${stuck > 0 ? ` ⚠️${stuck}` : ''}</span>
+              </div>
+            </div>
+          `;
+        }
+      }
+      
+      if (hasStuck) {
+        html += `<div class="status-warning">⚠️ Some items stuck - click "Recover Stuck"</div>`;
+      }
+      
+      if (html) {
+        statusContainer.innerHTML = html;
+      } else {
+        statusContainer.innerHTML = `
+          <div class="status-row">
+            <span class="status-label">Status:</span>
+            <span class="status-value">No items found</span>
+          </div>
+        `;
+      }
+      
+      // Update summary text
+      if (totalPending === 0 && totalComplete > 0) {
+        statusText && (statusText.textContent = '✓ All complete');
+      } else if (totalPending > 0) {
+        statusText && (statusText.textContent = `${totalPending} pending`);
+      }
+    } else {
+      statusContainer.innerHTML = `
+        <div class="status-row">
+          <span class="status-label">Error:</span>
+          <span class="status-value">${result.error}</span>
+        </div>
+      `;
+    }
+  } catch (error) {
+    statusContainer.innerHTML = `
+      <div class="status-row">
+        <span class="status-label">Error:</span>
+        <span class="status-value">${error.message}</span>
+      </div>
+    `;
+  }
+}
+
+// Refresh semantic status button
+document.getElementById('btn-refresh-semantic-status').addEventListener('click', () => {
+  updateSemanticStatus();
+});
+
+// Recover stuck items button
+document.getElementById('btn-recover-stuck').addEventListener('click', async () => {
+  appendOutput('\n🔧 Recovering stuck items...\n', false);
+  
+  try {
+    const result = await window.api.recoverStuck();
+    if (result.success) {
+      appendOutput(result.output + '\n');
+      updateSemanticStatus();
+    } else {
+      appendOutput(`❌ Error: ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`❌ Error: ${error.message}\n`);
+  }
+});
+
+// Run incremental analysis
+document.getElementById('btn-run-incremental').addEventListener('click', async () => {
+  // Check if we have a file to analyze
+  if (!lastIgnitionFile) {
+    // Prompt to select a file
+    const filePath = await window.api.selectFile({
+      filters: [
+        { name: 'Ignition Backup', extensions: ['json'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+    
+    if (!filePath) {
+      appendOutput('\n⚠️ No file selected. Please import an Ignition backup first.\n');
+      return;
+    }
+    lastIgnitionFile = filePath;
+  }
+  
+  // Get batch size from input
+  const batchSizeInput = document.getElementById('batch-size');
+  const batchSize = Math.max(1, Math.min(50, parseInt(batchSizeInput.value) || 10));
+  batchSizeInput.value = batchSize; // Normalize the displayed value
+  
+  appendOutput(`\n🧠 Running incremental analysis on: ${lastIgnitionFile}\n`, false);
+  appendOutput(`⏳ Analyzing next batch (up to ${batchSize} items)...\n`);
+  isIngestActive = true;
+  disableIngestButtons(true);
+  
+  try {
+    const result = await window.api.runIncrementalAnalysis({
+      inputFile: lastIgnitionFile,
+      batchSize: batchSize,
+      maxItems: batchSize
+    });
+    
+    if (result.success) {
+      appendOutput('\n✅ Batch analysis complete!\n');
+    } else {
+      appendOutput(`\n❌ Error: ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`\n❌ Error: ${error.message}\n`);
+  }
+  
+  isIngestActive = false;
+  disableIngestButtons(false);
+  updateSemanticStatus();
+});
+
+// ============================================
+// Diff Processing
+// ============================================
+
+let selectedDiffFile = null;
+const diffFileDisplay = document.getElementById('diff-file-display');
+const btnSelectDiff = document.getElementById('btn-select-diff');
+const btnPreviewDiff = document.getElementById('btn-preview-diff');
+const btnApplyDiff = document.getElementById('btn-apply-diff');
+
+// Select diff file
+btnSelectDiff.addEventListener('click', async () => {
+  const filePath = await window.api.selectDiffFile();
+  if (filePath) {
+    selectedDiffFile = filePath;
+    // Show just the filename in the display
+    const fileName = filePath.split(/[/\\]/).pop();
+    diffFileDisplay.innerHTML = `<span class="file-name">📋 ${fileName}</span>`;
+    btnPreviewDiff.disabled = false;
+    btnApplyDiff.disabled = false;
+  }
+});
+
+// Preview diff changes
+btnPreviewDiff.addEventListener('click', async () => {
+  if (!selectedDiffFile) return;
+  
+  appendOutput(`\n📋 Previewing diff: ${selectedDiffFile}\n`, false);
+  
+  try {
+    const result = await window.api.previewDiff(selectedDiffFile, lastIgnitionFile);
+    if (result.success) {
+      appendOutput(result.output + '\n');
+    } else {
+      appendOutput(`❌ Error: ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`❌ Error: ${error.message}\n`);
+  }
+});
+
+// Apply diff changes
+btnApplyDiff.addEventListener('click', async () => {
+  if (!selectedDiffFile) return;
+  
+  const confirmed = confirm('Apply diff changes?\n\nThis will:\n• Update/create/delete entities in Neo4j\n• Mark affected entities for re-analysis\n• Cascade changes to related items');
+  if (!confirmed) return;
+  
+  appendOutput(`\n📋 Applying diff: ${selectedDiffFile}\n`, false);
+  appendOutput('⏳ Processing changes...\n');
+  isIngestActive = true;
+  disableIngestButtons(true);
+  
+  try {
+    const result = await window.api.applyDiff(selectedDiffFile, lastIgnitionFile);
+    if (result.success) {
+      appendOutput('\n✅ Diff applied successfully!\n');
+      appendOutput('ℹ️ Run "Analyze Next Batch" to process pending items.\n');
+    } else {
+      appendOutput(`\n❌ Error: ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`\n❌ Error: ${error.message}\n`);
+  }
+  
+  isIngestActive = false;
+  disableIngestButtons(false);
+  updateStats();
+  updateSemanticStatus();
+  
+  // Clear the diff file selection after applying
+  selectedDiffFile = null;
+  diffFileDisplay.innerHTML = '<span class="placeholder">No diff file selected</span>';
+  btnPreviewDiff.disabled = true;
+  btnApplyDiff.disabled = true;
 });
 
 // ============================================
@@ -315,8 +702,9 @@ function escapeHtml(text) {
 }
 
 function formatResponse(text) {
+  if (!text) return '';
   // Clean up Neo4j warnings first
-  text = text
+  text = (text || '')
     .split('\n')
     .filter(line => !line.includes('GqlStatusObject') && !line.includes('Received notification'))
     .join('\n');
@@ -437,7 +825,7 @@ async function updateStats() {
     const result = await window.api.getStats();
     if (result.success) {
       // Clean and format the output
-      const cleaned = result.output
+      const cleaned = (result.output || '')
         .split('\n')
         .filter(line => !line.includes('GqlStatusObject') && !line.includes('Received notification'))
         .join('\n');
@@ -473,7 +861,7 @@ document.getElementById('btn-get-stats').addEventListener('click', () => {
   updateStats();
 });
 
-// Clear Database
+// Clear Database - All
 document.getElementById('btn-clear-db').addEventListener('click', async () => {
   const confirmed = confirm('⚠️ This will DELETE ALL DATA from the ontology database.\n\nAre you sure you want to continue?');
   if (!confirmed) return;
@@ -484,6 +872,76 @@ document.getElementById('btn-clear-db').addEventListener('click', async () => {
     const result = await window.api.clearDatabase();
     if (result.success) {
       alert('✅ Database cleared successfully!');
+      lastIgnitionFile = null;
+    } else {
+      alert(`❌ Error: ${result.error}`);
+    }
+  } catch (error) {
+    alert(`❌ Error: ${error.message}`);
+  }
+  
+  hideLoading();
+  updateStats();
+  updateSemanticStatus();
+});
+
+// Clear Database - Ignition only
+document.getElementById('btn-clear-ignition').addEventListener('click', async () => {
+  const confirmed = confirm('⚠️ This will delete all Ignition/SCADA data:\n• UDTs\n• Views\n• Equipment\n• View Components\n• Cross-system mappings\n\nPLC data will be preserved.\n\nContinue?');
+  if (!confirmed) return;
+  
+  showLoading('Clearing Ignition data...');
+  
+  try {
+    const result = await window.api.clearIgnition();
+    if (result.success) {
+      alert('✅ Ignition data cleared successfully!');
+      lastIgnitionFile = null;
+    } else {
+      alert(`❌ Error: ${result.error}`);
+    }
+  } catch (error) {
+    alert(`❌ Error: ${error.message}`);
+  }
+  
+  hideLoading();
+  updateStats();
+  updateSemanticStatus();
+});
+
+// Clear Database - PLC only
+document.getElementById('btn-clear-plc').addEventListener('click', async () => {
+  const confirmed = confirm('⚠️ This will delete all PLC data:\n• AOIs\n• Tags\n• Control Patterns\n• Fault Symptoms\n• Cross-system mappings\n\nIgnition data will be preserved.\n\nContinue?');
+  if (!confirmed) return;
+  
+  showLoading('Clearing PLC data...');
+  
+  try {
+    const result = await window.api.clearPLC();
+    if (result.success) {
+      alert('✅ PLC data cleared successfully!');
+    } else {
+      alert(`❌ Error: ${result.error}`);
+    }
+  } catch (error) {
+    alert(`❌ Error: ${error.message}`);
+  }
+  
+  hideLoading();
+  updateStats();
+});
+
+// Clear Database - Unification only
+document.getElementById('btn-clear-unification').addEventListener('click', async () => {
+  const confirmed = confirm('⚠️ This will delete all unification data:\n• PLC↔SCADA mappings\n• End-to-end flows\n• System overview\n• Operator dictionary\n\nPLC and Ignition data will be preserved.\n\nContinue?');
+  if (!confirmed) return;
+  
+  showLoading('Clearing unification data...');
+  
+  try {
+    const result = await window.api.clearUnification();
+    if (result.success) {
+      alert('✅ Unification data cleared successfully!');
     } else {
       alert(`❌ Error: ${result.error}`);
     }
@@ -538,5 +996,9 @@ document.getElementById('btn-generate-viz').addEventListener('click', async () =
 // ============================================
 
 // Check connection and load stats on startup
-setTimeout(updateStats, 500);
+setTimeout(() => {
+  updateStats();
+  updateSemanticStatus();
+  updateEnrichmentStatus();
+}, 500);
 
