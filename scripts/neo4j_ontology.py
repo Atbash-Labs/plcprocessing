@@ -156,39 +156,39 @@ class OntologyGraph:
 
     def clear_ignition(self) -> Dict[str, int]:
         """Clear all Ignition/SCADA-related nodes and cross-system mappings.
-        
+
         Deletes: UDT, Equipment, View, ViewComponent nodes and any MAPS_TO_SCADA relationships.
-        
+
         Returns:
             Dict with counts of deleted nodes by type
         """
         with self.session() as session:
             counts = {}
-            
+
             # Delete MAPS_TO_SCADA relationships first (cross-system links)
             result = session.run(
                 "MATCH ()-[r:MAPS_TO_SCADA]->() DELETE r RETURN count(r) as count"
             )
             counts["MAPS_TO_SCADA_relationships"] = result.single()["count"]
-            
+
             # Delete ViewComponents and their relationships
             result = session.run(
                 "MATCH (c:ViewComponent) DETACH DELETE c RETURN count(c) as count"
             )
             counts["ViewComponent"] = result.single()["count"]
-            
+
             # Delete Views and their relationships
             result = session.run(
                 "MATCH (v:View) DETACH DELETE v RETURN count(v) as count"
             )
             counts["View"] = result.single()["count"]
-            
+
             # Delete Equipment and their relationships
             result = session.run(
                 "MATCH (e:Equipment) DETACH DELETE e RETURN count(e) as count"
             )
             counts["Equipment"] = result.single()["count"]
-            
+
             # Delete UDTs and their member tags
             result = session.run(
                 """
@@ -199,57 +199,57 @@ class OntologyGraph:
                 """
             )
             counts["UDT"] = result.single()["count"]
-            
+
             # Delete ScadaTags (standalone SCADA tags)
             result = session.run(
                 "MATCH (t:ScadaTag) DETACH DELETE t RETURN count(t) as count"
             )
             counts["ScadaTag"] = result.single()["count"]
-            
+
             # Delete EndToEndFlow nodes (cross-system)
             result = session.run(
                 "MATCH (f:EndToEndFlow) DETACH DELETE f RETURN count(f) as count"
             )
             counts["EndToEndFlow"] = result.single()["count"]
-            
+
             # Delete SystemOverview (cross-system)
             result = session.run(
                 "MATCH (s:SystemOverview) DETACH DELETE s RETURN count(s) as count"
             )
             counts["SystemOverview"] = result.single()["count"]
-            
+
             return counts
 
     def clear_plc(self) -> Dict[str, int]:
         """Clear all PLC-related nodes and cross-system mappings.
-        
+
         Deletes: AOI, Tag (AOI-related), ControlPattern, DataFlow, SafetyElement,
         FaultSymptom, FaultCause, Intent, OperatorPhrase nodes and MAPS_TO_SCADA relationships.
-        
+
         Returns:
             Dict with counts of deleted nodes by type
         """
         with self.session() as session:
             counts = {}
-            
+
             # Delete MAPS_TO_SCADA relationships first (cross-system links)
             result = session.run(
                 "MATCH ()-[r:MAPS_TO_SCADA]->() DELETE r RETURN count(r) as count"
             )
             counts["MAPS_TO_SCADA_relationships"] = result.single()["count"]
-            
+
             # Delete EndToEndFlow nodes (cross-system)
             result = session.run(
                 "MATCH (f:EndToEndFlow) DETACH DELETE f RETURN count(f) as count"
             )
             counts["EndToEndFlow"] = result.single()["count"]
-            
+
             # Delete SystemOverview (cross-system)
             result = session.run(
                 "MATCH (s:SystemOverview) DETACH DELETE s RETURN count(s) as count"
             )
             counts["SystemOverview"] = result.single()["count"]
-            
+
             # Delete AOIs and all their related nodes
             result = session.run(
                 """
@@ -267,51 +267,51 @@ class OntologyGraph:
                 """
             )
             counts["AOI"] = result.single()["count"]
-            
+
             # Delete CommonPhrases (operator dictionary)
             result = session.run(
                 "MATCH (p:CommonPhrase) DETACH DELETE p RETURN count(p) as count"
             )
             counts["CommonPhrase"] = result.single()["count"]
-            
+
             return counts
 
     def clear_unification(self) -> Dict[str, int]:
         """Clear all unification/cross-system data without touching PLC or Ignition data.
-        
+
         Deletes: MAPS_TO_SCADA relationships, EndToEndFlow, SystemOverview, CommonPhrase nodes.
         Preserves: AOIs, UDTs, Views, Equipment, ViewComponents.
-        
+
         Returns:
             Dict with counts of deleted items
         """
         with self.session() as session:
             counts = {}
-            
+
             # Delete MAPS_TO_SCADA relationships
             result = session.run(
                 "MATCH ()-[r:MAPS_TO_SCADA]->() DELETE r RETURN count(r) as count"
             )
             counts["MAPS_TO_SCADA_relationships"] = result.single()["count"]
-            
+
             # Delete EndToEndFlow nodes
             result = session.run(
                 "MATCH (f:EndToEndFlow) DETACH DELETE f RETURN count(f) as count"
             )
             counts["EndToEndFlow"] = result.single()["count"]
-            
+
             # Delete SystemOverview
             result = session.run(
                 "MATCH (s:SystemOverview) DETACH DELETE s RETURN count(s) as count"
             )
             counts["SystemOverview"] = result.single()["count"]
-            
+
             # Delete CommonPhrases (operator dictionary)
             result = session.run(
                 "MATCH (p:CommonPhrase) DETACH DELETE p RETURN count(p) as count"
             )
             counts["CommonPhrase"] = result.single()["count"]
-            
+
             return counts
 
     # =========================================================================
@@ -329,7 +329,7 @@ class OntologyGraph:
     ) -> str:
         """
         Create an AOI node with all its related data.
-        
+
         Args:
             name: AOI name
             aoi_type: Type of AOI (AOI, UDT, etc.)
@@ -337,12 +337,12 @@ class OntologyGraph:
             metadata: Metadata dict (revision, vendor, description)
             analysis: Analysis dict (purpose, tags, patterns, etc.)
             semantic_status: One of 'pending', 'in_progress', 'complete', 'review'
-        
+
         Returns:
             The AOI name.
         """
         purpose = (analysis or {}).get("purpose", "")
-        
+
         with self.session() as session:
             # Create main AOI node with semantic_status tracking
             result = session.run(
@@ -684,7 +684,7 @@ class OntologyGraph:
                 """,
                 {"aoi_name": aoi_name},
             )
-            
+
             # Fault tree
             fault_tree = troubleshooting.get("fault_tree", [])
             for fault in fault_tree:
@@ -938,7 +938,7 @@ class OntologyGraph:
         semantic_status: str = "pending",
     ) -> str:
         """Create a UDT node.
-        
+
         Args:
             name: UDT name
             purpose: Semantic description (empty if not yet analyzed)
@@ -999,7 +999,7 @@ class OntologyGraph:
         semantic_status: str = "pending",
     ) -> str:
         """Create an equipment instance node.
-        
+
         Args:
             name: Equipment instance name
             equipment_type: Type of equipment
@@ -1051,7 +1051,7 @@ class OntologyGraph:
         semantic_status: str = "pending",
     ) -> str:
         """Create a SCADA view node.
-        
+
         Args:
             name: View name
             path: View path in Ignition
@@ -1340,7 +1340,7 @@ class OntologyGraph:
         reference_type: str = "expression",
     ) -> bool:
         """Create a REFERENCES relationship between two ScadaTags.
-        
+
         Used when one tag references another (e.g., expression tags).
 
         Args:
@@ -1582,18 +1582,18 @@ class OntologyGraph:
         self, item_type: str, limit: int = 10
     ) -> List[Dict[str, Any]]:
         """Get items that haven't been semantically analyzed yet.
-        
+
         Args:
             item_type: One of 'AOI', 'UDT', 'View', 'Equipment', 'ViewComponent', 'ScadaTag'
             limit: Maximum number of items to return
-            
+
         Returns:
             List of dicts with 'name' and other relevant properties
         """
         valid_types = {"AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag"}
         if item_type not in valid_types:
             raise ValueError(f"item_type must be one of {valid_types}")
-        
+
         with self.session() as session:
             if item_type == "ViewComponent":
                 result = session.run(
@@ -1642,24 +1642,24 @@ class OntologyGraph:
         self, item_type: str, name: str, status: str, purpose: str = None
     ) -> bool:
         """Update the semantic status of an item.
-        
+
         Args:
             item_type: One of 'AOI', 'UDT', 'View', 'Equipment', 'ViewComponent', 'ScadaTag'
             name: Name of the item (or path for ViewComponent)
             status: One of 'pending', 'in_progress', 'complete', 'review'
             purpose: Semantic description to set (only used when status='complete')
-            
+
         Returns:
             True if item was found and updated
         """
         valid_types = {"AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag"}
         valid_statuses = {"pending", "in_progress", "complete", "review"}
-        
+
         if item_type not in valid_types:
             raise ValueError(f"item_type must be one of {valid_types}")
         if status not in valid_statuses:
             raise ValueError(f"status must be one of {valid_statuses}")
-        
+
         with self.session() as session:
             if item_type == "ViewComponent":
                 # ViewComponent uses path as identifier
@@ -1690,18 +1690,27 @@ class OntologyGraph:
                 )
             return result.single() is not None
 
-    def get_semantic_status_counts(self, include_deleted: bool = False) -> Dict[str, Dict[str, int]]:
+    def get_semantic_status_counts(
+        self, include_deleted: bool = False
+    ) -> Dict[str, Dict[str, int]]:
         """Get counts of items by semantic status for each type.
-        
+
         Args:
             include_deleted: If True, include deleted items in counts
-        
+
         Returns:
             Dict like {'UDT': {'pending': 5, 'complete': 3, 'deleted': 1}, ...}
         """
         with self.session() as session:
             result = {}
-            for item_type in ["AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag"]:
+            for item_type in [
+                "AOI",
+                "UDT",
+                "View",
+                "Equipment",
+                "ViewComponent",
+                "ScadaTag",
+            ]:
                 if include_deleted:
                     counts_result = session.run(
                         f"""
@@ -1724,55 +1733,59 @@ class OntologyGraph:
 
     def get_enrichment_status_counts(self) -> Dict[str, Dict[str, int]]:
         """Get counts of items by troubleshooting enrichment status.
-        
+
         Returns:
             Dict like {'AOI': {'enriched': 5, 'pending': 3}, 'View': {'enriched': 2, 'pending': 4}}
         """
         with self.session() as session:
             result = {}
-            
+
             # AOI enrichment status
-            aoi_result = session.run("""
+            aoi_result = session.run(
+                """
                 MATCH (a:AOI)
                 RETURN 
                     sum(CASE WHEN a.troubleshooting_enriched = true THEN 1 ELSE 0 END) as enriched,
                     sum(CASE WHEN a.troubleshooting_enriched IS NULL OR a.troubleshooting_enriched = false THEN 1 ELSE 0 END) as pending
-            """)
+            """
+            )
             aoi_record = aoi_result.single()
             result["AOI"] = {
                 "enriched": aoi_record["enriched"] if aoi_record else 0,
-                "pending": aoi_record["pending"] if aoi_record else 0
+                "pending": aoi_record["pending"] if aoi_record else 0,
             }
-            
+
             # View enrichment status
-            view_result = session.run("""
+            view_result = session.run(
+                """
                 MATCH (v:View)
                 RETURN 
                     sum(CASE WHEN v.troubleshooting_enriched = true THEN 1 ELSE 0 END) as enriched,
                     sum(CASE WHEN v.troubleshooting_enriched IS NULL OR v.troubleshooting_enriched = false THEN 1 ELSE 0 END) as pending
-            """)
+            """
+            )
             view_record = view_result.single()
             result["View"] = {
                 "enriched": view_record["enriched"] if view_record else 0,
-                "pending": view_record["pending"] if view_record else 0
+                "pending": view_record["pending"] if view_record else 0,
             }
-            
+
             return result
 
     def get_item_with_context(
         self, item_type: str, name: str
     ) -> Optional[Dict[str, Any]]:
         """Get an item with its related context for semantic analysis.
-        
+
         For AOI: includes tags, patterns, flows, SCADA mappings
         For UDT: includes member tags, related views, any AOI mappings
         For View: includes components, bound UDTs
         For Equipment: includes UDT type, related views
-        
+
         Args:
             item_type: One of 'AOI', 'UDT', 'View', 'Equipment', 'ViewComponent'
             name: Name of the item
-            
+
         Returns:
             Dict with item data and context, or None if not found
         """
@@ -1862,11 +1875,11 @@ class OntologyGraph:
                 )
             else:
                 return None
-            
+
             record = result.single()
             if not record:
                 return None
-            
+
             item_data = dict(record["item"])
             context = {k: v for k, v in dict(record).items() if k != "item"}
             return {"item": item_data, "context": context}
@@ -2149,16 +2162,31 @@ def main():
     parser = argparse.ArgumentParser(description="Neo4j ontology management")
     parser.add_argument(
         "command",
-        choices=["init", "clear", "clear-ignition", "clear-plc", "clear-unification", "import", "export", "query"],
+        choices=[
+            "init",
+            "clear",
+            "clear-ignition",
+            "clear-plc",
+            "clear-unification",
+            "import",
+            "export",
+            "query",
+        ],
         help="Command to execute",
     )
     parser.add_argument("--file", "-f", help="JSON file for import/export")
     parser.add_argument("--query", "-q", help="Query string for search")
-    parser.add_argument("--enrichment-status", action="store_true", help="Show troubleshooting enrichment status")
+    parser.add_argument(
+        "--enrichment-status",
+        action="store_true",
+        help="Show troubleshooting enrichment status",
+    )
     parser.add_argument("--uri", default=DEFAULT_URI, help="Neo4j URI")
     parser.add_argument("--user", default=DEFAULT_USER, help="Neo4j user")
     parser.add_argument("--password", default=DEFAULT_PASSWORD, help="Neo4j password")
-    parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
+    parser.add_argument(
+        "--yes", "-y", action="store_true", help="Skip confirmation prompts"
+    )
 
     args = parser.parse_args()
 
@@ -2180,7 +2208,9 @@ def main():
 
         elif args.command == "clear-ignition":
             if not args.yes:
-                confirm = input("This will delete all Ignition/SCADA data and cross-system mappings. Type 'yes' to confirm: ")
+                confirm = input(
+                    "This will delete all Ignition/SCADA data and cross-system mappings. Type 'yes' to confirm: "
+                )
                 if confirm.lower() != "yes":
                     print("[CANCELLED]")
                     return
@@ -2192,7 +2222,9 @@ def main():
 
         elif args.command == "clear-plc":
             if not args.yes:
-                confirm = input("This will delete all PLC data and cross-system mappings. Type 'yes' to confirm: ")
+                confirm = input(
+                    "This will delete all PLC data and cross-system mappings. Type 'yes' to confirm: "
+                )
                 if confirm.lower() != "yes":
                     print("[CANCELLED]")
                     return
@@ -2204,7 +2236,9 @@ def main():
 
         elif args.command == "clear-unification":
             if not args.yes:
-                confirm = input("This will delete all unification data (mappings, flows, overview). Type 'yes' to confirm: ")
+                confirm = input(
+                    "This will delete all unification data (mappings, flows, overview). Type 'yes' to confirm: "
+                )
                 if confirm.lower() != "yes":
                     print("[CANCELLED]")
                     return
@@ -2240,7 +2274,9 @@ def main():
                 for item_type, status in counts.items():
                     total = status["enriched"] + status["pending"]
                     pct = (status["enriched"] / total * 100) if total > 0 else 0
-                    print(f"  {item_type:15} {status['enriched']}/{total} enriched ({pct:.0f}%)")
+                    print(
+                        f"  {item_type:15} {status['enriched']}/{total} enriched ({pct:.0f}%)"
+                    )
             elif args.query:
                 results = graph.find_by_symptom(args.query)
                 if results:

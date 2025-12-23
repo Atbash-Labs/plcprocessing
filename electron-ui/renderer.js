@@ -506,7 +506,7 @@ document.getElementById('btn-run-incremental').addEventListener('click', async (
   
   // Get batch size from input
   const batchSizeInput = document.getElementById('batch-size');
-  const batchSize = Math.max(1, Math.min(50, parseInt(batchSizeInput.value) || 10));
+  const batchSize = Math.max(1, Math.min(5000, parseInt(batchSizeInput.value) || 10));
   batchSizeInput.value = batchSize; // Normalize the displayed value
   
   appendOutput(`\n🧠 Running incremental analysis on: ${lastIgnitionFile}\n`, false);

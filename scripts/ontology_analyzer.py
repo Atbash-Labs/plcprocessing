@@ -62,7 +62,7 @@ class OntologyAnalyzer:
         self, sc_file: SCFile, verbose: bool = False, skip_ai: bool = False
     ) -> Dict[str, Any]:
         """Analyze a parsed SC file and store ontology in Neo4j.
-        
+
         Args:
             sc_file: Parsed SC file
             verbose: Print detailed progress
@@ -257,10 +257,14 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
             }
 
     def analyze_directory(
-        self, directory: str, pattern: str = "*.aoi.sc", verbose: bool = False, skip_ai: bool = False
+        self,
+        directory: str,
+        pattern: str = "*.aoi.sc",
+        verbose: bool = False,
+        skip_ai: bool = False,
     ) -> List[Dict[str, Any]]:
         """Analyze all SC files in a directory and store in Neo4j.
-        
+
         Args:
             directory: Directory path
             pattern: File pattern to match
@@ -384,7 +388,7 @@ def main():
             else:
                 print("  No AOIs found. Import PLC files first.")
             print()
-        
+
         elif args.list:
             # List all AOIs
             aois = analyzer.get_all_ontologies()
@@ -415,18 +419,25 @@ def main():
             # Process directory or single file
             if input_path.is_dir():
                 ontologies = analyzer.analyze_directory(
-                    str(input_path), pattern=args.pattern, verbose=args.verbose, skip_ai=args.skip_ai
+                    str(input_path),
+                    pattern=args.pattern,
+                    verbose=args.verbose,
+                    skip_ai=args.skip_ai,
                 )
                 action = "Imported" if args.skip_ai else "Analyzed"
                 print(f"\n[OK] {action} {len(ontologies)} files and stored in Neo4j")
                 if args.skip_ai:
-                    print("[INFO] Use incremental analyzer to add semantic descriptions")
+                    print(
+                        "[INFO] Use incremental analyzer to add semantic descriptions"
+                    )
 
             elif input_path.is_file():
                 # Parse and analyze single file
                 sc_parser = SCParser()
                 sc_file = sc_parser.parse_file(str(input_path))
-                ontology = analyzer.analyze_sc_file(sc_file, verbose=args.verbose, skip_ai=args.skip_ai)
+                ontology = analyzer.analyze_sc_file(
+                    sc_file, verbose=args.verbose, skip_ai=args.skip_ai
+                )
 
                 # Print summary
                 print(f"\n=== Ontology: {ontology['name']} ===")
