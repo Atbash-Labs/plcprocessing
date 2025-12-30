@@ -61,224 +61,28 @@ class TroubleshootingOntologyGenerator:
             self._client.close()
             self._client = None
 
-    def enrich_all_aois(
-        self, verbose: bool = False, batch_size: int = 0, limit: int = 0
-    ) -> int:
+    def enrich_all_aois(self, verbose: bool = False) -> int:
         """
-        Enrich AOIs in Neo4j with troubleshooting data.
-        
-        Only processes AOIs that haven't been enriched yet (troubleshooting_enriched != true).
-        
-        Args:
-            verbose: Print detailed progress
-            batch_size: Process N items then stop (0 = all)
-            limit: Maximum items to process (0 = no limit)
-        
-        Returns:
-            Count of enriched AOIs.
+        Enrich all AOIs in Neo4j with troubleshooting data.
+        Returns count of enriched AOIs.
         """
-        # Get only unenriched AOIs
-        with self.graph.session() as session:
-            result = session.run("""
-                MATCH (a:AOI)
-                WHERE a.troubleshooting_enriched IS NULL OR a.troubleshooting_enriched = false
-                RETURN a.name as name
-            """)
-            aois = [{"name": r["name"]} for r in result]
-        
-        # Apply limit
-        if limit > 0:
-            aois = aois[:limit]
-        
-        # For batch mode, only process batch_size items
-        if batch_size > 0:
-            aois = aois[:batch_size]
+        aois = self.graph.get_all_aois()
         
         if verbose:
-            print(f"[INFO] Processing {len(aois)} AOIs")
+            print(f"[INFO] Found {len(aois)} AOIs to enrich")
         
         enriched_count = 0
-        for i, aoi in enumerate(aois, 1):
+        for aoi in aois:
             try:
-                if verbose:
-                    print(f"[{i}/{len(aois)}] Enriching {aoi['name']}...")
                 self.enrich_aoi(aoi['name'], verbose=verbose)
                 enriched_count += 1
             except Exception as e:
                 print(f"[ERROR] Failed to enrich {aoi['name']}: {e}")
         
-        # Generate operator dictionary (only if processing all or last batch)
-        if batch_size == 0 or enriched_count < batch_size:
-            self._generate_operator_dictionary(verbose)
+        # Generate operator dictionary
+        self._generate_operator_dictionary(verbose)
         
         return enriched_count
-    
-    def enrich_all_views(
-        self, verbose: bool = False, batch_size: int = 0, limit: int = 0
-    ) -> int:
-        """
-        Enrich Views in Neo4j with troubleshooting data.
-        
-        This adds HMI-specific troubleshooting info like:
-        - Common operator issues with this screen
-        - What to check if values look wrong
-        - Related equipment and its symptoms
-        
-        Args:
-            verbose: Print detailed progress
-            batch_size: Process N items then stop (0 = all)
-            limit: Maximum items to process (0 = no limit)
-        
-        Returns:
-            Count of enriched Views.
-        """
-        # Get Views that haven't been enriched yet
-        with self.graph.session() as session:
-            result = session.run("""
-                MATCH (v:View)
-                WHERE v.troubleshooting_enriched IS NULL OR v.troubleshooting_enriched = false
-                RETURN v.name as name, v.purpose as purpose, v.path as path
-            """)
-            views = [dict(r) for r in result]
-        
-        # Apply limits
-        if limit > 0:
-            views = views[:limit]
-        if batch_size > 0:
-            views = views[:batch_size]
-        
-        if verbose:
-            print(f"[INFO] Processing {len(views)} Views")
-        
-        enriched_count = 0
-        for i, view in enumerate(views, 1):
-            try:
-                if verbose:
-                    print(f"[{i}/{len(views)}] Enriching View: {view['name']}...")
-                self.enrich_view(view['name'], verbose=verbose)
-                enriched_count += 1
-            except Exception as e:
-                print(f"[ERROR] Failed to enrich {view['name']}: {e}")
-        
-        return enriched_count
-    
-    def enrich_view(self, view_name: str, verbose: bool = False) -> Dict:
-        """Enrich a single View with troubleshooting data."""
-        
-        # Get view context
-        view_context = self.graph.get_item_with_context("View", view_name)
-        if not view_context:
-            raise ValueError(f"View '{view_name}' not found in Neo4j")
-        
-        view = view_context["item"]
-        context = view_context["context"]
-        
-        # Build context for LLM
-        ctx_str = self._build_view_context(view, context)
-        
-        # Generate troubleshooting additions
-        troubleshooting = self._query_view_troubleshooting_llm(ctx_str, view_name, verbose)
-        
-        if 'error' not in troubleshooting:
-            # Store in Neo4j
-            self._store_view_troubleshooting(view_name, troubleshooting)
-            if verbose:
-                print(f"[OK] Stored troubleshooting data for View: {view_name}")
-        else:
-            if verbose:
-                print(f"[ERROR] Troubleshooting generation failed: {troubleshooting.get('error')}")
-        
-        return troubleshooting
-    
-    def _build_view_context(self, view: Dict, context: Dict) -> str:
-        """Build context string for View troubleshooting analysis."""
-        parts = []
-        
-        parts.append(f"# HMI View: {view.get('name', 'Unknown')}")
-        parts.append(f"Path: {view.get('path', '')}")
-        parts.append(f"Purpose: {view.get('purpose', 'Unknown')}")
-        parts.append("")
-        
-        # Components
-        components = context.get("components", [])
-        if components:
-            parts.append("## Components:")
-            for comp in components[:20]:  # Limit for context size
-                parts.append(f"- {comp.get('name')}: {comp.get('type')}")
-            if len(components) > 20:
-                parts.append(f"  ... and {len(components) - 20} more")
-            parts.append("")
-        
-        # Bound UDTs
-        udts = context.get("udts", [])
-        if udts:
-            parts.append(f"## Displays equipment types: {', '.join(udts)}")
-            parts.append("")
-        
-        return "\n".join(parts)
-    
-    def _query_view_troubleshooting_llm(
-        self, context: str, view_name: str, verbose: bool
-    ) -> Dict:
-        """Query Claude for View troubleshooting data."""
-        
-        system_prompt = """You are an expert HMI/SCADA engineer specializing in operator training and troubleshooting.
-Your task is to generate troubleshooting guidance for HMI screens.
-
-You have access to tools to query the existing ontology database for related equipment and AOIs."""
-
-        user_prompt = f"""Generate troubleshooting guidance for this HMI View.
-
-Consider:
-1. What operators typically do on this screen
-2. Common issues they might encounter
-3. What equipment this screen monitors/controls
-4. What symptoms would appear here if equipment fails
-
-Provide a JSON response with:
-- "common_issues": Array of common problems operators report on this screen
-- "visual_indicators": What visual cues indicate normal vs abnormal states
-- "related_symptoms": How equipment problems manifest on this screen
-- "quick_checks": First things to verify if something looks wrong
-
-{context}"""
-
-        if verbose:
-            print("[INFO] Querying Claude for View troubleshooting...")
-
-        result = self._client.query_json(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            max_tokens=4000,
-            use_tools=True,
-            verbose=verbose
-        )
-
-        if result.get("data"):
-            return result["data"]
-        else:
-            return {"error": result.get("error", "Unknown error")}
-    
-    def _store_view_troubleshooting(self, view_name: str, data: Dict):
-        """Store View troubleshooting data in Neo4j."""
-        import json
-        
-        with self.graph.session() as session:
-            session.run("""
-                MATCH (v:View {name: $name})
-                SET v.common_issues = $common_issues,
-                    v.visual_indicators = $visual_indicators,
-                    v.related_symptoms = $related_symptoms,
-                    v.quick_checks = $quick_checks,
-                    v.troubleshooting_enriched = true,
-                    v.enriched_at = datetime()
-            """, {
-                "name": view_name,
-                "common_issues": json.dumps(data.get("common_issues", [])),
-                "visual_indicators": json.dumps(data.get("visual_indicators", [])),
-                "related_symptoms": json.dumps(data.get("related_symptoms", [])),
-                "quick_checks": json.dumps(data.get("quick_checks", [])),
-            })
 
     def enrich_aoi(self, aoi_name: str, verbose: bool = False) -> Dict:
         """Enrich a single AOI with troubleshooting data."""
@@ -425,9 +229,9 @@ Output valid JSON only, no markdown, no explanations before or after.
         result = self._client.query_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=8000,
+            max_tokens=32000,
             use_tools=True,
-            verbose=verbose
+            verbose=verbose,
         )
 
         if verbose and result.get("tool_calls"):
@@ -443,16 +247,24 @@ Output valid JSON only, no markdown, no explanations before or after.
 
     def _generate_operator_dictionary(self, verbose: bool) -> None:
         """Generate a unified operator language dictionary from all AOIs."""
-        
+
         if verbose:
             print("[INFO] Generating operator dictionary...")
 
         # Build common operator language patterns
         common_phrases = {
             "line_stopping": {
-                "variations": ["line keeps stopping", "production stopped", "machine won't cycle"],
+                "variations": [
+                    "line keeps stopping",
+                    "production stopped",
+                    "machine won't cycle",
+                ],
                 "means": "Production sequence interrupted",
-                "scada_check": ["Line status display", "Active alarms", "Equipment faceplates"],
+                "scada_check": [
+                    "Line status display",
+                    "Active alarms",
+                    "Equipment faceplates",
+                ],
                 "plc_check": ["Sequence state", "Fault bits", "Interlock chain"],
                 "follow_up_questions": [
                     "Does it stop at the same place each time?",
@@ -461,9 +273,18 @@ Output valid JSON only, no markdown, no explanations before or after.
                 ]
             },
             "equipment_stuck": {
-                "variations": ["it's stuck", "won't move", "not extending", "not retracting"],
+                "variations": [
+                    "it's stuck",
+                    "won't move",
+                    "not extending",
+                    "not retracting",
+                ],
                 "means": "Actuator not responding to commands",
-                "scada_check": ["Equipment faceplate", "Position indicators", "Fault status"],
+                "scada_check": [
+                    "Equipment faceplate",
+                    "Position indicators",
+                    "Fault status",
+                ],
                 "plc_check": ["Command outputs", "Feedback inputs", "Timeout status"],
                 "follow_up_questions": [
                     "Which equipment specifically?",
@@ -472,7 +293,11 @@ Output valid JSON only, no markdown, no explanations before or after.
                 ]
             },
             "motor_issues": {
-                "variations": ["motor won't run", "motor stopped", "motor keeps faulting"],
+                "variations": [
+                    "motor won't run",
+                    "motor stopped",
+                    "motor keeps faulting",
+                ],
                 "means": "Motor start failure or unexpected stop",
                 "scada_check": ["Motor faceplate", "Status/fault indicators", "Interlock display"],
                 "plc_check": ["Run command", "Run feedback", "Interlock bits", "Overload status"],
@@ -531,8 +356,6 @@ def main():
                        help='Enrich all AOIs in Neo4j with troubleshooting data')
     parser.add_argument('--enrich', metavar='AOI_NAME',
                        help='Enrich a specific AOI')
-    parser.add_argument('--enrich-views', action='store_true',
-                       help='Enrich Views/HMIs with troubleshooting data')
     parser.add_argument('--symptom', metavar='TEXT',
                        help='Search for AOIs by symptom text')
     parser.add_argument('--phrase', metavar='TEXT',
@@ -541,10 +364,6 @@ def main():
     parser.add_argument('--model', default='claude-sonnet-4-5-20250929', help='Claude model')
     parser.add_argument('--no-tools', action='store_true',
                        help='Disable Neo4j tool calls')
-    parser.add_argument('--batch-size', type=int, default=0,
-                       help='Process in batches of N (0 = all at once)')
-    parser.add_argument('--limit', type=int, default=0,
-                       help='Limit total items processed (0 = no limit)')
     
     # Legacy JSON import support
     parser.add_argument('--import-json', metavar='FILE',
@@ -566,20 +385,8 @@ def main():
             print(f"[OK] Enriched {count} AOIs")
         
         elif args.enrich_all:
-            count = generator.enrich_all_aois(
-                verbose=args.verbose,
-                batch_size=args.batch_size,
-                limit=args.limit
-            )
+            count = generator.enrich_all_aois(verbose=args.verbose)
             print(f"[OK] Enriched {count} AOIs with troubleshooting data")
-        
-        elif args.enrich_views:
-            count = generator.enrich_all_views(
-                verbose=args.verbose,
-                batch_size=args.batch_size,
-                limit=args.limit
-            )
-            print(f"[OK] Enriched {count} Views with troubleshooting data")
         
         elif args.enrich:
             result = generator.enrich_aoi(args.enrich, verbose=args.verbose)

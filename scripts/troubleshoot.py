@@ -66,66 +66,68 @@ def run_interactive():
     print("-" * 60 + "\n")
 
     client = ClaudeClient(enable_tools=True)
-    
+
     try:
         while True:
             try:
                 question = input("\n🔧 You: ").strip()
             except EOFError:
                 break
-                
+
             if not question:
                 continue
-            if question.lower() in ('quit', 'exit', 'q'):
+            if question.lower() in ("quit", "exit", "q"):
                 print("\nGoodbye!")
                 break
-            if question.lower() == 'clear':
+            if question.lower() == "clear":
                 print("\n[Conversation cleared]\n")
                 continue
 
             print("\n🤖 Assistant: ", end="", flush=True)
-            
+
             # Query Claude with tools
             result = client.query(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=question,
-                max_tokens=4000,
+                max_tokens=16000,
                 use_tools=True,
-                verbose=False
+                verbose=False,
             )
-            
+
             # Handle encoding for Windows terminal
             response = result.get("text", "I couldn't process that question.")
             try:
                 print(response)
             except UnicodeEncodeError:
                 # Fallback for Windows terminals that can't handle unicode
-                safe_response = response.encode('ascii', 'replace').decode('ascii')
+                safe_response = response.encode("ascii", "replace").decode("ascii")
                 print(safe_response)
-            
+
             # Show tool usage summary
             tool_calls = result.get("tool_calls", [])
             if tool_calls:
                 print(f"\n  [Queried {len(tool_calls)} data sources]")
-    
+
     finally:
         client.close()
 
 
-def ask_single(question: str, history: List[Dict] = None, verbose: bool = False) -> Dict:
+def ask_single(
+    question: str, history: List[Dict] = None, verbose: bool = False
+) -> Dict:
     """
     Ask a troubleshooting question with optional conversation history.
-    
+
     Args:
         question: The new user question
         history: Previous conversation as list of {role, content} dicts
         verbose: Enable debug output
-        
+
     Returns:
         Dict with 'response' (text) and 'history' (updated conversation)
     """
     client = ClaudeClient(enable_tools=True)
-    
+
     try:
         # Build messages from history + new question
         if history:
@@ -133,30 +135,27 @@ def ask_single(question: str, history: List[Dict] = None, verbose: bool = False)
             messages.append({"role": "user", "content": question})
         else:
             messages = [{"role": "user", "content": question}]
-        
+
         result = client.query(
             system_prompt=SYSTEM_PROMPT,
             messages=messages,
             max_tokens=4000,
             use_tools=True,
-            verbose=verbose
+            verbose=verbose,
         )
-        
+
         response = result.get("text", "I couldn't process that question.")
-        
+
         if verbose:
             tool_calls = result.get("tool_calls", [])
             if tool_calls:
                 print(f"\n[DEBUG] Made {len(tool_calls)} tool calls", file=sys.stderr)
-        
+
         # Update history with the new exchange
         updated_history = messages + [{"role": "assistant", "content": response}]
-        
-        return {
-            "response": response,
-            "history": updated_history
-        }
-    
+
+        return {"response": response, "history": updated_history}
+
     finally:
         client.close()
 
@@ -164,22 +163,22 @@ def ask_single(question: str, history: List[Dict] = None, verbose: bool = False)
 def ask_with_history_json(history_json: str, verbose: bool = False) -> str:
     """
     Process a request with conversation history from JSON.
-    
+
     Expected JSON format:
     {
         "question": "new question",
         "history": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
     }
-    
+
     Returns JSON with response and updated history.
     """
     try:
         data = json.loads(history_json)
         question = data.get("question", "")
         history = data.get("history", [])
-        
+
         result = ask_single(question, history=history, verbose=verbose)
-        
+
         return json.dumps(result, ensure_ascii=False)
     except json.JSONDecodeError as e:
         return json.dumps({"error": f"Invalid JSON: {e}", "history": []})
@@ -189,25 +188,33 @@ def ask_with_history_json(history_json: str, verbose: bool = False) -> str:
 
 def main():
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description="Interactive troubleshooting assistant for PLC/SCADA systems"
     )
-    parser.add_argument('question', nargs='?', 
-                       help='Single question to ask (omit for interactive mode)')
-    parser.add_argument('-v', '--verbose', action='store_true',
-                       help='Show debug output including tool calls')
-    parser.add_argument('--history', action='store_true',
-                       help='Read JSON with question and history from stdin')
-    
+    parser.add_argument(
+        "question", nargs="?", help="Single question to ask (omit for interactive mode)"
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show debug output including tool calls",
+    )
+    parser.add_argument(
+        "--history",
+        action="store_true",
+        help="Read JSON with question and history from stdin",
+    )
+
     args = parser.parse_args()
-    
+
     load_dotenv()
-    
+
     # Fix Windows encoding
-    if sys.platform == 'win32':
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     if args.history:
         # Read JSON from stdin with conversation history
         history_json = sys.stdin.read()
@@ -224,4 +231,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

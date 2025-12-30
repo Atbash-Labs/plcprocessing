@@ -624,6 +624,16 @@ class ClaudeClient:
 
             # Handle continuation if needed
             if response.stop_reason == "max_tokens":
+                # Build continuation messages once, then update assistant content each iteration
+                cont_messages = messages.copy()
+                cont_messages.append({"role": "assistant", "content": full_response})
+                cont_messages.append(
+                    {
+                        "role": "user",
+                        "content": "Continue from where you left off. Do not repeat any content. If outputting JSON, continue the JSON structure exactly.",
+                    }
+                )
+
                 for cont in range(max_continuations):
                     if verbose:
                         print(
@@ -632,31 +642,28 @@ class ClaudeClient:
                             flush=True,
                         )
 
-                    messages.append({"role": "assistant", "content": full_response})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": "Continue from where you left off. Do not repeat any content.",
-                        }
-                    )
-
                     cont_response = self.client.messages.create(
                         model=self.model,
                         max_tokens=max_tokens,
                         system=system_prompt,
-                        messages=messages,
-                        tools=None,  # No tools during continuation
+                        messages=cont_messages,
                     )
 
                     total_input_tokens += cont_response.usage.input_tokens
                     total_output_tokens += cont_response.usage.output_tokens
 
+                    cont_text = ""
                     for block in cont_response.content:
                         if hasattr(block, "text"):
-                            full_response += block.text
+                            cont_text += block.text
+
+                    full_response += cont_text
 
                     if cont_response.stop_reason != "max_tokens":
                         break
+
+                    # Update assistant content for next continuation
+                    cont_messages[-2]["content"] = full_response
 
             return {
                 "text": full_response,

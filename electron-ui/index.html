@@ -62,41 +62,9 @@
             <div class="card-icon">📊</div>
             <h3>Ignition SCADA</h3>
             <p>Import Ignition project backup JSON files</p>
-            <div class="btn-row">
-              <button class="btn primary" id="btn-ingest-ignition">
-                Import + Analyze All
-              </button>
-              <button class="btn secondary" id="btn-ingest-ignition-incremental" title="Import entities only, then analyze incrementally">
-                Import Only
-              </button>
-            </div>
-          </div>
-          
-          <div class="card">
-            <div class="card-icon">🧠</div>
-            <h3>Incremental Analysis</h3>
-            <p>Analyze items piece-by-piece with AI</p>
-            <div class="semantic-status" id="semantic-status">
-              <div class="status-row">
-                <span class="status-label">Status:</span>
-                <span class="status-value" id="semantic-status-text">Click refresh to check</span>
-              </div>
-            </div>
-            <div class="batch-controls">
-              <label for="batch-size">Batch size:</label>
-              <input type="number" id="batch-size" value="10" min="1" max="5000" title="Number of items to analyze per batch">
-            </div>
-            <div class="btn-row">
-              <button class="btn primary" id="btn-run-incremental">
-                Analyze Next Batch
-              </button>
-              <button class="btn secondary" id="btn-refresh-semantic-status" title="Refresh status">
-                ↻ Refresh
-              </button>
-              <button class="btn secondary" id="btn-recover-stuck" title="Reset items stuck in 'in_progress' back to 'pending'">
-                🔧 Recover Stuck
-              </button>
-            </div>
+            <button class="btn primary" id="btn-ingest-ignition">
+              Select Ignition Backup
+            </button>
           </div>
           
           <div class="card">
@@ -106,43 +74,9 @@
             <button class="btn secondary" id="btn-run-unified">
               Run Unified Analysis
             </button>
-            <div class="enrichment-status" id="enrichment-status">
-              <div class="status-row">
-                <span class="status-label">Enrichment:</span>
-                <span class="status-value" id="enrichment-status-text">Click refresh to check</span>
-              </div>
-            </div>
-            <div class="btn-row">
-              <button class="btn secondary" id="btn-run-enrichment" title="Add troubleshooting data to AOIs">
-                Enrich AOIs
-              </button>
-              <button class="btn secondary" id="btn-run-enrichment-views" title="Add troubleshooting data to HMI Views">
-                Enrich Views
-              </button>
-              <button class="btn secondary btn-small" id="btn-refresh-enrichment" title="Refresh enrichment status">
-                ↻
-              </button>
-            </div>
-          </div>
-          
-          <div class="card">
-            <div class="card-icon">📋</div>
-            <h3>Apply Diff</h3>
-            <p>Apply Ignition diff files to update entities and trigger re-analysis</p>
-            <div class="diff-file-display" id="diff-file-display">
-              <span class="placeholder">No diff file selected</span>
-            </div>
-            <div class="btn-row">
-              <button class="btn secondary" id="btn-select-diff">
-                Select Diff File
-              </button>
-              <button class="btn secondary" id="btn-preview-diff" disabled>
-                Preview
-              </button>
-              <button class="btn primary" id="btn-apply-diff" disabled>
-                Apply
-              </button>
-            </div>
+            <button class="btn secondary" id="btn-run-enrichment">
+              Add Troubleshooting
+            </button>
           </div>
         </div>
         
@@ -212,6 +146,18 @@
           </div>
           
           <div class="card">
+            <div class="card-icon">💾</div>
+            <h3>Backup & Restore</h3>
+            <p>Save or load the database to/from a file</p>
+            <button class="btn primary" id="btn-save-db">
+              Save Database
+            </button>
+            <button class="btn secondary" id="btn-load-db">
+              Load Database
+            </button>
+          </div>
+          
+          <div class="card">
             <div class="card-icon">🌐</div>
             <h3>Visualization</h3>
             <p>Generate interactive graph visualization</p>
@@ -223,26 +169,13 @@
           <div class="card danger">
             <div class="card-icon">⚠️</div>
             <h3>Clear Database</h3>
-            <p>Selectively remove data from the ontology database</p>
-            <div class="btn-row">
-              <button class="btn warning" id="btn-clear-ignition" title="Clear Ignition/SCADA data and cross-system mappings">
-                Clear Ignition
-              </button>
-              <button class="btn warning" id="btn-clear-plc" title="Clear PLC data and cross-system mappings">
-                Clear PLC
-              </button>
-              <button class="btn warning" id="btn-clear-unification" title="Clear unification data (mappings, flows, overview)">
-                Clear Unification
-              </button>
-            </div>
-            <div class="btn-row">
-              <button class="btn danger" id="btn-clear-db">
-                Clear All Data
-              </button>
-              <button class="btn secondary" id="btn-init-db">
-                Initialize Schema
-              </button>
-            </div>
+            <p>Remove all data from the ontology database</p>
+            <button class="btn danger" id="btn-clear-db">
+              Clear All Data
+            </button>
+            <button class="btn secondary" id="btn-init-db">
+              Initialize Schema
+            </button>
           </div>
         </div>
       </section>

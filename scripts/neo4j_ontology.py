@@ -1969,6 +1969,151 @@ class OntologyGraph:
             )
             return [dict(r) for r in result]
 
+    def export_full_database(self) -> Dict:
+        """Export the entire database to a serializable dict for backup.
+        
+        Returns:
+            Dict with nodes, relationships, and metadata
+        """
+        from datetime import datetime
+        
+        with self.session() as session:
+            # Export all nodes with their labels and properties
+            nodes_result = session.run(
+                """
+                MATCH (n)
+                RETURN elementId(n) as id, labels(n) as labels, properties(n) as props
+                """
+            )
+            nodes = []
+            node_id_map = {}  # Map internal IDs to export IDs
+            for idx, record in enumerate(nodes_result):
+                export_id = str(idx)
+                node_id_map[record["id"]] = export_id
+                nodes.append({
+                    "id": export_id,
+                    "labels": list(record["labels"]),
+                    "properties": self._serialize_properties(dict(record["props"]))
+                })
+            
+            # Export all relationships
+            rels_result = session.run(
+                """
+                MATCH (a)-[r]->(b)
+                RETURN elementId(a) as source, elementId(b) as target, 
+                       type(r) as type, properties(r) as props
+                """
+            )
+            relationships = []
+            for record in rels_result:
+                source_id = node_id_map.get(record["source"])
+                target_id = node_id_map.get(record["target"])
+                if source_id is not None and target_id is not None:
+                    relationships.append({
+                        "source": source_id,
+                        "target": target_id,
+                        "type": record["type"],
+                        "properties": self._serialize_properties(dict(record["props"]))
+                    })
+            
+            return {
+                "version": "1.0",
+                "type": "neo4j_backup",
+                "metadata": {
+                    "exported_at": datetime.now().isoformat(),
+                    "node_count": len(nodes),
+                    "relationship_count": len(relationships)
+                },
+                "nodes": nodes,
+                "relationships": relationships
+            }
+    
+    def _serialize_properties(self, props: Dict) -> Dict:
+        """Convert Neo4j properties to JSON-serializable format."""
+        from datetime import datetime as dt
+        
+        result = {}
+        for key, value in props.items():
+            if hasattr(value, 'isoformat'):  # datetime objects
+                result[key] = value.isoformat()
+            elif isinstance(value, (list, tuple)):
+                result[key] = [
+                    v.isoformat() if hasattr(v, 'isoformat') else v 
+                    for v in value
+                ]
+            else:
+                result[key] = value
+        return result
+    
+    def import_full_database(self, data: Dict, clear_first: bool = True) -> Dict:
+        """Import a full database backup.
+        
+        Args:
+            data: The backup data from export_full_database
+            clear_first: If True, clear the database before importing
+            
+        Returns:
+            Dict with import statistics
+        """
+        if data.get("type") != "neo4j_backup":
+            raise ValueError("Invalid backup format: expected 'neo4j_backup' type")
+        
+        with self.session() as session:
+            if clear_first:
+                session.run("MATCH (n) DETACH DELETE n")
+            
+            # Create nodes - build a map from export ID to new Neo4j ID
+            id_map = {}
+            nodes_created = 0
+            
+            for node in data.get("nodes", []):
+                export_id = node["id"]
+                labels = ":".join(node["labels"])
+                props = node.get("properties", {})
+                
+                # Create node with labels and properties
+                result = session.run(
+                    f"""
+                    CREATE (n:{labels})
+                    SET n = $props
+                    RETURN elementId(n) as id
+                    """,
+                    {"props": props}
+                )
+                record = result.single()
+                if record:
+                    id_map[export_id] = record["id"]
+                    nodes_created += 1
+            
+            # Create relationships
+            rels_created = 0
+            for rel in data.get("relationships", []):
+                source_id = id_map.get(rel["source"])
+                target_id = id_map.get(rel["target"])
+                
+                if source_id and target_id:
+                    rel_type = rel["type"]
+                    props = rel.get("properties", {})
+                    
+                    session.run(
+                        f"""
+                        MATCH (a), (b)
+                        WHERE elementId(a) = $source AND elementId(b) = $target
+                        CREATE (a)-[r:{rel_type}]->(b)
+                        SET r = $props
+                        """,
+                        {"source": source_id, "target": target_id, "props": props}
+                    )
+                    rels_created += 1
+            
+            # Recreate indexes
+            self.create_indexes()
+            
+            return {
+                "nodes_created": nodes_created,
+                "relationships_created": rels_created
+            }
+
     def get_graph_for_visualization(self) -> Dict:
         """Get nodes and edges for visualization."""
         with self.session() as session:
@@ -2170,6 +2315,7 @@ def main():
             "clear-unification",
             "import",
             "export",
+            "load",
             "query",
         ],
         help="Command to execute",
@@ -2257,13 +2403,40 @@ def main():
         elif args.command == "export":
             import json
 
-            aois = graph.get_all_aois()
+            data = graph.export_full_database()
             if args.file:
                 with open(args.file, "w", encoding="utf-8") as f:
-                    json.dump(aois, f, indent=2)
-                print(f"[OK] Exported {len(aois)} AOIs to {args.file}")
+                    json.dump(data, f, indent=2)
+                print(f"[OK] Exported database to {args.file}")
+                print(f"  - Nodes: {data['metadata']['node_count']}")
+                print(f"  - Relationships: {data['metadata']['relationship_count']}")
             else:
-                print(json.dumps(aois, indent=2))
+                print(json.dumps(data, indent=2))
+
+        elif args.command == "load":
+            if not args.file:
+                print("[ERROR] --file required for load")
+                return
+            import json
+            from pathlib import Path
+            
+            if not Path(args.file).exists():
+                print(f"[ERROR] File not found: {args.file}")
+                return
+            
+            with open(args.file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            if not args.yes:
+                confirm = input("This will REPLACE all data. Type 'yes' to confirm: ")
+                if confirm.lower() != "yes":
+                    print("[CANCELLED]")
+                    return
+            
+            stats = graph.import_full_database(data, clear_first=True)
+            print(f"[OK] Loaded database from {args.file}")
+            print(f"  - Nodes created: {stats['nodes_created']}")
+            print(f"  - Relationships created: {stats['relationships_created']}")
 
         elif args.command == "query":
             if args.enrichment_status:

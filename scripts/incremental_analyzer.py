@@ -21,12 +21,12 @@ from claude_client import ClaudeClient
 @dataclass
 class AnalysisSession:
     """Tracks progress of an analysis session."""
-    
+
     items_processed: int = 0
     items_succeeded: int = 0
     items_failed: int = 0
     errors: List[Dict[str, Any]] = None
-    
+
     def __post_init__(self):
         if self.errors is None:
             self.errors = []
@@ -35,18 +35,18 @@ class AnalysisSession:
 class IncrementalAnalyzer:
     """
     Analyzes Ignition configurations incrementally, batch by batch.
-    
+
     Uses semantic_status field on Neo4j nodes to track progress:
     - pending: Not yet analyzed
     - in_progress: Currently being analyzed
     - complete: Has semantic description
     - review: Needs human review
     """
-    
+
     # Order of analysis (dependencies flow down)
     # AOI first (PLC), then Ignition entities, ScadaTags, ViewComponent last
     ANALYSIS_ORDER = ["AOI", "UDT", "Equipment", "ScadaTag", "View", "ViewComponent"]
-    
+
     def __init__(
         self,
         backup: IgnitionBackup,
@@ -55,7 +55,7 @@ class IncrementalAnalyzer:
         batch_size: int = 10,
     ):
         """Initialize the incremental analyzer.
-        
+
         Args:
             backup: Parsed Ignition backup (for raw data context)
             graph: Neo4j graph connection (created if not provided)
@@ -63,10 +63,10 @@ class IncrementalAnalyzer:
             batch_size: Number of items to process per batch
         """
         load_dotenv()
-        
+
         self.backup = backup
         self.batch_size = batch_size
-        
+
         # Build lookup maps from backup for quick access
         self._udt_defs: Dict[str, UDTDefinition] = {
             udt.name: udt for udt in backup.udt_definitions
@@ -74,21 +74,21 @@ class IncrementalAnalyzer:
         self._windows = {w.name: w for w in backup.windows}
         self._instances = {inst.name: inst for inst in backup.udt_instances}
         self._tags = {tag.name: tag for tag in backup.tags}
-        
+
         # Connections
         self._graph = graph
         self._owns_graph = False
         self._client = client
         self._owns_client = False
-        
+
         if self._graph is None:
             self._graph = get_ontology_graph()
             self._owns_graph = True
-        
+
         if self._client is None:
             self._client = ClaudeClient(graph=self._graph, enable_tools=True)
             self._owns_client = True
-    
+
     def close(self):
         """Clean up resources."""
         if self._owns_client and self._client:
@@ -97,31 +97,31 @@ class IncrementalAnalyzer:
         if self._owns_graph and self._graph:
             self._graph.close()
             self._graph = None
-    
+
     def __enter__(self):
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-    
+
     @property
     def graph(self) -> OntologyGraph:
         return self._graph
-    
+
     def get_status(self) -> Dict[str, Dict[str, int]]:
         """Get current analysis status for all item types."""
         return self._graph.get_semantic_status_counts()
-    
+
     def recover_stuck_items(self, verbose: bool = False) -> int:
         """Reset any items stuck in 'in_progress' back to 'pending'.
-        
+
         This handles cases where a previous run was interrupted.
-        
+
         Returns:
             Number of items recovered
         """
         total_recovered = 0
-        
+
         for item_type in self.ANALYSIS_ORDER:
             with self._graph.session() as session:
                 if item_type == "ViewComponent":
@@ -147,17 +147,17 @@ class IncrementalAnalyzer:
                     if verbose:
                         print(f"[INFO] Recovered {count} stuck {item_type} items")
                     total_recovered += count
-        
+
         return total_recovered
-    
+
     def print_status(self):
         """Print a formatted status report."""
         status = self.get_status()
         print("\n=== Semantic Analysis Status ===\n")
-        
+
         total_pending = 0
         total_complete = 0
-        
+
         for item_type in self.ANALYSIS_ORDER:
             counts = status.get(item_type, {})
             pending = counts.get("pending", 0) + counts.get(None, 0)
@@ -165,10 +165,10 @@ class IncrementalAnalyzer:
             in_progress = counts.get("in_progress", 0)
             review = counts.get("review", 0)
             total = pending + complete + in_progress + review
-            
+
             total_pending += pending
             total_complete += complete
-            
+
             if total > 0:
                 pct = (complete / total * 100) if total > 0 else 0
                 print(f"  {item_type:15} {complete:3}/{total:<3} complete ({pct:.0f}%)")
@@ -176,30 +176,30 @@ class IncrementalAnalyzer:
                     print(f"                  ({in_progress} in progress)")
                 if review > 0:
                     print(f"                  ({review} needs review)")
-        
+
         print()
         if total_pending == 0 and total_complete > 0:
             print("  ✓ All items have been analyzed!")
         elif total_pending > 0:
             print(f"  → {total_pending} items remaining to analyze")
         print()
-    
+
     def analyze_next_batch(
         self,
         item_type: Optional[str] = None,
         verbose: bool = False,
     ) -> AnalysisSession:
         """Analyze the next batch of pending items.
-        
+
         Args:
             item_type: Specific type to analyze, or None to auto-select
             verbose: Print detailed progress
-            
+
         Returns:
             AnalysisSession with results
         """
         session = AnalysisSession()
-        
+
         # Determine what to analyze
         if item_type is None:
             item_type = self._get_next_item_type()
@@ -207,28 +207,30 @@ class IncrementalAnalyzer:
                 if verbose:
                     print("[INFO] No pending items to analyze")
                 return session
-        
+
         # Get pending items
         pending = self._graph.get_pending_items(item_type, self.batch_size)
         if not pending:
             if verbose:
                 print(f"[INFO] No pending {item_type} items")
             return session
-        
+
         if verbose:
             print(f"[INFO] Analyzing {len(pending)} {item_type} items...")
-        
+
         # Mark items as in_progress
         item_names = []
         for item in pending:
-            name = item.get("path") if item_type == "ViewComponent" else item.get("name")
+            name = (
+                item.get("path") if item_type == "ViewComponent" else item.get("name")
+            )
             item_names.append(name)
             self._graph.set_semantic_status(item_type, name, "in_progress")
-        
+
         # Build context and analyze
         try:
             results = self._analyze_batch(item_type, pending, verbose)
-            
+
             # Update items with results
             for name, result in results.items():
                 session.items_processed += 1
@@ -244,34 +246,34 @@ class IncrementalAnalyzer:
                     )
                     if verbose:
                         print(f"  [OK] {name}: {purpose[:60]}...")
-        
+
         except Exception as e:
             # Reset all items to pending on failure
             for name in item_names:
                 self._graph.set_semantic_status(item_type, name, "pending")
             raise
-        
+
         return session
-    
+
     def run_session(
         self,
         max_items: int = 50,
         verbose: bool = False,
     ) -> AnalysisSession:
         """Run an analysis session, processing up to max_items.
-        
+
         Processes items in dependency order (UDT → Equipment → View).
-        
+
         Args:
             max_items: Maximum total items to process
             verbose: Print detailed progress
-            
+
         Returns:
             Combined AnalysisSession with all results
         """
         total_session = AnalysisSession()
         items_remaining = max_items
-        
+
         while items_remaining > 0:
             # Determine next type to analyze
             item_type = self._get_next_item_type()
@@ -279,35 +281,35 @@ class IncrementalAnalyzer:
                 if verbose:
                     print("[INFO] All items have been analyzed!")
                 break
-            
+
             # Analyze a batch
             batch_size = min(self.batch_size, items_remaining)
             original_batch_size = self.batch_size
             self.batch_size = batch_size
-            
+
             try:
                 batch_session = self.analyze_next_batch(item_type, verbose)
             finally:
                 self.batch_size = original_batch_size
-            
+
             # Accumulate results
             total_session.items_processed += batch_session.items_processed
             total_session.items_succeeded += batch_session.items_succeeded
             total_session.items_failed += batch_session.items_failed
             total_session.errors.extend(batch_session.errors)
-            
+
             items_remaining -= batch_session.items_processed
-            
+
             # If no items were processed, break to avoid infinite loop
             if batch_session.items_processed == 0:
                 break
-        
+
         return total_session
-    
+
     def _get_next_item_type(self) -> Optional[str]:
         """Determine the next item type to analyze based on dependency order."""
         status = self.get_status()
-        
+
         for item_type in self.ANALYSIS_ORDER:
             counts = status.get(item_type, {})
             pending = counts.get("pending", 0)
@@ -316,9 +318,9 @@ class IncrementalAnalyzer:
                 pending += counts[None]
             if pending > 0:
                 return item_type
-        
+
         return None
-    
+
     def _analyze_batch(
         self,
         item_type: str,
@@ -326,38 +328,38 @@ class IncrementalAnalyzer:
         verbose: bool = False,
     ) -> Dict[str, Dict]:
         """Send a batch of items to Claude for analysis.
-        
+
         Args:
             item_type: Type of items being analyzed
             items: List of item data from get_pending_items
             verbose: Print debug info
-            
+
         Returns:
             Dict mapping item names to their analysis results
         """
         # Build context for the batch
         context = self._build_batch_context(item_type, items)
-        
+
         # Build the prompt
         system_prompt = self._get_system_prompt(item_type)
         user_prompt = self._get_user_prompt(item_type, items, context)
-        
+
         if verbose:
             print(f"[DEBUG] Sending {len(items)} items to Claude...")
-        
-        # Query Claude
+
+        # Query Claude (use higher max_tokens to avoid continuation breaking JSON)
         result = self._client.query_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=8000,
+            max_tokens=16000,
             use_tools=True,
             verbose=verbose,
         )
-        
+
         if verbose:
             if result.get("tool_calls"):
                 print(f"[DEBUG] Claude made {len(result['tool_calls'])} tool calls")
-        
+
         # Parse response
         if result.get("error"):
             # Return error for all items
@@ -365,13 +367,13 @@ class IncrementalAnalyzer:
                 self._get_item_name(item_type, item): {"error": result["error"]}
                 for item in items
             }
-        
+
         data = result.get("data", {})
-        
+
         # Map results back to item names
         results = {}
         analyses = data.get("analyses", {})
-        
+
         for item in items:
             name = self._get_item_name(item_type, item)
             if name in analyses:
@@ -386,15 +388,15 @@ class IncrementalAnalyzer:
                         break
                 if not found:
                     results[name] = {"error": "No analysis returned by Claude"}
-        
+
         return results
-    
+
     def _get_item_name(self, item_type: str, item: Dict) -> str:
         """Get the identifying name for an item."""
         if item_type == "ViewComponent":
             return item.get("path", "")
         return item.get("name", "")
-    
+
     def _build_batch_context(
         self,
         item_type: str,
@@ -405,7 +407,7 @@ class IncrementalAnalyzer:
             "already_analyzed": [],
             "raw_definitions": {},
         }
-        
+
         # Get some already-analyzed items for consistency reference
         with self._graph.session() as session:
             if item_type == "ViewComponent":
@@ -427,7 +429,7 @@ class IncrementalAnalyzer:
                     """
                 )
             context["already_analyzed"] = [dict(r) for r in result]
-        
+
         # Add raw definitions from backup or Neo4j
         if item_type == "AOI":
             # For AOIs, get context from Neo4j (since we don't have a backup file)
@@ -440,9 +442,11 @@ class IncrementalAnalyzer:
                         "description": aoi_context["item"].get("description", ""),
                         "tags": aoi_context["context"].get("tags", []),
                         "patterns": aoi_context["context"].get("patterns", []),
-                        "scada_mappings": aoi_context["context"].get("scada_mappings", []),
+                        "scada_mappings": aoi_context["context"].get(
+                            "scada_mappings", []
+                        ),
                     }
-        
+
         elif item_type == "UDT":
             for item in items:
                 name = item.get("name")
@@ -463,7 +467,7 @@ class IncrementalAnalyzer:
                         },
                         "parent": udt.parent_name,
                     }
-        
+
         elif item_type == "View":
             for item in items:
                 name = item.get("name")
@@ -472,11 +476,11 @@ class IncrementalAnalyzer:
                     context["raw_definitions"][name] = {
                         "path": window.path,
                         "components_count": len(window.components),
-                        "component_types": list(set(
-                            c.component_type for c in window.components
-                        ))[:10],
+                        "component_types": list(
+                            set(c.component_type for c in window.components)
+                        )[:10],
                     }
-        
+
         elif item_type == "Equipment":
             for item in items:
                 name = item.get("name")
@@ -486,7 +490,7 @@ class IncrementalAnalyzer:
                         "type_id": inst.type_id,
                         "parameters": inst.parameters,
                     }
-        
+
         elif item_type == "ViewComponent":
             for item in items:
                 path = item.get("path", "")
@@ -497,7 +501,7 @@ class IncrementalAnalyzer:
                     "inferred_purpose": item.get("inferred_purpose", ""),
                     "props": item.get("props", ""),
                 }
-        
+
         elif item_type == "ScadaTag":
             for item in items:
                 name = item.get("name")
@@ -513,9 +517,9 @@ class IncrementalAnalyzer:
                         "expression": tag.expression,
                         "initial_value": tag.initial_value,
                     }
-        
+
         return context
-    
+
     def _get_system_prompt(self, item_type: str) -> str:
         """Get the system prompt for analyzing a specific item type."""
         base = """You are an expert in industrial automation and SCADA systems, specializing in Ignition by Inductive Automation.
@@ -529,7 +533,7 @@ Keep descriptions to 1-2 sentences. Be specific about industrial function, not j
 
 You have access to tools to query the existing ontology database for additional context.
 """
-        
+
         type_specific = {
             "AOI": """
 You are analyzing Add-On Instructions (AOIs), which are reusable PLC logic components.
@@ -569,9 +573,9 @@ For query tags, explain what data the query retrieves and how it's used.
 For OPC tags, explain what equipment/signal this monitors or controls.
 """,
         }
-        
+
         return base + type_specific.get(item_type, "")
-    
+
     def _get_user_prompt(
         self,
         item_type: str,
@@ -580,27 +584,29 @@ For OPC tags, explain what equipment/signal this monitors or controls.
     ) -> str:
         """Build the user prompt for a batch analysis."""
         parts = []
-        
-        parts.append(f"Analyze these {item_type} items and provide semantic descriptions.\n")
-        
+
+        parts.append(
+            f"Analyze these {item_type} items and provide semantic descriptions.\n"
+        )
+
         # Add reference examples if available
         if context.get("already_analyzed"):
             parts.append("## Previously Analyzed (for style reference):\n")
             for ref in context["already_analyzed"]:
                 parts.append(f"- {ref['name']}: {ref['purpose']}")
             parts.append("")
-        
+
         # Add items to analyze
         parts.append(f"## Items to Analyze:\n")
         for item in items:
             name = self._get_item_name(item_type, item)
             parts.append(f"### {name}")
-            
+
             # Add raw definition if available
             if name in context.get("raw_definitions", {}):
                 raw = context["raw_definitions"][name]
                 parts.append(f"Definition: {json.dumps(raw, indent=2)}")
-            
+
             # Add any graph context
             graph_context = self._graph.get_item_with_context(item_type, name)
             if graph_context and graph_context.get("context"):
@@ -611,10 +617,11 @@ For OPC tags, explain what equipment/signal this monitors or controls.
                     parts.append(f"Mapped to PLC AOIs: {ctx['aois']}")
                 if ctx.get("udts"):
                     parts.append(f"Displays UDTs: {ctx['udts']}")
-            
+
             parts.append("")
-        
-        parts.append("""
+
+        parts.append(
+            """
 ## Required Response Format
 
 Respond with a JSON object containing an "analyses" field that maps each item name to its semantic description:
@@ -629,15 +636,16 @@ Respond with a JSON object containing an "analyses" field that maps each item na
 ```
 
 Be concise but informative. Focus on industrial/operational meaning.
-""")
-        
+"""
+        )
+
         return "\n".join(parts)
 
 
 def main():
     """CLI for incremental semantic analysis."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description="Incrementally analyze Ignition configurations"
     )
@@ -647,45 +655,50 @@ def main():
         help="Command to execute (recover: reset stuck in_progress items)",
     )
     parser.add_argument(
-        "--input", "-i",
+        "--input",
+        "-i",
         help="Path to Ignition backup JSON file",
     )
     parser.add_argument(
-        "--type", "-t",
+        "--type",
+        "-t",
         choices=["AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag"],
         help="Specific item type to analyze/reset",
     )
     parser.add_argument(
-        "--batch", "-b",
+        "--batch",
+        "-b",
         type=int,
         default=10,
         help="Batch size for analysis (default: 10)",
     )
     parser.add_argument(
-        "--max", "-m",
+        "--max",
+        "-m",
         type=int,
         default=50,
         help="Maximum items to analyze in this session (default: 50)",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Verbose output",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Handle encoding for Windows
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    
+
     if args.command == "status":
         # Status doesn't need the backup file
         graph = get_ontology_graph()
         try:
             status = graph.get_semantic_status_counts()
             print("\n=== Semantic Analysis Status ===\n")
-            
+
             has_stuck = False
             for item_type in IncrementalAnalyzer.ANALYSIS_ORDER:
                 counts = status.get(item_type, {})
@@ -694,7 +707,7 @@ def main():
                 in_progress = counts.get("in_progress", 0)
                 review = counts.get("review", 0)
                 total = pending + complete + in_progress + review
-                
+
                 if total > 0:
                     pct = (complete / total * 100) if total > 0 else 0
                     line = f"  {item_type:15} {complete:3}/{total:<3} complete ({pct:.0f}%)"
@@ -702,7 +715,7 @@ def main():
                         line += f"  ⚠️  {in_progress} stuck in_progress"
                         has_stuck = True
                     print(line)
-            
+
             print()
             if has_stuck:
                 print("  ⚠️  Some items are stuck in 'in_progress' (interrupted run).")
@@ -710,7 +723,7 @@ def main():
         finally:
             graph.close()
         return
-    
+
     if args.command == "recover":
         # Recover stuck in_progress items
         graph = get_ontology_graph()
@@ -718,18 +731,21 @@ def main():
             # We need a minimal analyzer just for the recover method
             # Create a dummy backup for this
             from ignition_parser import IgnitionBackup
+
             dummy_backup = IgnitionBackup(file_path="", version="")
-            
+
             with IncrementalAnalyzer(dummy_backup, graph=graph) as analyzer:
                 recovered = analyzer.recover_stuck_items(verbose=True)
                 if recovered > 0:
-                    print(f"\n[OK] Recovered {recovered} stuck items (reset to pending)\n")
+                    print(
+                        f"\n[OK] Recovered {recovered} stuck items (reset to pending)\n"
+                    )
                 else:
                     print("\n[INFO] No stuck items found\n")
         finally:
             graph.close()
         return
-    
+
     if args.command == "reset":
         graph = get_ontology_graph()
         try:
@@ -737,7 +753,7 @@ def main():
                 types_to_reset = [args.type]
             else:
                 types_to_reset = ["UDT", "View", "Equipment", "ViewComponent"]
-            
+
             for item_type in types_to_reset:
                 with graph.session() as session:
                     result = session.run(
@@ -754,29 +770,33 @@ def main():
         finally:
             graph.close()
         return
-    
+
     # Analyze command requires input file
     if args.command == "analyze":
         if not args.input:
             print("[ERROR] --input required for analyze command")
             return
-        
+
         # Parse backup
         ignition_parser = IgnitionParser()
         backup = ignition_parser.parse_file(args.input)
-        
-        print(f"[INFO] Loaded: {len(backup.udt_definitions)} UDTs, "
-              f"{len(backup.udt_instances)} instances, {len(backup.windows)} views")
-        
+
+        print(
+            f"[INFO] Loaded: {len(backup.udt_definitions)} UDTs, "
+            f"{len(backup.udt_instances)} instances, {len(backup.windows)} views"
+        )
+
         with IncrementalAnalyzer(backup, batch_size=args.batch) as analyzer:
             # Auto-recover any stuck items from interrupted runs
             recovered = analyzer.recover_stuck_items(verbose=args.verbose)
             if recovered > 0:
-                print(f"[INFO] Auto-recovered {recovered} stuck items from previous interrupted run")
-            
+                print(
+                    f"[INFO] Auto-recovered {recovered} stuck items from previous interrupted run"
+                )
+
             # Show current status
             analyzer.print_status()
-            
+
             # Run analysis session
             if args.type:
                 session = analyzer.analyze_next_batch(args.type, verbose=args.verbose)
@@ -785,22 +805,21 @@ def main():
                     max_items=args.max,
                     verbose=args.verbose,
                 )
-            
+
             # Report results
             print(f"\n=== Session Complete ===\n")
             print(f"  Processed: {session.items_processed}")
             print(f"  Succeeded: {session.items_succeeded}")
             print(f"  Failed: {session.items_failed}")
-            
+
             if session.errors:
                 print(f"\n  Errors:")
                 for err in session.errors[:5]:
                     print(f"    - {err['name']}: {err['error'][:60]}...")
-            
+
             # Show updated status
             analyzer.print_status()
 
 
 if __name__ == "__main__":
     main()
-
