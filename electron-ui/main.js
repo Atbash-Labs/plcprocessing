@@ -163,14 +163,27 @@ ipcMain.handle('ingest-plc', async (event, filePath) => {
 });
 
 // Ingest Ignition files (with streaming)
-ipcMain.handle('ingest-ignition', async (event, filePath) => {
+// Uses --skip-ai to avoid token limits on large multi-project gateways
+// Use incremental_analyzer.py to enrich items later
+ipcMain.handle('ingest-ignition', async (event, options) => {
+  const { filePath, scriptLibraryPath, namedQueriesPath } = options;
   const streamId = `ingest-ignition-${Date.now()}`;
   try {
-    const output = await runPythonScript('ignition_ontology.py', [filePath, '-v'], {
+    // Build args with optional directory paths
+    const args = [filePath, '-v', '--skip-ai'];
+    if (scriptLibraryPath) {
+      args.push('--script-library', scriptLibraryPath);
+    }
+    if (namedQueriesPath) {
+      args.push('--named-queries', namedQueriesPath);
+    }
+    
+    // Always skip AI during initial ingestion - use incremental analyzer for enrichment
+    const output = await runPythonScript('ignition_ontology.py', args, {
       streaming: true,
       streamId
     });
-    return { success: true, output, streamId };
+    return { success: true, output, streamId, filePath };
   } catch (error) {
     return { success: false, error: error.message, streamId };
   }
@@ -438,6 +451,159 @@ ipcMain.handle('load-database', async () => {
     });
   } catch (error) {
     return { success: false, error: error.message };
+  }
+});
+
+// ============================================
+// Project and Browse Tab IPC Handlers
+// ============================================
+
+// Get all projects with inheritance info
+ipcMain.handle('get-projects', async () => {
+  try {
+    const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
+    
+    return new Promise((resolve) => {
+      const proc = spawn('python', ['-u', scriptPath, 'projects', '--json'], {
+        cwd: path.join(__dirname, '..'),
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
+      });
+      
+      let stdout = '';
+      let stderr = '';
+      
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      
+      proc.on('close', (code) => {
+        if (code === 0) {
+          try {
+            const projects = JSON.parse(stdout.trim() || '[]');
+            resolve({ success: true, projects });
+          } catch (e) {
+            resolve({ success: true, projects: [] });
+          }
+        } else {
+          resolve({ success: false, error: stderr || 'Failed to get projects', projects: [] });
+        }
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message, projects: [] };
+  }
+});
+
+// Get gateway-wide resources (Tags, UDTs, AOIs)
+ipcMain.handle('get-gateway-resources', async () => {
+  try {
+    const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
+    
+    return new Promise((resolve) => {
+      const proc = spawn('python', ['-u', scriptPath, 'gateway-resources', '--json'], {
+        cwd: path.join(__dirname, '..'),
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
+      });
+      
+      let stdout = '';
+      let stderr = '';
+      
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      
+      proc.on('close', (code) => {
+        if (code === 0) {
+          try {
+            const resources = JSON.parse(stdout.trim() || '{}');
+            resolve({ success: true, resources });
+          } catch (e) {
+            resolve({ success: true, resources: { tags: [], udts: [], aois: [] } });
+          }
+        } else {
+          resolve({ success: false, error: stderr || 'Failed to get gateway resources' });
+        }
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get project-specific resources (Views, Scripts, Queries, Events)
+ipcMain.handle('get-project-resources', async (event, projectName) => {
+  try {
+    const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
+    
+    return new Promise((resolve) => {
+      const proc = spawn('python', ['-u', scriptPath, 'project-resources', '--project', projectName, '--json'], {
+        cwd: path.join(__dirname, '..'),
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
+      });
+      
+      let stdout = '';
+      let stderr = '';
+      
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      
+      proc.on('close', (code) => {
+        if (code === 0) {
+          try {
+            const resources = JSON.parse(stdout.trim() || '{}');
+            resolve({ success: true, resources });
+          } catch (e) {
+            resolve({ success: true, resources: { views: [], scripts: [], queries: [], events: [] } });
+          }
+        } else {
+          resolve({ success: false, error: stderr || 'Failed to get project resources' });
+        }
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get enrichment status (optionally filtered by project or item type)
+ipcMain.handle('get-enrichment-status', async (event, options = {}) => {
+  try {
+    const { project, itemType } = options;
+    const args = ['status', '--json'];
+    if (project) args.push('--project', project);
+    if (itemType) args.push('--type', itemType);
+    
+    const output = await runPythonScript('incremental_analyzer.py', args);
+    try {
+      const status = JSON.parse(output.trim() || '{}');
+      return { success: true, status };
+    } catch (e) {
+      return { success: true, status: {} };
+    }
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Run enrichment batch for specific project and/or item type
+ipcMain.handle('enrich-batch', async (event, options = {}) => {
+  const { project, itemType, batchSize = 10, inputFile } = options;
+  const streamId = `enrich-${project || 'gateway'}-${Date.now()}`;
+  
+  try {
+    if (!inputFile) {
+      return { success: false, error: 'Input file required for enrichment' };
+    }
+    
+    const args = ['analyze', '-i', inputFile, '-b', String(batchSize), '-v'];
+    if (project) args.push('--project', project);
+    if (itemType) args.push('--type', itemType);
+    
+    const output = await runPythonScript('incremental_analyzer.py', args, {
+      streaming: true,
+      streamId
+    });
+    return { success: true, output, streamId };
+  } catch (error) {
+    return { success: false, error: error.message, streamId };
   }
 });
 

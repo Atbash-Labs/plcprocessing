@@ -25,6 +25,30 @@ contextBridge.exposeInMainWorld('api', {
   troubleshoot: (question, history) => ipcRenderer.invoke('troubleshoot', question, history),
   
   // Visualization
-  generateViz: () => ipcRenderer.invoke('generate-viz')
+  generateViz: () => ipcRenderer.invoke('generate-viz'),
+  
+  // Browse Tab - Projects and Resources
+  getProjects: () => ipcRenderer.invoke('get-projects'),
+  getGatewayResources: () => ipcRenderer.invoke('get-gateway-resources'),
+  getProjectResources: (projectName) => ipcRenderer.invoke('get-project-resources', projectName),
+  getEnrichmentStatus: (options) => ipcRenderer.invoke('get-enrichment-status', options),
+  enrichBatch: (options) => ipcRenderer.invoke('enrich-batch', options),
+  
+  // Event listeners for streaming (returns cleanup function)
+  onStreamOutput: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('stream-output', handler);
+    return () => ipcRenderer.removeListener('stream-output', handler);
+  },
+  onToolCall: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('tool-call', handler);
+    return () => ipcRenderer.removeListener('tool-call', handler);
+  },
+  onStreamComplete: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('stream-complete', handler);
+    return () => ipcRenderer.removeListener('stream-complete', handler);
+  }
 });
 

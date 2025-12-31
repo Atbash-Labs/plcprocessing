@@ -112,6 +112,9 @@ class OntologyGraph:
                 "CREATE CONSTRAINT udt_name IF NOT EXISTS FOR (u:UDT) REQUIRE u.name IS UNIQUE",
                 "CREATE CONSTRAINT equipment_name IF NOT EXISTS FOR (e:Equipment) REQUIRE e.name IS UNIQUE",
                 "CREATE CONSTRAINT view_name IF NOT EXISTS FOR (v:View) REQUIRE v.name IS UNIQUE",
+                "CREATE CONSTRAINT project_name IF NOT EXISTS FOR (p:Project) REQUIRE p.name IS UNIQUE",
+                "CREATE CONSTRAINT script_name IF NOT EXISTS FOR (s:Script) REQUIRE s.name IS UNIQUE",
+                "CREATE CONSTRAINT namedquery_name IF NOT EXISTS FOR (q:NamedQuery) REQUIRE q.name IS UNIQUE",
             ]
 
             # Regular indexes
@@ -127,12 +130,18 @@ class OntologyGraph:
                 "CREATE INDEX equipment_semantic_status IF NOT EXISTS FOR (e:Equipment) ON (e.semantic_status)",
                 "CREATE INDEX viewcomponent_semantic_status IF NOT EXISTS FOR (c:ViewComponent) ON (c.semantic_status)",
                 "CREATE INDEX scadatag_semantic_status IF NOT EXISTS FOR (t:ScadaTag) ON (t.semantic_status)",
+                "CREATE INDEX script_semantic_status IF NOT EXISTS FOR (s:Script) ON (s.semantic_status)",
+                "CREATE INDEX namedquery_semantic_status IF NOT EXISTS FOR (q:NamedQuery) ON (q.semantic_status)",
                 # Soft delete indexes
                 "CREATE INDEX aoi_deleted IF NOT EXISTS FOR (a:AOI) ON (a.deleted)",
                 "CREATE INDEX udt_deleted IF NOT EXISTS FOR (u:UDT) ON (u.deleted)",
                 "CREATE INDEX view_deleted IF NOT EXISTS FOR (v:View) ON (v.deleted)",
                 "CREATE INDEX equipment_deleted IF NOT EXISTS FOR (e:Equipment) ON (e.deleted)",
                 "CREATE INDEX viewcomponent_deleted IF NOT EXISTS FOR (c:ViewComponent) ON (c.deleted)",
+                # Project-related indexes
+                "CREATE INDEX view_project IF NOT EXISTS FOR (v:View) ON (v.project)",
+                "CREATE INDEX script_project IF NOT EXISTS FOR (s:Script) ON (s.project)",
+                "CREATE INDEX namedquery_project IF NOT EXISTS FOR (q:NamedQuery) ON (q.project)",
             ]
 
             for constraint in constraints:
@@ -929,6 +938,379 @@ class OntologyGraph:
     # SCADA/Ignition Operations
     # =========================================================================
 
+    # -------------------------------------------------------------------------
+    # Project Management
+    # -------------------------------------------------------------------------
+
+    def create_project(
+        self,
+        name: str,
+        title: str = "",
+        description: str = "",
+        parent: Optional[str] = None,
+        enabled: bool = True,
+        inheritable: bool = False,
+    ) -> str:
+        """Create a Project node with optional inheritance relationship.
+
+        Args:
+            name: Project name (unique identifier)
+            title: Display title
+            description: Project description
+            parent: Name of parent project for inheritance
+            enabled: Whether project is enabled
+            inheritable: Whether project can be inherited from
+
+        Returns:
+            Project name
+        """
+        with self.session() as session:
+            # Create or update the project node
+            session.run(
+                """
+                MERGE (p:Project {name: $name})
+                SET p.title = $title,
+                    p.description = $description,
+                    p.enabled = $enabled,
+                    p.inheritable = $inheritable
+            """,
+                {
+                    "name": name,
+                    "title": title,
+                    "description": description,
+                    "enabled": enabled,
+                    "inheritable": inheritable,
+                },
+            )
+
+            # Create INHERITS_FROM relationship if parent specified
+            if parent:
+                session.run(
+                    """
+                    MATCH (child:Project {name: $child_name})
+                    MATCH (parent:Project {name: $parent_name})
+                    MERGE (child)-[:INHERITS_FROM]->(parent)
+                """,
+                    {"child_name": name, "parent_name": parent},
+                )
+
+        return name
+
+    def get_all_projects(self) -> List[Dict]:
+        """Get all projects with their inheritance info.
+
+        Returns:
+            List of project dicts with name, title, parent, inheritable, enabled
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (p:Project)
+                OPTIONAL MATCH (p)-[:INHERITS_FROM]->(parent:Project)
+                RETURN p.name as name,
+                       p.title as title,
+                       p.description as description,
+                       p.enabled as enabled,
+                       p.inheritable as inheritable,
+                       parent.name as parent
+                ORDER BY p.name
+            """
+            )
+            return [dict(r) for r in result]
+
+    def get_project_inheritance_chain(self, project_name: str) -> List[str]:
+        """Get the inheritance chain for a project (current -> parent -> grandparent).
+
+        Args:
+            project_name: Starting project name
+
+        Returns:
+            List of project names from current to root ancestor
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH path = (p:Project {name: $name})-[:INHERITS_FROM*0..10]->(ancestor:Project)
+                WITH DISTINCT ancestor, length(path) as depth
+                ORDER BY depth
+                RETURN ancestor.name as name
+            """,
+                {"name": project_name},
+            )
+            return [r["name"] for r in result]
+
+    def get_project_resources(self, project_name: str) -> Dict[str, List[Dict]]:
+        """Get all resources belonging to a project.
+
+        Args:
+            project_name: Project name
+
+        Returns:
+            Dict with views, scripts, queries, events, components lists
+        """
+        with self.session() as session:
+            resources = {"views": [], "scripts": [], "queries": [], "events": [], "components": []}
+
+            # Get views with component counts
+            result = session.run(
+                """
+                MATCH (v:View)-[:BELONGS_TO]->(p:Project {name: $project})
+                OPTIONAL MATCH (v)-[:HAS_COMPONENT]->(c:ViewComponent)
+                WHERE c.deleted IS NULL OR c.deleted = false
+                WITH v, 
+                     count(c) as component_count,
+                     count(CASE WHEN c.semantic_status = 'complete' THEN 1 END) as enriched_count
+                RETURN v.name as name, v.path as path, v.purpose as purpose,
+                       v.semantic_status as status,
+                       component_count, enriched_count
+                ORDER BY v.name
+            """,
+                {"project": project_name},
+            )
+            resources["views"] = [dict(r) for r in result]
+
+            # Get scripts
+            result = session.run(
+                """
+                MATCH (s:Script)-[:BELONGS_TO]->(p:Project {name: $project})
+                RETURN s.name as name, s.path as path, s.scope as scope,
+                       s.semantic_status as status
+                ORDER BY s.path
+            """,
+                {"project": project_name},
+            )
+            resources["scripts"] = [dict(r) for r in result]
+
+            # Get named queries
+            result = session.run(
+                """
+                MATCH (q:NamedQuery)-[:BELONGS_TO]->(p:Project {name: $project})
+                RETURN q.name as name, q.folder_path as folder_path,
+                       q.semantic_status as status
+                ORDER BY q.name
+            """,
+                {"project": project_name},
+            )
+            resources["queries"] = [dict(r) for r in result]
+
+            # Get gateway events
+            result = session.run(
+                """
+                MATCH (e:GatewayEvent)-[:BELONGS_TO]->(p:Project {name: $project})
+                RETURN e.name as name, e.script_type as script_type,
+                       e.delay as delay
+                ORDER BY e.script_type, e.name
+            """,
+                {"project": project_name},
+            )
+            resources["events"] = [dict(r) for r in result]
+
+            # Get view components (through views that belong to project)
+            result = session.run(
+                """
+                MATCH (v:View)-[:BELONGS_TO]->(p:Project {name: $project})
+                MATCH (v)-[:HAS_COMPONENT]->(c:ViewComponent)
+                WHERE c.deleted IS NULL OR c.deleted = false
+                RETURN c.name as name, c.path as path, c.component_type as component_type,
+                       c.semantic_status as status, v.name as view_name
+                ORDER BY v.name, c.path
+            """,
+                {"project": project_name},
+            )
+            resources["components"] = [dict(r) for r in result]
+
+            return resources
+
+    def get_gateway_resources(self) -> Dict[str, List[Dict]]:
+        """Get all gateway-wide resources (Tags, UDTs, AOIs).
+
+        Returns:
+            Dict with tags, udts, aois lists
+        """
+        with self.session() as session:
+            resources = {"tags": [], "udts": [], "aois": []}
+
+            # Get ScadaTags (gateway-wide)
+            result = session.run(
+                """
+                MATCH (t:ScadaTag)
+                WHERE t.deleted IS NULL OR t.deleted = false
+                RETURN t.name as name, t.tag_type as tag_type,
+                       t.folder_name as folder, t.semantic_status as status
+                ORDER BY t.folder_name, t.name
+                LIMIT 500
+            """
+            )
+            resources["tags"] = [dict(r) for r in result]
+
+            # Get UDTs (gateway-wide)
+            result = session.run(
+                """
+                MATCH (u:UDT)
+                WHERE u.deleted IS NULL OR u.deleted = false
+                RETURN u.name as name, u.purpose as purpose,
+                       u.semantic_status as status
+                ORDER BY u.name
+            """
+            )
+            resources["udts"] = [dict(r) for r in result]
+
+            # Get AOIs (gateway-wide)
+            result = session.run(
+                """
+                MATCH (a:AOI)
+                WHERE a.deleted IS NULL OR a.deleted = false
+                RETURN a.name as name, a.type as type, a.purpose as purpose,
+                       a.semantic_status as status
+                ORDER BY a.name
+            """
+            )
+            resources["aois"] = [dict(r) for r in result]
+
+            return resources
+
+    def create_script(
+        self,
+        name: str,
+        path: str,
+        project: str,
+        scope: str = "A",
+        script_text: str = "",
+        semantic_status: str = "pending",
+    ) -> str:
+        """Create a Script node and link to project.
+
+        Args:
+            name: Qualified script name (project/path)
+            path: Script path within project
+            project: Project name
+            scope: Script scope (A=All, G=Gateway, C=Client, D=Designer)
+            script_text: Full script code from code.py file
+            semantic_status: Analysis status
+
+        Returns:
+            Script name
+        """
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (s:Script {name: $name})
+                SET s.path = $path,
+                    s.project = $project,
+                    s.scope = $scope,
+                    s.script_text = $script_text,
+                    s.semantic_status = COALESCE(s.semantic_status, $semantic_status)
+                WITH s
+                MATCH (p:Project {name: $project})
+                MERGE (s)-[:BELONGS_TO]->(p)
+            """,
+                {
+                    "name": name,
+                    "path": path,
+                    "project": project,
+                    "scope": scope,
+                    "script_text": script_text,
+                    "semantic_status": semantic_status,
+                },
+            )
+        return name
+
+    def create_gateway_event(
+        self,
+        name: str,
+        project: str,
+        script_type: str,
+        event_name: Optional[str] = None,
+        script_preview: str = "",
+        delay: Optional[int] = None,
+    ) -> str:
+        """Create a GatewayEvent node and link to project.
+
+        Args:
+            name: Qualified event name (project/script_type/event_name)
+            project: Project name
+            script_type: Event type (startup, shutdown, timer, message_handler)
+            event_name: Name for timer/message handler
+            script_preview: Preview of script code
+            delay: Delay in ms for timer scripts
+
+        Returns:
+            Event name
+        """
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (e:GatewayEvent {name: $name})
+                SET e.project = $project,
+                    e.script_type = $script_type,
+                    e.event_name = $event_name,
+                    e.script_preview = $script_preview,
+                    e.delay = $delay
+                WITH e
+                MATCH (p:Project {name: $project})
+                MERGE (e)-[:BELONGS_TO]->(p)
+            """,
+                {
+                    "name": name,
+                    "project": project,
+                    "script_type": script_type,
+                    "event_name": event_name,
+                    "script_preview": script_preview,
+                    "delay": delay,
+                },
+            )
+        return name
+
+    def create_named_query(
+        self,
+        name: str,
+        project: str,
+        folder_path: str = "",
+        query_id: str = "",
+        query_text: str = "",
+        semantic_status: str = "pending",
+    ) -> str:
+        """Create a NamedQuery node and link to project.
+
+        Args:
+            name: Qualified query name (project/folder/query_name)
+            project: Project name
+            folder_path: Folder path within project
+            query_id: Query identifier
+            query_text: Full SQL from query.sql file
+            semantic_status: Analysis status
+
+        Returns:
+            Query name
+        """
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (q:NamedQuery {name: $name})
+                SET q.project = $project,
+                    q.folder_path = $folder_path,
+                    q.query_id = $query_id,
+                    q.query_text = $query_text,
+                    q.semantic_status = COALESCE(q.semantic_status, $semantic_status)
+                WITH q
+                MATCH (p:Project {name: $project})
+                MERGE (q)-[:BELONGS_TO]->(p)
+            """,
+                {
+                    "name": name,
+                    "project": project,
+                    "folder_path": folder_path,
+                    "query_id": query_id,
+                    "query_text": query_text,
+                    "semantic_status": semantic_status,
+                },
+            )
+        return name
+
+    # -------------------------------------------------------------------------
+    # UDT Operations
+    # -------------------------------------------------------------------------
+
     def create_udt(
         self,
         name: str,
@@ -1048,21 +1430,24 @@ class OntologyGraph:
         name: str,
         path: str,
         purpose: str,
+        project: Optional[str] = None,
         semantic_status: str = "pending",
     ) -> str:
-        """Create a SCADA view node.
+        """Create a SCADA view node with optional project association.
 
         Args:
-            name: View name
+            name: View name (project-qualified if project specified)
             path: View path in Ignition
             purpose: Semantic description (empty if not yet analyzed)
+            project: Project name (creates BELONGS_TO relationship)
             semantic_status: One of 'pending', 'in_progress', 'complete', 'review'
         """
         with self.session() as session:
             session.run(
                 """
                 MERGE (v:View {name: $name})
-                SET v.path = $path
+                SET v.path = $path,
+                    v.project = $project
                 WITH v
                 SET v.semantic_status = COALESCE(v.semantic_status, $semantic_status)
                 WITH v
@@ -1076,9 +1461,22 @@ class OntologyGraph:
                     "name": name,
                     "path": path,
                     "purpose": purpose,
+                    "project": project,
                     "semantic_status": semantic_status,
                 },
             )
+
+            # Create BELONGS_TO relationship if project specified
+            if project:
+                session.run(
+                    """
+                    MATCH (v:View {name: $name})
+                    MATCH (p:Project {name: $project})
+                    MERGE (v)-[:BELONGS_TO]->(p)
+                """,
+                    {"name": name, "project": project},
+                )
+
         return name
 
     def create_view_udt_mapping(
@@ -1584,13 +1982,15 @@ class OntologyGraph:
         """Get items that haven't been semantically analyzed yet.
 
         Args:
-            item_type: One of 'AOI', 'UDT', 'View', 'Equipment', 'ViewComponent', 'ScadaTag'
+            item_type: One of 'AOI', 'UDT', 'View', 'Equipment', 'ViewComponent', 'ScadaTag',
+                       'Script', 'NamedQuery', 'GatewayEvent'
             limit: Maximum number of items to return
 
         Returns:
             List of dicts with 'name' and other relevant properties
         """
-        valid_types = {"AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag"}
+        valid_types = {"AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag",
+                       "Script", "NamedQuery", "GatewayEvent"}
         if item_type not in valid_types:
             raise ValueError(f"item_type must be one of {valid_types}")
 
@@ -1644,7 +2044,8 @@ class OntologyGraph:
         """Update the semantic status of an item.
 
         Args:
-            item_type: One of 'AOI', 'UDT', 'View', 'Equipment', 'ViewComponent', 'ScadaTag'
+            item_type: One of 'AOI', 'UDT', 'View', 'Equipment', 'ViewComponent', 'ScadaTag',
+                       'Script', 'NamedQuery', 'GatewayEvent'
             name: Name of the item (or path for ViewComponent)
             status: One of 'pending', 'in_progress', 'complete', 'review'
             purpose: Semantic description to set (only used when status='complete')
@@ -1652,7 +2053,8 @@ class OntologyGraph:
         Returns:
             True if item was found and updated
         """
-        valid_types = {"AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag"}
+        valid_types = {"AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag",
+                       "Script", "NamedQuery", "GatewayEvent"}
         valid_statuses = {"pending", "in_progress", "complete", "review"}
 
         if item_type not in valid_types:
@@ -2303,6 +2705,7 @@ def _import_ignition(graph: OntologyGraph, data: Dict) -> None:
 
 def main():
     import argparse
+    import json as json_module
 
     parser = argparse.ArgumentParser(description="Neo4j ontology management")
     parser.add_argument(
@@ -2317,11 +2720,16 @@ def main():
             "export",
             "load",
             "query",
+            "projects",
+            "gateway-resources",
+            "project-resources",
         ],
         help="Command to execute",
     )
     parser.add_argument("--file", "-f", help="JSON file for import/export")
     parser.add_argument("--query", "-q", help="Query string for search")
+    parser.add_argument("--project", "-p", help="Project name for project-resources")
+    parser.add_argument("--json", action="store_true", help="Output in JSON format")
     parser.add_argument(
         "--enrichment-status",
         action="store_true",
@@ -2459,6 +2867,47 @@ def main():
                         print(f"Steps: {r['steps']}")
                 else:
                     print("No results found")
+
+        elif args.command == "projects":
+            # Get all projects with inheritance info
+            projects = graph.get_all_projects()
+            if args.json:
+                print(json_module.dumps(projects))
+            else:
+                print("\nProjects:")
+                print("-" * 40)
+                for p in projects:
+                    parent_info = f" (inherits from {p['parent']})" if p.get('parent') else ""
+                    inheritable = " [inheritable]" if p.get('inheritable') else ""
+                    print(f"  {p['name']}{parent_info}{inheritable}")
+
+        elif args.command == "gateway-resources":
+            # Get gateway-wide resources (Tags, UDTs, AOIs)
+            resources = graph.get_gateway_resources()
+            if args.json:
+                print(json_module.dumps(resources))
+            else:
+                print("\nGateway Resources:")
+                print("-" * 40)
+                print(f"  Tags: {len(resources.get('tags', []))}")
+                print(f"  UDTs: {len(resources.get('udts', []))}")
+                print(f"  AOIs: {len(resources.get('aois', []))}")
+
+        elif args.command == "project-resources":
+            # Get project-specific resources
+            if not args.project:
+                print("[ERROR] --project required for project-resources command")
+                return
+            resources = graph.get_project_resources(args.project)
+            if args.json:
+                print(json_module.dumps(resources))
+            else:
+                print(f"\nResources for Project: {args.project}")
+                print("-" * 40)
+                print(f"  Views: {len(resources.get('views', []))}")
+                print(f"  Scripts: {len(resources.get('scripts', []))}")
+                print(f"  Named Queries: {len(resources.get('queries', []))}")
+                print(f"  Gateway Events: {len(resources.get('events', []))}")
 
 
 if __name__ == "__main__":

@@ -21,6 +21,10 @@
           <span class="icon">📥</span>
           <span>Ingest Data</span>
         </button>
+        <button class="nav-btn" data-tab="browse">
+          <span class="icon">📊</span>
+          <span>Browse</span>
+        </button>
         <button class="nav-btn" data-tab="troubleshoot">
           <span class="icon">🔧</span>
           <span>Troubleshoot</span>
@@ -62,6 +66,19 @@
             <div class="card-icon">📊</div>
             <h3>Ignition SCADA</h3>
             <p>Import Ignition project backup JSON files</p>
+            
+            <!-- Optional directory paths for inlining code/SQL -->
+            <div class="directory-pickers">
+              <div class="directory-picker">
+                <button class="btn-small" id="btn-pick-script-library" title="Select script_library folder">📁 Scripts</button>
+                <span class="directory-path" id="script-library-path">auto-detect</span>
+              </div>
+              <div class="directory-picker">
+                <button class="btn-small" id="btn-pick-named-queries" title="Select named_queries_library folder">📁 Queries</button>
+                <span class="directory-path" id="named-queries-path">auto-detect</span>
+              </div>
+            </div>
+            
             <button class="btn primary" id="btn-ingest-ignition">
               Select Ignition Backup
             </button>
@@ -87,6 +104,167 @@
           </div>
           <pre class="output-content"></pre>
         </div>
+
+        <!-- Project Discovery Panel (shown after Ignition import) -->
+        <div class="project-discovery-panel hidden" id="project-discovery">
+          <h4>📁 Projects Discovered</h4>
+          <div class="project-tree" id="project-tree"></div>
+          <button class="btn secondary" id="btn-goto-browse">→ Go to Browse Tab</button>
+        </div>
+      </section>
+
+      <!-- Browse Tab -->
+      <section class="tab-content" id="tab-browse">
+        <header class="tab-header">
+          <h2>Browse Resources</h2>
+          <p>Explore gateway-wide and project-specific resources</p>
+        </header>
+        
+        <!-- Enrichment Controls -->
+        <div class="enrichment-panel">
+          <div class="enrichment-file">
+            <button class="btn-small" id="btn-load-ignition-file">📂 Load File</button>
+            <span class="enrichment-file-name" id="enrichment-file-name">No file loaded</span>
+          </div>
+          <div class="enrichment-divider"></div>
+          <label>Batch Size:</label>
+          <input type="number" id="enrichment-batch-size" value="5" min="1" max="20" />
+          <span class="enrichment-hint">Items per batch</span>
+        </div>
+
+        <!-- Sub-tabs for Gateway + Projects -->
+        <div class="sub-tabs" id="browse-sub-tabs">
+          <button class="sub-tab active" data-subtab="gateway">Gateway</button>
+          <!-- Project tabs are dynamically added here -->
+        </div>
+        
+        <!-- Enrichment Output Panel -->
+        <div class="output-panel" id="enrichment-output" style="margin-top: 20px;">
+          <div class="output-header">
+            <h4>Enrichment Log</h4>
+            <button class="btn-small" id="btn-clear-enrichment-output">Clear</button>
+          </div>
+          <pre class="output-content" id="enrichment-log"></pre>
+        </div>
+        
+        <!-- Gateway Sub-tab Content -->
+        <div class="sub-tab-content active" id="subtab-gateway">
+          <h3>Gateway-Wide Resources</h3>
+          
+          <div class="resource-section" id="section-tags">
+            <div class="section-header">
+              <span class="section-icon">🏷️</span>
+              <span class="section-title">Tags</span>
+              <span class="section-count" id="tag-count">(loading...)</span>
+              <div class="enrichment-controls">
+                <span class="enrichment-status" id="tag-enrichment-status"></span>
+                <button class="btn-small" id="btn-enrich-tags">▶ Enrich Batch</button>
+              </div>
+            </div>
+            <div class="resource-list" id="tag-list"></div>
+          </div>
+          
+          <div class="resource-section" id="section-udts">
+            <div class="section-header">
+              <span class="section-icon">📦</span>
+              <span class="section-title">UDT Definitions</span>
+              <span class="section-count" id="udt-count">(loading...)</span>
+              <div class="enrichment-controls">
+                <span class="enrichment-status" id="udt-enrichment-status"></span>
+                <button class="btn-small" id="btn-enrich-udts">▶ Enrich Batch</button>
+              </div>
+            </div>
+            <div class="resource-list" id="udt-list"></div>
+          </div>
+          
+          <div class="resource-section" id="section-aois">
+            <div class="section-header">
+              <span class="section-icon">⚙️</span>
+              <span class="section-title">AOIs (PLC)</span>
+              <span class="section-count" id="aoi-count">(loading...)</span>
+              <div class="enrichment-controls">
+                <span class="enrichment-status" id="aoi-enrichment-status"></span>
+                <button class="btn-small" id="btn-enrich-aois">▶ Enrich Batch</button>
+              </div>
+            </div>
+            <div class="resource-list" id="aoi-list"></div>
+          </div>
+        </div>
+        
+        <!-- Project Sub-tab Content Template (cloned for each project) -->
+        <template id="project-subtab-template">
+          <div class="sub-tab-content" data-project="">
+            <div class="project-header">
+              <h3 class="project-name"></h3>
+              <span class="project-inheritance"></span>
+            </div>
+            
+            <div class="resource-section section-views">
+              <div class="section-header">
+                <span class="section-icon">🖥️</span>
+                <span class="section-title">Views</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                  <button class="btn-small btn-enrich-views">▶ Enrich Batch</button>
+                </div>
+              </div>
+              <div class="resource-list view-list"></div>
+            </div>
+            
+            <div class="resource-section section-scripts">
+              <div class="section-header">
+                <span class="section-icon">📜</span>
+                <span class="section-title">Scripts</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                  <button class="btn-small btn-enrich-scripts">▶ Enrich Batch</button>
+                </div>
+              </div>
+              <div class="resource-list script-list"></div>
+            </div>
+            
+            <div class="resource-section section-queries">
+              <div class="section-header">
+                <span class="section-icon">🔍</span>
+                <span class="section-title">Named Queries</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                  <button class="btn-small btn-enrich-queries">▶ Enrich Batch</button>
+                </div>
+              </div>
+              <div class="resource-list query-list"></div>
+            </div>
+            
+            <div class="resource-section section-events">
+              <div class="section-header">
+                <span class="section-icon">⚡</span>
+                <span class="section-title">Gateway Events</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                  <button class="btn-small btn-enrich-events">▶ Enrich Batch</button>
+                </div>
+              </div>
+              <div class="resource-list event-list"></div>
+            </div>
+            
+            <div class="resource-section section-components">
+              <div class="section-header">
+                <span class="section-icon">🧩</span>
+                <span class="section-title">View Components</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                  <button class="btn-small btn-enrich-components">▶ Enrich Batch</button>
+                </div>
+              </div>
+              <div class="resource-list component-list"></div>
+            </div>
+          </div>
+        </template>
       </section>
 
       <!-- Troubleshoot Tab -->

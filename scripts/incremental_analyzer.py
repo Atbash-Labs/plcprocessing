@@ -45,7 +45,21 @@ class IncrementalAnalyzer:
 
     # Order of analysis (dependencies flow down)
     # AOI first (PLC), then Ignition entities, ScadaTags, ViewComponent last
-    ANALYSIS_ORDER = ["AOI", "UDT", "Equipment", "ScadaTag", "View", "ViewComponent"]
+    # Gateway-wide types: AOI, UDT, Equipment, ScadaTag
+    # Project-specific types: View, Script, NamedQuery, ViewComponent
+    ANALYSIS_ORDER = [
+        "AOI",
+        "UDT",
+        "Equipment",
+        "ScadaTag",
+        "View",
+        "Script",
+        "NamedQuery",
+        "GatewayEvent",
+        "ViewComponent",
+    ]
+    GATEWAY_TYPES = {"AOI", "UDT", "Equipment", "ScadaTag"}
+    PROJECT_TYPES = {"View", "Script", "NamedQuery", "GatewayEvent", "ViewComponent"}
 
     def __init__(
         self,
@@ -53,6 +67,7 @@ class IncrementalAnalyzer:
         graph: Optional[OntologyGraph] = None,
         client: Optional[ClaudeClient] = None,
         batch_size: int = 10,
+        project_filter: Optional[str] = None,
     ):
         """Initialize the incremental analyzer.
 
@@ -61,19 +76,53 @@ class IncrementalAnalyzer:
             graph: Neo4j graph connection (created if not provided)
             client: Claude client (created if not provided)
             batch_size: Number of items to process per batch
+            project_filter: If set, only analyze items from this project
         """
         load_dotenv()
 
         self.backup = backup
         self.batch_size = batch_size
+        self.project_filter = project_filter
 
         # Build lookup maps from backup for quick access
         self._udt_defs: Dict[str, UDTDefinition] = {
             udt.name: udt for udt in backup.udt_definitions
         }
-        self._windows = {w.name: w for w in backup.windows}
+        # Use project-qualified names for windows
+        self._windows = {}
+        for w in backup.windows:
+            qualified_name = f"{w.project}/{w.name}" if w.project else w.name
+            self._windows[qualified_name] = w
         self._instances = {inst.name: inst for inst in backup.udt_instances}
         self._tags = {tag.name: tag for tag in backup.tags}
+
+        # Scripts use project-qualified names
+        self._scripts = {}
+        for s in backup.scripts:
+            qualified_name = f"{s.project}/{s.path}" if s.project else s.path
+            self._scripts[qualified_name] = s
+
+        # Named queries use project-qualified names (project/id or project/name)
+        self._named_queries = {}
+        for nq in backup.named_queries:
+            query_id = nq.id or nq.name
+            if query_id:
+                qualified_name = f"{nq.project}/{query_id}" if nq.project else query_id
+                self._named_queries[qualified_name] = nq
+
+        # Gateway events use project-qualified names matching _build_event_name
+        self._gateway_events = {}
+        for ge in backup.gateway_events:
+            if ge.project:
+                if ge.script_type in ("startup", "shutdown"):
+                    qualified_name = f"{ge.project}/{ge.script_type}"
+                elif ge.script_type == "timer" and ge.name:
+                    qualified_name = f"{ge.project}/timer/{ge.name}"
+                elif ge.script_type == "message_handler" and ge.name:
+                    qualified_name = f"{ge.project}/message/{ge.name}"
+                else:
+                    qualified_name = f"{ge.project}/{ge.script_type}"
+                self._gateway_events[qualified_name] = ge
 
         # Connections
         self._graph = graph
@@ -108,9 +157,62 @@ class IncrementalAnalyzer:
     def graph(self) -> OntologyGraph:
         return self._graph
 
-    def get_status(self) -> Dict[str, Dict[str, int]]:
-        """Get current analysis status for all item types."""
+    def get_status(self, by_project: bool = False) -> Dict[str, Any]:
+        """Get current analysis status for all item types.
+
+        Args:
+            by_project: If True, return counts grouped by project
+
+        Returns:
+            Dict with status counts (optionally by project)
+        """
+        if by_project:
+            return self._get_status_by_project()
         return self._graph.get_semantic_status_counts()
+
+    def _get_status_by_project(self) -> Dict[str, Dict[str, Dict[str, int]]]:
+        """Get analysis status grouped by project.
+
+        Returns:
+            Dict mapping project names to status counts by type
+        """
+        status = {}
+
+        with self._graph.session() as session:
+            # Get gateway-wide status (no project)
+            gateway_status = {}
+            for item_type in self.GATEWAY_TYPES:
+                result = session.run(
+                    f"""
+                    MATCH (n:{item_type})
+                    WHERE n.deleted IS NULL OR n.deleted = false
+                    RETURN n.semantic_status as status, count(n) as count
+                """
+                )
+                gateway_status[item_type] = {r["status"]: r["count"] for r in result}
+            status["_gateway"] = gateway_status
+
+            # Get project-specific status
+            result = session.run(
+                "MATCH (p:Project) RETURN p.name as name ORDER BY p.name"
+            )
+            projects = [r["name"] for r in result]
+
+            for project in projects:
+                proj_status = {}
+                for item_type in self.PROJECT_TYPES:
+                    result = session.run(
+                        f"""
+                        MATCH (n:{item_type})-[:BELONGS_TO]->(p:Project {{name: $project}})
+                        WHERE n.deleted IS NULL OR n.deleted = false
+                        RETURN n.semantic_status as status, count(n) as count
+                    """,
+                        {"project": project},
+                    )
+                    proj_status[item_type] = {r["status"]: r["count"] for r in result}
+                status[project] = proj_status
+
+        return status
 
     def recover_stuck_items(self, verbose: bool = False) -> int:
         """Reset any items stuck in 'in_progress' back to 'pending'.
@@ -187,12 +289,14 @@ class IncrementalAnalyzer:
     def analyze_next_batch(
         self,
         item_type: Optional[str] = None,
+        project: Optional[str] = None,
         verbose: bool = False,
     ) -> AnalysisSession:
         """Analyze the next batch of pending items.
 
         Args:
             item_type: Specific type to analyze, or None to auto-select
+            project: Filter to items from this project (for project-specific types)
             verbose: Print detailed progress
 
         Returns:
@@ -200,23 +304,61 @@ class IncrementalAnalyzer:
         """
         session = AnalysisSession()
 
+        # Use instance project filter if not overridden
+        project = project or self.project_filter
+
         # Determine what to analyze
         if item_type is None:
-            item_type = self._get_next_item_type()
+            item_type = self._get_next_item_type(project)
             if item_type is None:
                 if verbose:
                     print("[INFO] No pending items to analyze")
                 return session
 
-        # Get pending items
-        pending = self._graph.get_pending_items(item_type, self.batch_size)
+        # Get pending items (with project filter for project-specific types)
+        if project and item_type in self.PROJECT_TYPES:
+            pending = self._get_pending_items_by_project(
+                item_type, project, self.batch_size
+            )
+        else:
+            pending = self._graph.get_pending_items(item_type, self.batch_size)
+
         if not pending:
             if verbose:
-                print(f"[INFO] No pending {item_type} items")
+                proj_info = f" for project {project}" if project else ""
+                print(f"[INFO] No pending {item_type} items{proj_info}")
+                # Debug: check if items exist at all for this project
+                if project and item_type in self.PROJECT_TYPES:
+                    with self._graph.session() as dbsession:
+                        if item_type == "ViewComponent":
+                            debug_result = dbsession.run(
+                                """
+                                MATCH (v:View)-[:BELONGS_TO]->(p:Project {name: $project})
+                                MATCH (v)-[:HAS_COMPONENT]->(n:ViewComponent)
+                                RETURN count(n) as total,
+                                       count(CASE WHEN n.semantic_status = 'pending' OR n.semantic_status IS NULL THEN 1 END) as pending_count
+                            """,
+                                {"project": project},
+                            )
+                        else:
+                            debug_result = dbsession.run(
+                                f"""
+                                MATCH (n:{item_type})-[:BELONGS_TO]->(p:Project {{name: $project}})
+                                RETURN count(n) as total,
+                                       count(CASE WHEN n.semantic_status = 'pending' OR n.semantic_status IS NULL THEN 1 END) as pending_count
+                            """,
+                                {"project": project},
+                            )
+                        debug_data = debug_result.single()
+                        if debug_data:
+                            print(
+                                f"[DEBUG] {item_type} for {project}: {debug_data['total']} total, {debug_data['pending_count']} pending"
+                            )
             return session
 
         if verbose:
-            print(f"[INFO] Analyzing {len(pending)} {item_type} items...")
+            proj_info = f" (project: {project})" if project else ""
+            print(f"[INFO] Analyzing {len(pending)} {item_type} items{proj_info}...")
 
         # Mark items as in_progress
         item_names = []
@@ -306,20 +448,88 @@ class IncrementalAnalyzer:
 
         return total_session
 
-    def _get_next_item_type(self) -> Optional[str]:
-        """Determine the next item type to analyze based on dependency order."""
+    def _get_next_item_type(self, project: Optional[str] = None) -> Optional[str]:
+        """Determine the next item type to analyze based on dependency order.
+
+        Args:
+            project: If set, consider project-specific items for this project
+
+        Returns:
+            Next item type with pending items, or None if all done
+        """
         status = self.get_status()
 
         for item_type in self.ANALYSIS_ORDER:
-            counts = status.get(item_type, {})
-            pending = counts.get("pending", 0)
-            # Also count items with no status as pending
-            if None in counts:
-                pending += counts[None]
-            if pending > 0:
-                return item_type
+            # Skip project-specific types if no project filter
+            if project and item_type in self.PROJECT_TYPES:
+                # Check project-specific pending count
+                pending = self._count_pending_by_project(item_type, project)
+                if pending > 0:
+                    return item_type
+            elif item_type in self.GATEWAY_TYPES:
+                # Gateway-wide type - use overall status
+                counts = status.get(item_type, {})
+                pending = counts.get("pending", 0)
+                if None in counts:
+                    pending += counts[None]
+                if pending > 0:
+                    return item_type
+            elif not project:
+                # Project type without filter - check all
+                counts = status.get(item_type, {})
+                pending = counts.get("pending", 0)
+                if None in counts:
+                    pending += counts[None]
+                if pending > 0:
+                    return item_type
 
         return None
+
+    def _count_pending_by_project(self, item_type: str, project: str) -> int:
+        """Count pending items of a type for a specific project."""
+        with self._graph.session() as session:
+            result = session.run(
+                f"""
+                MATCH (n:{item_type})-[:BELONGS_TO]->(p:Project {{name: $project}})
+                WHERE (n.semantic_status IS NULL OR n.semantic_status = 'pending')
+                  AND (n.deleted IS NULL OR n.deleted = false)
+                RETURN count(n) as count
+            """,
+                {"project": project},
+            )
+            return result.single()["count"]
+
+    def _get_pending_items_by_project(
+        self, item_type: str, project: str, limit: int
+    ) -> List[Dict]:
+        """Get pending items of a type for a specific project."""
+        with self._graph.session() as session:
+            # ViewComponents - use same query as get_project_resources
+            if item_type == "ViewComponent":
+                result = session.run(
+                    """
+                    MATCH (v:View)-[:BELONGS_TO]->(p:Project {name: $project})
+                    MATCH (v)-[:HAS_COMPONENT]->(n:ViewComponent)
+                    WHERE (n.semantic_status IS NULL OR n.semantic_status = 'pending')
+                      AND (n.deleted IS NULL OR n.deleted = false)
+                    RETURN n.name as name, n.path as path, n.purpose as purpose, v.name as view
+                    LIMIT $limit
+                """,
+                    {"project": project, "limit": limit},
+                )
+                return [dict(r) for r in result]
+            else:
+                result = session.run(
+                    f"""
+                    MATCH (n:{item_type})-[:BELONGS_TO]->(p:Project {{name: $project}})
+                    WHERE (n.semantic_status IS NULL OR n.semantic_status = 'pending')
+                      AND (n.deleted IS NULL OR n.deleted = false)
+                    RETURN n.name as name, n.path as path, n.purpose as purpose
+                    LIMIT $limit
+                """,
+                    {"project": project, "limit": limit},
+                )
+            return [dict(r) for r in result]
 
     def _analyze_batch(
         self,
@@ -518,6 +728,44 @@ class IncrementalAnalyzer:
                         "initial_value": tag.initial_value,
                     }
 
+        elif item_type == "Script":
+            for item in items:
+                name = item.get("name")
+                if name in self._scripts:
+                    script = self._scripts[name]
+                    context["raw_definitions"][name] = {
+                        "path": script.path,
+                        "project": script.project,
+                        "scope": script.scope,
+                        "code_preview": (
+                            script.code_preview[:2000] if script.code_preview else None
+                        ),
+                    }
+
+        elif item_type == "NamedQuery":
+            for item in items:
+                name = item.get("name")
+                if name in self._named_queries:
+                    nq = self._named_queries[name]
+                    context["raw_definitions"][name] = {
+                        "name": nq.name,
+                        "folder_path": nq.folder_path,
+                        "project": nq.project,
+                    }
+
+        elif item_type == "GatewayEvent":
+            for item in items:
+                name = item.get("name")
+                if name in self._gateway_events:
+                    ge = self._gateway_events[name]
+                    context["raw_definitions"][name] = {
+                        "event_type": ge.script_type,
+                        "project": ge.project,
+                        "name": ge.name,
+                        "script": ge.script[:2000] if ge.script else None,
+                        "delay": ge.delay,
+                    }
+
         return context
 
     def _get_system_prompt(self, item_type: str) -> str:
@@ -558,6 +806,21 @@ Equipment instances are based on UDT templates.
 You are analyzing UI components within HMI views.
 Each component has a type (button, label, LED, input field, etc.) and may be bound to equipment data.
 Describe what this specific component does for the operator - what action it triggers or what information it shows.
+""",
+            "Script": """
+You are analyzing Python scripts in an Ignition project library.
+Scripts may contain helper functions, business logic, or integration code.
+Look at the function names, code structure, and any comments to understand the purpose.
+""",
+            "NamedQuery": """
+You are analyzing Named Queries, which are pre-defined SQL queries stored in Ignition.
+Named Queries are used for database operations like reading sensor data or logging events.
+Look at the query structure and column names to understand what data it accesses.
+""",
+            "GatewayEvent": """
+You are analyzing Gateway Event scripts (startup, shutdown, timer, message handlers).
+These scripts run automatically based on gateway or timer events.
+Describe what automation or background task this event handles.
 Consider the component's type, properties, and any bindings to understand its purpose.
 """,
             "ScadaTag": """
@@ -662,8 +925,23 @@ def main():
     parser.add_argument(
         "--type",
         "-t",
-        choices=["AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag"],
+        choices=[
+            "AOI",
+            "UDT",
+            "View",
+            "Equipment",
+            "ViewComponent",
+            "ScadaTag",
+            "Script",
+            "NamedQuery",
+            "GatewayEvent",
+        ],
         help="Specific item type to analyze/reset",
+    )
+    parser.add_argument(
+        "--project",
+        "-p",
+        help="Filter to specific project (for project-specific types)",
     )
     parser.add_argument(
         "--batch",
@@ -678,6 +956,11 @@ def main():
         type=int,
         default=50,
         help="Maximum items to analyze in this session (default: 50)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format (for API usage)",
     )
     parser.add_argument(
         "-v",
@@ -696,30 +979,66 @@ def main():
         # Status doesn't need the backup file
         graph = get_ontology_graph()
         try:
-            status = graph.get_semantic_status_counts()
-            print("\n=== Semantic Analysis Status ===\n")
+            # Create a minimal analyzer for status methods
+            from ignition_parser import IgnitionBackup
 
-            has_stuck = False
-            for item_type in IncrementalAnalyzer.ANALYSIS_ORDER:
-                counts = status.get(item_type, {})
-                pending = counts.get("pending", 0)
-                complete = counts.get("complete", 0)
-                in_progress = counts.get("in_progress", 0)
-                review = counts.get("review", 0)
-                total = pending + complete + in_progress + review
+            dummy_backup = IgnitionBackup(file_path="", version="")
+            analyzer = IncrementalAnalyzer(
+                dummy_backup, graph=graph, project_filter=args.project
+            )
 
-                if total > 0:
-                    pct = (complete / total * 100) if total > 0 else 0
-                    line = f"  {item_type:15} {complete:3}/{total:<3} complete ({pct:.0f}%)"
-                    if in_progress > 0:
-                        line += f"  ⚠️  {in_progress} stuck in_progress"
-                        has_stuck = True
-                    print(line)
+            if args.project:
+                # Get status for specific project
+                status = analyzer._get_status_by_project()
+                proj_status = status.get(args.project, {})
 
-            print()
-            if has_stuck:
-                print("  ⚠️  Some items are stuck in 'in_progress' (interrupted run).")
-                print("     Run 'recover' command to reset them to 'pending'.\n")
+                if args.json:
+                    print(json.dumps(proj_status))
+                else:
+                    print(f"\n=== Status for Project: {args.project} ===\n")
+                    for item_type in IncrementalAnalyzer.PROJECT_TYPES:
+                        counts = proj_status.get(item_type, {})
+                        pending = counts.get("pending", 0) + counts.get(None, 0)
+                        complete = counts.get("complete", 0)
+                        total = pending + complete
+                        if total > 0:
+                            pct = (complete / total * 100) if total > 0 else 0
+                            print(
+                                f"  {item_type:15} {complete:3}/{total:<3} complete ({pct:.0f}%)"
+                            )
+            else:
+                status = graph.get_semantic_status_counts()
+
+                if args.json:
+                    print(json.dumps(status))
+                else:
+                    print("\n=== Semantic Analysis Status ===\n")
+
+                    has_stuck = False
+                    for item_type in IncrementalAnalyzer.ANALYSIS_ORDER:
+                        counts = status.get(item_type, {})
+                        pending = counts.get("pending", 0)
+                        complete = counts.get("complete", 0)
+                        in_progress = counts.get("in_progress", 0)
+                        review = counts.get("review", 0)
+                        total = pending + complete + in_progress + review
+
+                        if total > 0:
+                            pct = (complete / total * 100) if total > 0 else 0
+                            line = f"  {item_type:15} {complete:3}/{total:<3} complete ({pct:.0f}%)"
+                            if in_progress > 0:
+                                line += f"  ⚠️  {in_progress} stuck in_progress"
+                                has_stuck = True
+                            print(line)
+
+                    print()
+                    if has_stuck:
+                        print(
+                            "  ⚠️  Some items are stuck in 'in_progress' (interrupted run)."
+                        )
+                        print(
+                            "     Run 'recover' command to reset them to 'pending'.\n"
+                        )
         finally:
             graph.close()
         return
@@ -752,7 +1071,17 @@ def main():
             if args.type:
                 types_to_reset = [args.type]
             else:
-                types_to_reset = ["UDT", "View", "Equipment", "ViewComponent"]
+                types_to_reset = [
+                    "AOI",
+                    "UDT",
+                    "View",
+                    "Equipment",
+                    "ViewComponent",
+                    "ScadaTag",
+                    "Script",
+                    "NamedQuery",
+                    "GatewayEvent",
+                ]
 
             for item_type in types_to_reset:
                 with graph.session() as session:
@@ -781,12 +1110,15 @@ def main():
         ignition_parser = IgnitionParser()
         backup = ignition_parser.parse_file(args.input)
 
+        proj_info = f" (project filter: {args.project})" if args.project else ""
         print(
             f"[INFO] Loaded: {len(backup.udt_definitions)} UDTs, "
-            f"{len(backup.udt_instances)} instances, {len(backup.windows)} views"
+            f"{len(backup.udt_instances)} instances, {len(backup.windows)} views{proj_info}"
         )
 
-        with IncrementalAnalyzer(backup, batch_size=args.batch) as analyzer:
+        with IncrementalAnalyzer(
+            backup, batch_size=args.batch, project_filter=args.project
+        ) as analyzer:
             # Auto-recover any stuck items from interrupted runs
             recovered = analyzer.recover_stuck_items(verbose=args.verbose)
             if recovered > 0:
@@ -799,7 +1131,9 @@ def main():
 
             # Run analysis session
             if args.type:
-                session = analyzer.analyze_next_batch(args.type, verbose=args.verbose)
+                session = analyzer.analyze_next_batch(
+                    args.type, project=args.project, verbose=args.verbose
+                )
             else:
                 session = analyzer.run_session(
                     max_items=args.max,

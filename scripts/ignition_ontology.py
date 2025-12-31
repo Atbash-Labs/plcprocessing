@@ -73,54 +73,172 @@ class IgnitionOntologyAnalyzer:
         if verbose:
             print(f"[INFO] Analyzing Ignition backup...")
 
+        # === PHASE 0: Create Projects first (needed for relationships) ===
+        if backup.projects:
+            if verbose:
+                print(f"[INFO] Creating {len(backup.projects)} projects...")
+            self._create_projects(backup, verbose)
+
         # === PHASE 1: Create entities from parsed data (deterministic) ===
         if verbose:
             print(f"[INFO] Creating entities from parsed data...")
 
-        # Create all UDTs from parsed definitions (semantic_status='pending')
+        # Create all UDTs from parsed definitions (gateway-wide, no project)
         for udt_def in backup.udt_definitions:
             self.graph.create_udt(udt_def.name, "", backup.file_path)
 
-        # Create all Views from parsed windows (semantic_status='pending')
-        for window in backup.windows:
-            self.graph.create_view(window.name, window.path, "")
+        # Create all Views from parsed windows with project-qualified names
+        if verbose and len(backup.windows) > 100:
+            print(f"[INFO] Creating {len(backup.windows)} views...", flush=True)
+        views_created = 0
+        for i, window in enumerate(backup.windows):
+            # Skip windows without names
+            if not window.name:
+                continue
+            view_name = self._qualify_name(window.name, window.project)
+            self.graph.create_view(view_name, window.path, "", project=window.project)
+            views_created += 1
+            # Progress indicator for large sets
+            if verbose and len(backup.windows) > 200 and (i + 1) % 200 == 0:
+                print(f"  ... {i + 1}/{len(backup.windows)} views", flush=True)
 
-        # Create UDT instances (equipment) from parsed data (semantic_status='pending')
-        for inst in backup.udt_instances:
+        # Create UDT instances (equipment) - gateway-wide, no project prefix
+        if verbose and len(backup.udt_instances) > 100:
+            print(
+                f"[INFO] Creating {len(backup.udt_instances)} equipment instances...",
+                flush=True,
+            )
+        for i, inst in enumerate(backup.udt_instances):
             udt_type = self._normalize_udt_name(inst.type_id)
             self.graph.create_equipment(inst.name, udt_type, "", udt_type)
+            # Progress indicator for large sets
+            if verbose and len(backup.udt_instances) > 500 and (i + 1) % 500 == 0:
+                print(
+                    f"  ... {i + 1}/{len(backup.udt_instances)} equipment", flush=True
+                )
 
-        # Create standalone SCADA tags (query, memory, opc, expression tags)
+        # Create standalone SCADA tags (gateway-wide, no project prefix)
+        tags_created = 0
         for tag in backup.tags:
+            # Skip tags with empty or null names
+            if not tag.name:
+                continue
+            # Convert complex values to strings (Neo4j only accepts primitives)
             self.graph.create_scada_tag(
                 name=tag.name,
                 tag_type=tag.tag_type,
-                folder_name=tag.folder_name or "",
-                data_type=tag.data_type or "",
-                datasource=tag.datasource or "",
-                query=tag.query or "",
-                opc_item_path=tag.opc_item_path or "",
-                expression=tag.expression or "",
-                initial_value=tag.initial_value or "",
+                folder_name=self._to_string(tag.folder_name),
+                data_type=self._to_string(tag.data_type),
+                datasource=self._to_string(tag.datasource),
+                query=self._to_string(tag.query),
+                opc_item_path=self._to_string(tag.opc_item_path),
+                expression=self._to_string(tag.expression),
+                initial_value=self._to_string(tag.initial_value),
             )
+            tags_created += 1
+
+        # Create scripts with project-qualified names
+        scripts_created = 0
+        scripts_with_text = 0
+        for script in backup.scripts:
+            # Skip scripts without path or project
+            if not script.path or not script.project:
+                continue
+            script_name = self._qualify_name(script.path, script.project)
+            self.graph.create_script(
+                name=script_name,
+                path=script.path,
+                project=script.project,
+                scope=script.scope,
+                script_text=script.script_text,
+            )
+            scripts_created += 1
+            if script.script_text:
+                scripts_with_text += 1
+
+        # Create named queries with project-qualified names
+        queries_created = 0
+        queries_with_text = 0
+        for query in backup.named_queries:
+            # Skip queries without name or id
+            query_id = query.id or query.name
+            if not query_id:
+                continue
+            query_name = self._qualify_name(query_id, query.project)
+            self.graph.create_named_query(
+                name=query_name,
+                project=query.project or "",
+                folder_path=query.folder_path or "",
+                query_id=query.id,
+                query_text=query.query_text,
+            )
+            queries_created += 1
+            if query.query_text:
+                queries_with_text += 1
+
+        # Create gateway events with project-qualified names
+        events_created = 0
+        for event in backup.gateway_events:
+            # Skip events without project
+            if not event.project:
+                continue
+            event_name = self._build_event_name(event)
+            self.graph.create_gateway_event(
+                name=event_name,
+                project=event.project,
+                script_type=event.script_type,
+                event_name=event.name,
+                script_preview=event.script[:200] if event.script else "",
+                delay=event.delay,
+            )
+            events_created += 1
 
         if verbose:
             print(
-                f"[OK] Created {len(backup.udt_definitions)} UDTs, {len(backup.windows)} views, "
-                f"{len(backup.udt_instances)} equipment, {len(backup.tags)} standalone tags"
+                f"[OK] Created {len(backup.udt_definitions)} UDTs, {views_created} views, "
+                f"{len(backup.udt_instances)} equipment, {tags_created} standalone tags",
+                flush=True,
+            )
+            print(
+                f"[OK] Created {scripts_created} scripts ({scripts_with_text} with code), "
+                f"{queries_created} queries ({queries_with_text} with SQL), "
+                f"{events_created} gateway events",
+                flush=True,
             )
 
         # Create inter-entity relationships
+        if verbose:
+            print(f"[INFO] Creating inter-entity relationships...", flush=True)
         relationship_count = self._create_entity_relationships(backup, verbose)
         if verbose and relationship_count > 0:
-            print(f"[OK] Created {relationship_count} inter-entity relationships")
+            print(
+                f"[OK] Created {relationship_count} inter-entity relationships",
+                flush=True,
+            )
 
         # Create ViewComponents from parsed windows
-        component_count, binding_count = self._create_view_components(backup, verbose)
-        if verbose:
-            print(
-                f"[OK] Created {component_count} components with {binding_count} bindings"
+        # This can be slow with many views - skip if there are too many
+        if len(backup.windows) > 200:
+            if verbose:
+                print(
+                    f"[INFO] Skipping ViewComponent creation for {len(backup.windows)} views (too many - use incremental analyzer)",
+                    flush=True,
+                )
+            component_count, binding_count = 0, 0
+        else:
+            if verbose:
+                print(
+                    f"[INFO] Creating ViewComponents from {len(backup.windows)} views...",
+                    flush=True,
+                )
+            component_count, binding_count = self._create_view_components(
+                backup, verbose
             )
+            if verbose:
+                print(
+                    f"[OK] Created {component_count} components with {binding_count} bindings",
+                    flush=True,
+                )
 
         # === PHASE 2: Extract view-to-UDT mappings (deterministic) ===
         view_udt_mappings = self._extract_view_udt_mappings(backup, verbose)
@@ -256,9 +374,10 @@ class IgnitionOntologyAnalyzer:
             for tag in backup.tags:
                 parts.append(f"- {tag.name}: {tag.tag_type}")
                 if tag.query:
-                    parts.append(f"    Query: {tag.query[:200]}...")
+                    query_str = self._to_string(tag.query)
+                    parts.append(f"    Query: {query_str[:200]}...")
                 if tag.datasource:
-                    parts.append(f"    Datasource: {tag.datasource}")
+                    parts.append(f"    Datasource: {self._to_string(tag.datasource)}")
             parts.append("")
 
         # Windows/Views
@@ -324,9 +443,11 @@ class IgnitionOntologyAnalyzer:
         binding_count = 0
 
         for window in backup.windows:
+            # Use project-qualified view name
+            view_name = self._qualify_name(window.name, window.project)
             # Process all components in this view
             components_created, bindings_created = self._process_components(
-                window.name,
+                view_name,
                 window.components,
                 "",
                 udt_names,
@@ -486,8 +607,10 @@ class IgnitionOntologyAnalyzer:
         # 1. Tag-to-tag references from expression tags
         for tag in backup.tags:
             if tag.tag_type == "expression" and tag.expression:
+                # Convert expression to string if it's a dict
+                expr_str = self._to_string(tag.expression)
                 # Parse expression for tag references like {[default]TagName} or {TagName}
-                refs = re.findall(r"\{(?:\[[^\]]+\])?([^}]+)\}", tag.expression)
+                refs = re.findall(r"\{(?:\[[^\]]+\])?([^}]+)\}", expr_str)
                 for ref in refs:
                     # Clean up the reference (might have .value or /path suffixes)
                     ref_name = ref.split("/")[0].split(".")[0]
@@ -688,7 +811,8 @@ class IgnitionOntologyAnalyzer:
         view_udt_map: Dict[str, set] = {}
 
         for window in backup.windows:
-            view_name = window.name
+            # Use project-qualified view name
+            view_name = self._qualify_name(window.name, window.project)
             udts_used = set()
 
             # Extract all tag references from this view
@@ -843,6 +967,121 @@ class IgnitionOntologyAnalyzer:
         if "/" in type_id:
             return type_id.split("/")[-1]
         return type_id
+
+    def _qualify_name(self, name: str, project: Optional[str]) -> str:
+        """Create a project-qualified name.
+
+        Args:
+            name: Resource name
+            project: Project name (or None for gateway-wide resources)
+
+        Returns:
+            Qualified name in format "project/name" or just "name" if no project
+        """
+        if project:
+            return f"{project}/{name}"
+        return name
+
+    def _to_string(self, value: Any) -> str:
+        """Convert any value to a string for Neo4j storage.
+
+        Neo4j only accepts primitive types. Complex objects like dicts/lists
+        need to be converted to strings.
+
+        Args:
+            value: Any value (could be None, str, dict, list, etc.)
+
+        Returns:
+            String representation or empty string if None
+        """
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (dict, list)):
+            import json
+
+            return json.dumps(value)
+        return str(value)
+
+    def _build_event_name(self, event) -> str:
+        """Build a qualified name for a gateway event.
+
+        Args:
+            event: GatewayEventScript object
+
+        Returns:
+            Qualified name like "Project/startup" or "Project/timer/TimerName"
+        """
+        if event.script_type in ("startup", "shutdown"):
+            return f"{event.project}/{event.script_type}"
+        elif event.script_type == "timer" and event.name:
+            return f"{event.project}/timer/{event.name}"
+        elif event.script_type == "message_handler" and event.name:
+            return f"{event.project}/message/{event.name}"
+        else:
+            return f"{event.project}/{event.script_type}"
+
+    def _create_projects(self, backup, verbose: bool = False) -> None:
+        """Create Project nodes and inheritance relationships.
+
+        Args:
+            backup: Parsed IgnitionBackup with projects dict
+            verbose: Print detailed progress
+        """
+        from ignition_parser import Project
+
+        # First pass: create all project nodes
+        for proj_name, proj in backup.projects.items():
+            if isinstance(proj, Project):
+                self.graph.create_project(
+                    name=proj.name,
+                    title=proj.title,
+                    description=proj.description,
+                    parent=proj.parent,
+                    enabled=proj.enabled,
+                    inheritable=proj.inheritable,
+                )
+                if verbose:
+                    parent_info = (
+                        f" (inherits from {proj.parent})" if proj.parent else ""
+                    )
+                    print(f"  [OK] Created project: {proj.name}{parent_info}")
+
+    def resolve_resource(
+        self, resource_type: str, name: str, current_project: str
+    ) -> Optional[str]:
+        """Find a resource by checking current project then parent projects.
+
+        Implements inheritance resolution: child project resources override parent.
+
+        Args:
+            resource_type: Node type (View, Script, NamedQuery)
+            name: Unqualified resource name
+            current_project: Starting project to search from
+
+        Returns:
+            Qualified resource name if found, None otherwise
+        """
+        # Build inheritance chain: [current, parent, grandparent, ...]
+        chain = self.graph.get_project_inheritance_chain(current_project)
+
+        for project in chain:
+            qualified_name = f"{project}/{name}"
+            # Check if resource exists
+            with self.graph.session() as session:
+                result = session.run(
+                    f"""
+                    MATCH (n:{resource_type} {{name: $name}})
+                    RETURN n.name as name
+                    LIMIT 1
+                """,
+                    {"name": qualified_name},
+                )
+                if result.single():
+                    return qualified_name
+
+        return None
 
     def _get_component_tag_refs(self, components: List) -> set:
         """Recursively extract all tag references from UI components."""
@@ -1021,6 +1260,16 @@ def main():
         "--status", action="store_true", help="Show semantic analysis status"
     )
     parser.add_argument("--export", metavar="FILE", help="Export analysis to JSON file")
+    parser.add_argument(
+        "--script-library",
+        metavar="DIR",
+        help="Path to script_library directory (auto-detected if not specified)",
+    )
+    parser.add_argument(
+        "--named-queries",
+        metavar="DIR",
+        help="Path to named_queries_library directory (auto-detected if not specified)",
+    )
 
     args = parser.parse_args()
 
@@ -1068,12 +1317,39 @@ def main():
                 print(f"  {v['name']}: {v.get('purpose', 'N/A')[:60]}...")
 
         elif args.input:
-            # Parse backup
+            # Parse backup with optional content directories
             ignition_parser = IgnitionParser()
-            backup = ignition_parser.parse_file(args.input)
+            backup = ignition_parser.parse_file(
+                args.input,
+                script_library_path=getattr(args, "script_library", None),
+                named_queries_path=getattr(args, "named_queries", None),
+            )
+
+            # Show what content directories were found
+            if args.verbose:
+                if ignition_parser.script_library_path:
+                    print(
+                        f"[INFO] Script library: {ignition_parser.script_library_path}"
+                    )
+                else:
+                    print("[WARN] Script library not found - scripts will have no code")
+                if ignition_parser.named_queries_path:
+                    print(f"[INFO] Named queries: {ignition_parser.named_queries_path}")
+                else:
+                    print(
+                        "[WARN] Named queries library not found - queries will have no SQL"
+                    )
+
+            # Count inlined content
+            scripts_with_text = sum(1 for s in backup.scripts if s.script_text)
+            queries_with_text = sum(1 for q in backup.named_queries if q.query_text)
 
             print(
                 f"[INFO] Parsed: {len(backup.udt_definitions)} UDTs, {len(backup.udt_instances)} instances, {len(backup.windows)} views"
+            )
+            print(
+                f"[INFO] Inlined: {scripts_with_text}/{len(backup.scripts)} scripts, "
+                f"{queries_with_text}/{len(backup.named_queries)} queries"
             )
 
             # Analyze and store in Neo4j
