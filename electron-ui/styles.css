@@ -891,6 +891,28 @@ body {
   }
 }
 
+/* Streaming text from Claude */
+.streaming-text {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-dark);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  border-left: 2px solid var(--accent-cyan-dim);
+}
+
+.thinking-text {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* Tool call item in output panel */
 .tool-call-item {
   display: flex;
@@ -1256,4 +1278,3 @@ body {
   background: var(--border-subtle);
   margin: 0 8px;
 }
-

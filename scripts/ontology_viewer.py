@@ -11,8 +11,29 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
+from datetime import datetime, date
 
 from neo4j_ontology import OntologyGraph, get_ontology_graph
+
+
+class DateTimeEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles DateTime and other non-serializable types."""
+    
+    def default(self, obj):
+        # Handle datetime objects
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        # Handle neo4j DateTime objects (they have isoformat method)
+        if hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+        # Handle neo4j DateTime objects that might have to_native method
+        if hasattr(obj, 'to_native'):
+            return str(obj.to_native())
+        # Fallback for any other non-serializable objects
+        try:
+            return str(obj)
+        except Exception:
+            return super().default(obj)
 
 
 class OntologyType(Enum):
@@ -489,7 +510,7 @@ class OntologyViewer:
     def generate_html(self, title: str = "Ontology Viewer") -> str:
         """Generate interactive HTML visualization."""
 
-        # Convert nodes and edges to JSON
+        # Convert nodes and edges to JSON (using custom encoder for DateTime objects)
         nodes_json = json.dumps(
             [
                 {
@@ -500,7 +521,8 @@ class OntologyViewer:
                     "details": n.details,
                 }
                 for n in self.nodes
-            ]
+            ],
+            cls=DateTimeEncoder
         )
 
         edges_json = json.dumps(
@@ -512,10 +534,11 @@ class OntologyViewer:
                     "type": e.type,
                 }
                 for e in self.edges
-            ]
+            ],
+            cls=DateTimeEncoder
         )
 
-        colors_json = json.dumps(self.COLORS)
+        colors_json = json.dumps(self.COLORS, cls=DateTimeEncoder)
 
         html = f"""<!DOCTYPE html>
 <html lang="en">

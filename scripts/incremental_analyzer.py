@@ -579,6 +579,7 @@ class IncrementalAnalyzer:
             }
 
         data = result.get("data", {})
+        print(f"[DEBUG] Data: {data}")
 
         # Map results back to item names
         results = {}
@@ -589,15 +590,27 @@ class IncrementalAnalyzer:
             if name in analyses:
                 results[name] = {"purpose": analyses[name]}
             else:
-                # Check for alternative key formats
+                # Check for alternative key formats:
+                # 1. Case-insensitive exact match
+                # 2. Claude may return just the short name (e.g., "GetEquipmentRunTimeByID")
+                #    but we have full path (e.g., "ProveIT/Charts/GetEquipmentRunTimeByID")
                 found = False
+                name_lower = name.lower()
                 for key, value in analyses.items():
-                    if key.lower() == name.lower():
+                    key_lower = key.lower()
+                    # Exact case-insensitive match
+                    if key_lower == name_lower:
+                        results[name] = {"purpose": value}
+                        found = True
+                        break
+                    # Check if full name ends with the key (suffix match)
+                    # e.g., "ProveIT/Charts/GetEquipmentRunTimeByID" ends with "GetEquipmentRunTimeByID"
+                    if name_lower.endswith("/" + key_lower) or name_lower.endswith("\\" + key_lower):
                         results[name] = {"purpose": value}
                         found = True
                         break
                 if not found:
-                    results[name] = {"error": "No analysis returned by Claude"}
+                    results[name] = {"error": f"No analysis returned by Claude (expected key: {name})"}
 
         return results
 
@@ -737,9 +750,7 @@ class IncrementalAnalyzer:
                         "path": script.path,
                         "project": script.project,
                         "scope": script.scope,
-                        "code_preview": (
-                            script.code_preview[:2000] if script.code_preview else None
-                        ),
+                        "script_text": script.script_text,
                     }
 
         elif item_type == "NamedQuery":

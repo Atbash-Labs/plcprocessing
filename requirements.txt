@@ -12,3 +12,5 @@ python-dotenv>=1.0.0
 # XML parsing (for PLC files)
 lxml>=4.9.0
 
+# SQL Server connectivity
+pyodbc>=4.0.0

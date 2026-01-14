@@ -8,6 +8,7 @@ the ontology database with maximum flexibility.
 import os
 import sys
 import json
+import time
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, field
 import anthropic
@@ -416,7 +417,11 @@ class ClaudeClient:
         if not self.api_key:
             raise ValueError("ANTHROPIC_API_KEY not found")
 
-        self.client = anthropic.Anthropic(api_key=self.api_key)
+        # Set timeout to 5 minutes (streaming responses can take a while)
+        self.client = anthropic.Anthropic(
+            api_key=self.api_key,
+            timeout=300.0,  # 5 minute timeout
+        )
         self.model = model
 
         # Neo4j connection and tools
@@ -438,6 +443,53 @@ class ClaudeClient:
     def _init_tools(self) -> None:
         """Initialize Neo4j tools."""
         self._tools = OntologyTools(self._get_graph())
+
+    def _stream_response(
+        self,
+        system_prompt: str,
+        messages: List[Dict],
+        max_tokens: int,
+        tools: Optional[List[Dict]],
+    ):
+        """Stream response from Claude, printing text as it arrives."""
+        print("[STREAM] ", end="", file=sys.stderr, flush=True)
+        
+        try:
+            with self.client.messages.stream(
+                model=self.model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=messages,
+                tools=tools,
+            ) as stream:
+                # Track if we got any text (tool_use responses might not have text)
+                got_text = False
+                try:
+                    for text in stream.text_stream:
+                        got_text = True
+                        # Print each chunk as it arrives
+                        print(text, end="", file=sys.stderr, flush=True)
+                except Exception as e:
+                    # text_stream can fail if Claude is doing tool_use
+                    print(f"\n[STREAM END: {type(e).__name__}]", file=sys.stderr, flush=True)
+                
+                # Get the final message
+                response = stream.get_final_message()
+                
+                if not got_text and response.stop_reason == "tool_use":
+                    print("[TOOL CALL]", file=sys.stderr, flush=True)
+            
+            return response
+            
+        except anthropic.APITimeoutError as e:
+            print(f"\n[TIMEOUT] API request timed out: {e}", file=sys.stderr, flush=True)
+            raise
+        except anthropic.APIConnectionError as e:
+            print(f"\n[CONNECTION ERROR] {e}", file=sys.stderr, flush=True)
+            raise
+        except Exception as e:
+            print(f"\n[STREAM ERROR] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            raise
 
     def close(self) -> None:
         """Close Neo4j connection if we own it."""
@@ -505,26 +557,34 @@ class ClaudeClient:
                     flush=True,
                 )
 
-            # Make API call
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                system=system_prompt,
-                messages=messages,
-                tools=tools,
-            )
+            # Make API call with streaming for visibility
+            api_start = time.time()
+            if verbose:
+                # Use streaming to show response as it's generated
+                response = self._stream_response(
+                    system_prompt, messages, max_tokens, tools
+                )
+            else:
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=tools,
+                )
+            api_elapsed = time.time() - api_start
 
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
 
             if verbose:
                 print(
-                    f"[DEBUG] Stop reason: {response.stop_reason}",
+                    f"\n[DEBUG] API call took {api_elapsed:.1f}s, stop_reason: {response.stop_reason}",
                     file=sys.stderr,
                     flush=True,
                 )
                 print(
-                    f"[DEBUG] Content blocks: {len(response.content)}",
+                    f"[DEBUG] Content blocks: {len(response.content)}, tokens: {response.usage.input_tokens}+{response.usage.output_tokens}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -565,7 +625,10 @@ class ClaudeClient:
                             flush=True,
                         )
 
+                    tool_start = time.time()
                     result = self._tools.execute(tool_use.name, tool_use.input)
+                    tool_elapsed = time.time() - tool_start
+                    
                     tool_calls_made.append(
                         {
                             "name": tool_use.name,
@@ -578,7 +641,7 @@ class ClaudeClient:
 
                     if verbose:
                         print(
-                            f"[TOOL] Result: {len(result)} chars",
+                            f"[TOOL] Result: {len(result)} chars ({tool_elapsed:.1f}s)",
                             file=sys.stderr,
                             flush=True,
                         )

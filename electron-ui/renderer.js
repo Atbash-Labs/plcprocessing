@@ -96,7 +96,7 @@ if (loadIgnitionFileBtn) {
         fileNameSpan.title = filePath; // Full path on hover
       }
       
-      appendEnrichmentLog(`📂 Loaded: ${filePath}\n`);
+      appendEnrichmentLog(`[LOADED] ${filePath}\n`);
     }
   });
 }
@@ -117,18 +117,18 @@ document.getElementById('btn-ingest-plc').addEventListener('click', async () => 
   if (!filePath) return;
   
   // Don't use loading overlay - we want to see streaming output
-  appendOutput(`\n📥 Ingesting: ${filePath}\n`, false);
+  appendOutput(`\n[INGEST] ${filePath}\n`, false);
   
   try {
     const result = await window.api.ingestPLC(filePath);
     if (result.success) {
       // Don't re-append result.output since it's already streamed
-      appendOutput('\n✅ PLC ingestion complete!\n');
+      appendOutput('\n[OK] PLC ingestion complete!\n');
     } else {
-      appendOutput(`\n❌ Error: ${result.error}\n`);
+      appendOutput(`\n[ERROR] ${result.error}\n`);
     }
   } catch (error) {
-    appendOutput(`\n❌ Error: ${error.message}\n`);
+    appendOutput(`\n[ERROR] ${error.message}\n`);
   }
   
   updateStats();
@@ -138,18 +138,18 @@ document.getElementById('btn-ingest-plc').addEventListener('click', async () => 
 
 // Unified Analysis
 document.getElementById('btn-run-unified').addEventListener('click', async () => {
-  appendOutput('\n🔗 Running unified analysis (linking PLC ↔ SCADA)...\n', false);
+  appendOutput('\n[UNIFIED] Running unified analysis (linking PLC <-> SCADA)...\n', false);
   
   try {
     const result = await window.api.runUnified();
     if (result.success) {
       // Don't re-append result.output since it's already streamed
-      appendOutput('\n✅ Unified analysis complete!\n');
+      appendOutput('\n[OK] Unified analysis complete!\n');
     } else {
-      appendOutput(`\n❌ Error: ${result.error}\n`);
+      appendOutput(`\n[ERROR] ${result.error}\n`);
     }
   } catch (error) {
-    appendOutput(`\n❌ Error: ${error.message}\n`);
+    appendOutput(`\n[ERROR] ${error.message}\n`);
   }
   
   updateStats();
@@ -157,18 +157,18 @@ document.getElementById('btn-run-unified').addEventListener('click', async () =>
 
 // Troubleshooting Enrichment
 document.getElementById('btn-run-enrichment').addEventListener('click', async () => {
-  appendOutput('\n🔧 Running troubleshooting enrichment...\n', false);
+  appendOutput('\n[ENRICH] Running troubleshooting enrichment...\n', false);
   
   try {
     const result = await window.api.runEnrichment();
     if (result.success) {
       // Don't re-append result.output since it's already streamed
-      appendOutput('\n✅ Troubleshooting enrichment complete!\n');
+      appendOutput('\n[OK] Troubleshooting enrichment complete!\n');
     } else {
-      appendOutput(`\n❌ Error: ${result.error}\n`);
+      appendOutput(`\n[ERROR] ${result.error}\n`);
     }
   } catch (error) {
-    appendOutput(`\n❌ Error: ${error.message}\n`);
+    appendOutput(`\n[ERROR] ${error.message}\n`);
   }
   
   updateStats();
@@ -249,35 +249,71 @@ async function sendMessage() {
   addMessage(question, true);
   chatInput.value = '';
   
-  // Show thinking indicator with tool calls container
+  // Show thinking indicator with tool calls container and streaming text area
   const thinkingDiv = document.createElement('div');
   thinkingDiv.className = 'message assistant';
   thinkingDiv.innerHTML = `
     <div class="message-content">
-      <p>🤔 Analyzing your question...</p>
+      <p class="thinking-text">Analyzing your question...</p>
       <div class="tool-calls-container"></div>
+      <div class="streaming-text" style="display: none;"></div>
     </div>
   `;
   chatMessages.appendChild(thinkingDiv);
   chatMessages.scrollTop = chatMessages.scrollHeight;
   
   const toolCallsContainer = thinkingDiv.querySelector('.tool-calls-container');
+  const streamingTextDiv = thinkingDiv.querySelector('.streaming-text');
+  const thinkingText = thinkingDiv.querySelector('.thinking-text');
+  let streamingStarted = false;
   
   // Set up tool call listener for this request (returns cleanup function)
   const cleanupToolCall = window.api.onToolCall((data) => {
     const chip = document.createElement('span');
     chip.className = 'tool-call-chip';
-    chip.innerHTML = `<span class="tool-icon">🔧</span> ${data.tool}`;
+    chip.innerHTML = `<span class="tool-icon">&gt;</span> ${data.tool}`;
     toolCallsContainer.appendChild(chip);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+  });
+  
+  // Set up streaming text listener with throttling to prevent UI freeze
+  let streamBuffer = '';
+  let flushScheduled = false;
+  
+  const flushStreamBuffer = () => {
+    if (streamBuffer) {
+      streamingTextDiv.textContent += streamBuffer;
+      streamBuffer = '';
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+    flushScheduled = false;
+  };
+  
+  const cleanupStream = window.api.onStreamOutput((data) => {
+    if (data.type === 'claude-stream' && data.text) {
+      if (!streamingStarted) {
+        streamingStarted = true;
+        thinkingText.textContent = 'Generating response...';
+        streamingTextDiv.style.display = 'block';
+      }
+      
+      // Buffer the text and flush periodically to avoid UI thrashing
+      streamBuffer += data.text;
+      if (!flushScheduled) {
+        flushScheduled = true;
+        requestAnimationFrame(flushStreamBuffer);
+      }
+    }
   });
   
   try {
     // Send question with full conversation history
     const result = await window.api.troubleshoot(question, conversationHistory);
     
-    // Clean up listener
+    // Clean up listeners
     cleanupToolCall();
+    cleanupStream();
+    flushStreamBuffer(); // Flush any remaining buffered text
     
     // Remove thinking indicator
     chatMessages.removeChild(thinkingDiv);
@@ -297,12 +333,14 @@ async function sendMessage() {
       // Show history size indicator
       console.log(`[Chat] Conversation history: ${conversationHistory.length} messages`);
     } else {
-      addMessage(`❌ Error: ${result.error}`, false);
+      addMessage(`Error: ${result.error}`, false);
     }
   } catch (error) {
     cleanupToolCall();
+    cleanupStream();
+    flushStreamBuffer();
     chatMessages.removeChild(thinkingDiv);
-    addMessage(`❌ Error: ${error.message}`, false);
+    addMessage(`Error: ${error.message}`, false);
   }
 }
 
@@ -321,7 +359,7 @@ document.getElementById('btn-clear-chat').addEventListener('click', () => {
   const welcomeHtml = `
     <div class="message assistant">
       <div class="message-content">
-        <p>👋 Conversation cleared! How can I help you?</p>
+        <p>Conversation cleared. How can I help you?</p>
       </div>
     </div>
   `;
@@ -389,7 +427,7 @@ document.getElementById('btn-get-stats').addEventListener('click', () => {
 
 // Clear Database
 document.getElementById('btn-clear-db').addEventListener('click', async () => {
-  const confirmed = confirm('⚠️ This will DELETE ALL DATA from the ontology database.\n\nAre you sure you want to continue?');
+  const confirmed = confirm('WARNING: This will DELETE ALL DATA from the ontology database.\n\nAre you sure you want to continue?');
   if (!confirmed) return;
   
   showLoading('Clearing database...');
@@ -397,12 +435,12 @@ document.getElementById('btn-clear-db').addEventListener('click', async () => {
   try {
     const result = await window.api.clearDatabase();
     if (result.success) {
-      alert('✅ Database cleared successfully!');
+      alert('Database cleared successfully!');
     } else {
-      alert(`❌ Error: ${result.error}`);
+      alert(`Error: ${result.error}`);
     }
   } catch (error) {
-    alert(`❌ Error: ${error.message}`);
+    alert(`Error: ${error.message}`);
   }
   
   hideLoading();
@@ -416,12 +454,12 @@ document.getElementById('btn-init-db').addEventListener('click', async () => {
   try {
     const result = await window.api.initDatabase();
     if (result.success) {
-      alert('✅ Database schema initialized!');
+      alert('Database schema initialized!');
     } else {
-      alert(`❌ Error: ${result.error}`);
+      alert(`Error: ${result.error}`);
     }
   } catch (error) {
-    alert(`❌ Error: ${error.message}`);
+    alert(`Error: ${error.message}`);
   }
   
   hideLoading();
@@ -435,13 +473,13 @@ document.getElementById('btn-generate-viz').addEventListener('click', async () =
   try {
     const result = await window.api.generateViz();
     if (result.success) {
-      alert(`✅ Visualization generated!\n\nOpening: ${result.path}`);
+      alert(`Visualization generated!\n\nOpening: ${result.path}`);
       // Note: In a full implementation, we'd shell.openPath here
     } else {
-      alert(`❌ Error: ${result.error}`);
+      alert(`Error: ${result.error}`);
     }
   } catch (error) {
-    alert(`❌ Error: ${error.message}`);
+    alert(`Error: ${error.message}`);
   }
   
   hideLoading();
@@ -454,12 +492,12 @@ document.getElementById('btn-save-db').addEventListener('click', async () => {
   try {
     const result = await window.api.saveDatabase();
     if (result.success) {
-      alert(`✅ Database saved!\n\nFile: ${result.path}`);
+      alert(`Database saved!\n\nFile: ${result.path}`);
     } else if (result.error !== 'Save cancelled') {
-      alert(`❌ Error: ${result.error}`);
+      alert(`Error: ${result.error}`);
     }
   } catch (error) {
-    alert(`❌ Error: ${error.message}`);
+    alert(`Error: ${error.message}`);
   }
   
   hideLoading();
@@ -467,7 +505,7 @@ document.getElementById('btn-save-db').addEventListener('click', async () => {
 
 // Load Database
 document.getElementById('btn-load-db').addEventListener('click', async () => {
-  const confirmed = confirm('⚠️ This will REPLACE all data in the database with the backup file.\n\nAre you sure you want to continue?');
+  const confirmed = confirm('WARNING: This will REPLACE all data in the database with the backup file.\n\nAre you sure you want to continue?');
   if (!confirmed) return;
   
   showLoading('Loading database...');
@@ -475,13 +513,13 @@ document.getElementById('btn-load-db').addEventListener('click', async () => {
   try {
     const result = await window.api.loadDatabase();
     if (result.success) {
-      alert(`✅ Database loaded!\n\nFile: ${result.path}`);
+      alert(`Database loaded!\n\nFile: ${result.path}`);
       updateStats();
     } else if (result.error !== 'Load cancelled') {
-      alert(`❌ Error: ${result.error}`);
+      alert(`Error: ${result.error}`);
     }
   } catch (error) {
-    alert(`❌ Error: ${error.message}`);
+    alert(`Error: ${error.message}`);
   }
   
   hideLoading();
@@ -881,9 +919,9 @@ window.api.onStreamOutput((data) => {
 window.api.onStreamComplete((data) => {
   if (data.streamId && data.streamId.startsWith('enrich-')) {
     if (!data.success) {
-      appendEnrichmentLog(`\n❌ Enrichment failed\n`);
+      appendEnrichmentLog(`\n[FAILED] Enrichment failed\n`);
     } else {
-      appendEnrichmentLog(`\n✅ Enrichment complete\n`);
+      appendEnrichmentLog(`\n[OK] Enrichment complete\n`);
     }
   }
 });
@@ -900,12 +938,12 @@ async function enrichBatch(itemType, projectName = null) {
   
   const btn = event.target;
   const originalText = btn.textContent;
-  btn.textContent = '⏳ Enriching...';
+  btn.textContent = 'Enriching...';
   btn.disabled = true;
   
   // Log the enrichment start
   const projInfo = projectName ? `project ${projectName}` : 'gateway';
-  appendEnrichmentLog(`\n▶ Enriching ${batchSize} ${itemType} items for ${projInfo}...\n`);
+  appendEnrichmentLog(`\n[START] Enriching ${batchSize} ${itemType} items for ${projInfo}...\n`);
   
   try {
     const result = await window.api.enrichBatch({
@@ -928,10 +966,10 @@ async function enrichBatch(itemType, projectName = null) {
         }
       }, 1000);
     } else {
-      appendEnrichmentLog(`❌ Error: ${result.error}\n`);
+      appendEnrichmentLog(`[ERROR] ${result.error}\n`);
     }
   } catch (error) {
-    appendEnrichmentLog(`❌ Error: ${error.message}\n`);
+    appendEnrichmentLog(`[ERROR] ${error.message}\n`);
     console.error('Enrichment failed:', error);
   } finally {
     btn.textContent = originalText;
@@ -1008,7 +1046,7 @@ document.getElementById('btn-ingest-ignition').addEventListener('click', async (
   }
   
   // Don't use loading overlay - we want to see streaming output
-  appendOutput(`\n📊 Ingesting: ${filePath}\n`, false);
+  appendOutput(`\n[INGEST] ${filePath}\n`, false);
   if (browseState.scriptLibraryPath) {
     appendOutput(`[INFO] Script library: ${browseState.scriptLibraryPath}\n`);
   }
@@ -1026,7 +1064,7 @@ document.getElementById('btn-ingest-ignition').addEventListener('click', async (
     if (result.success) {
       // Don't re-append result.output since it's already streamed
       // Just show the final completion message
-      appendOutput('\n✅ Ignition ingestion complete!\n');
+      appendOutput('\n[OK] Ignition ingestion complete!\n');
       
       // Load projects and show discovery panel
       await loadProjects();
@@ -1036,10 +1074,10 @@ document.getElementById('btn-ingest-ignition').addEventListener('click', async (
         appendOutput(`[INFO] Discovered ${browseState.projects.length} projects - see Browse tab\n`);
       }
     } else {
-      appendOutput(`\n❌ Error: ${result.error}\n`);
+      appendOutput(`\n[ERROR] ${result.error}\n`);
     }
   } catch (error) {
-    appendOutput(`\n❌ Error: ${error.message}\n`);
+    appendOutput(`\n[ERROR] ${error.message}\n`);
   }
   
   updateStats();
@@ -1073,7 +1111,7 @@ window.api.onToolCall((data) => {
 // Listen for stream completion
 window.api.onStreamComplete((data) => {
   if (data.success) {
-    appendOutput('\n✅ Operation complete!\n');
+    appendOutput('\n[OK] Operation complete!\n');
   }
 });
 

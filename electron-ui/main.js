@@ -307,22 +307,43 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
         const text = data.toString();
         stderr += text;
         
-        // Stream tool calls and debug info from stderr to frontend
+        // Stream tool calls, debug info, and Claude response from stderr to frontend
         if (mainWindow) {
-          const lines = text.split('\n');
-          for (const line of lines) {
-            if (line.startsWith('[TOOL]')) {
-              mainWindow.webContents.send('tool-call', {
-                streamId,
-                tool: line.replace('[TOOL]', '').trim()
-              });
-            } else if (line.startsWith('[DEBUG]')) {
+          // Check for special prefixes first (they appear on their own lines)
+          if (text.includes('[TOOL]') || text.includes('[DEBUG]') || text.includes('[INFO]')) {
+            const lines = text.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('[TOOL]')) {
+                mainWindow.webContents.send('tool-call', {
+                  streamId,
+                  tool: line.replace('[TOOL]', '').trim()
+                });
+              } else if (line.startsWith('[DEBUG]') || line.startsWith('[INFO]')) {
+                mainWindow.webContents.send('stream-output', {
+                  streamId,
+                  text: line,
+                  type: 'debug'
+                });
+              }
+            }
+          } else if (text.includes('[STREAM]')) {
+            // Start of Claude streaming - send what comes after [STREAM]
+            const streamStart = text.indexOf('[STREAM]');
+            const afterStream = text.substring(streamStart + 8); // 8 = length of '[STREAM]'
+            if (afterStream) {
               mainWindow.webContents.send('stream-output', {
                 streamId,
-                text: line,
-                type: 'debug'
+                text: afterStream,
+                type: 'claude-stream'
               });
             }
+          } else if (text && !text.startsWith('[')) {
+            // Continuation of Claude streaming (no prefix)
+            mainWindow.webContents.send('stream-output', {
+              streamId,
+              text: text,
+              type: 'claude-stream'
+            });
           }
         }
       });
@@ -606,4 +627,3 @@ ipcMain.handle('enrich-batch', async (event, options = {}) => {
     return { success: false, error: error.message, streamId };
   }
 });
-
