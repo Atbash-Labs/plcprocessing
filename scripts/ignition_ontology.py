@@ -216,6 +216,37 @@ class IgnitionOntologyAnalyzer:
                 flush=True,
             )
 
+        # Create cross-reference relationships (script→script, script→query, view→query)
+        if verbose:
+            print(f"[INFO] Creating cross-reference relationships...", flush=True)
+            # Debug: show what we're working with
+            scripts_with_code = sum(1 for s in backup.scripts if s.script_text)
+            print(
+                f"[DEBUG] Analyzing {len(backup.scripts)} scripts ({scripts_with_code} with code)",
+                flush=True,
+            )
+            print(
+                f"[DEBUG] Analyzing {len(backup.gateway_events)} gateway events",
+                flush=True,
+            )
+            print(
+                f"[DEBUG] Analyzing {len(backup.windows)} views for event scripts",
+                flush=True,
+            )
+        xref_counts = self._create_cross_references(backup, verbose)
+        total_xrefs = sum(xref_counts.values())
+        if verbose:
+            print(
+                f"[OK] Created {total_xrefs} cross-references: "
+                f"{xref_counts['script_to_script']} script→script, "
+                f"{xref_counts['script_to_query']} script→query, "
+                f"{xref_counts['view_to_query']} view→query, "
+                f"{xref_counts['view_to_script']} view→script, "
+                f"{xref_counts['event_to_query']} event→query, "
+                f"{xref_counts['event_to_script']} event→script",
+                flush=True,
+            )
+
         # Create ViewComponents from parsed windows
         # This can be slow with many views - skip if there are too many
         if len(backup.windows) > 200:
@@ -665,6 +696,356 @@ class IgnitionOntologyAnalyzer:
                                     )
 
         return count
+
+    def _create_cross_references(
+        self, backup: IgnitionBackup, verbose: bool = False
+    ) -> Dict[str, int]:
+        """Create cross-reference relationships between scripts, queries, and views.
+
+        Parses script content to find:
+        - Script → Script calls (e.g., Util.secondsToText())
+        - Script → NamedQuery calls (e.g., system.db.runNamedQuery())
+        - View event scripts → NamedQuery calls
+        - View event scripts → Script module calls
+
+        Returns:
+            Dict with counts of relationships created by type
+        """
+        import re
+
+        counts = {
+            "script_to_script": 0,
+            "script_to_query": 0,
+            "view_to_query": 0,
+            "view_to_script": 0,
+            "event_to_query": 0,
+            "event_to_script": 0,
+        }
+
+        # Build lookup sets for matching
+        script_modules = set()  # Top-level script module names
+        script_paths = set()  # Full script paths
+        query_paths = set()  # Named query paths
+
+        for script in backup.scripts:
+            # Extract module name (first segment of path)
+            module_name = script.path.split("/")[0]
+            script_modules.add(module_name)
+            script_paths.add(script.path)
+            # Also add the qualified name used by neo4j
+            qualified = f"{script.project}/{script.path}"
+            script_paths.add(qualified)
+
+        if verbose:
+            print(f"[DEBUG] Script modules found: {sorted(script_modules)}", flush=True)
+
+        for query in backup.named_queries:
+            # Query path is folder_path/name or just id
+            if query.folder_path:
+                query_paths.add(f"{query.folder_path}/{query.name}")
+            query_paths.add(query.name)
+            if query.id:
+                query_paths.add(query.id)
+
+        # Regex patterns for detection
+        # runNamedQuery(path="GIS/GetAreaById", ...) or runNamedQuery("project", "path", ...)
+        query_pattern = re.compile(
+            r'runNamedQuery\s*\(\s*(?:path\s*=\s*)?["\']([^"\']+)["\']', re.IGNORECASE
+        )
+        # Module.function() calls - matches Util.secondsToText, Gateway.getClients, etc.
+        module_call_pattern = re.compile(
+            r"\b([A-Z][a-zA-Z0-9_]*)\s*\.\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\("
+        )
+        # Import patterns:
+        # - from pss import assets
+        # - from pss.assets import something
+        # - import pss.assets
+        # - import pss
+        import_from_pattern = re.compile(
+            r"^\s*from\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)\s+import",
+            re.MULTILINE
+        )
+        import_pattern = re.compile(
+            r"^\s*import\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)",
+            re.MULTILINE
+        )
+
+        # 1. Parse script library for cross-references
+        for script in backup.scripts:
+            if not script.script_text:
+                if verbose:
+                    print(
+                        f"[DEBUG] Script '{script.path}' has no code, skipping",
+                        flush=True,
+                    )
+                continue
+
+            script_name = f"{script.project}/{script.path}"
+
+            # Find named query calls
+            query_matches = list(query_pattern.finditer(script.script_text))
+            module_matches = list(module_call_pattern.finditer(script.script_text))
+            import_from_matches = list(import_from_pattern.finditer(script.script_text))
+            import_matches = list(import_pattern.finditer(script.script_text))
+            
+            if verbose and (query_matches or module_matches or import_from_matches or import_matches):
+                print(
+                    f"[DEBUG] Script '{script_name}': {len(query_matches)} query calls, "
+                    f"{len(module_matches)} module calls, {len(import_from_matches) + len(import_matches)} imports",
+                    flush=True,
+                )
+
+            for match in query_matches:
+                query_path = match.group(1)
+                if verbose:
+                    print(
+                        f"[DEBUG] Trying to link Script '{script_name}' → Query '{query_path}'",
+                        flush=True,
+                    )
+                if self.graph.create_query_usage(
+                    "Script", script_name, query_path, script.project
+                ):
+                    counts["script_to_query"] += 1
+                    if verbose:
+                        print(f"  [OK] Created relationship", flush=True)
+                elif verbose:
+                    print(f"  [WARN] No matching query found in Neo4j", flush=True)
+
+            # Find script module calls
+            for match in module_matches:
+                module_name = match.group(1)
+                function_name = match.group(2)
+
+                if verbose:
+                    print(
+                        f"[DEBUG] Trying to link Script '{script_name}' → Script module '{module_name}.{function_name}()'",
+                        flush=True,
+                    )
+
+                # Skip system modules and self-references
+                if module_name in (
+                    "system",
+                    "self",
+                    "java",
+                    "str",
+                    "int",
+                    "len",
+                    "range",
+                ):
+                    continue
+
+                # Check if this is a known script module
+                if module_name in script_modules:
+                    if self.graph.create_script_call(
+                        "Script",
+                        script_name,
+                        module_name,
+                        function_name,
+                        script.project,
+                    ):
+                        counts["script_to_script"] += 1
+                        if verbose:
+                            print(f"  [OK] Created relationship", flush=True)
+                    elif verbose:
+                        print(f"  [WARN] No matching script found in Neo4j", flush=True)
+
+            # Find imports: "from pss import assets" or "from pss.assets import func"
+            for match in import_from_matches:
+                import_path = match.group(1)
+                # Get the top-level module name
+                top_module = import_path.split(".")[0]
+                
+                if verbose:
+                    print(
+                        f"[DEBUG] Trying to link Script '{script_name}' → imports '{import_path}'",
+                        flush=True,
+                    )
+                
+                # Skip standard library imports
+                if top_module in ("system", "java", "os", "re", "json", "math", "datetime", "time"):
+                    continue
+                
+                if top_module in script_modules:
+                    if self.graph.create_script_call(
+                        "Script",
+                        script_name,
+                        import_path,
+                        "import",
+                        script.project,
+                    ):
+                        counts["script_to_script"] += 1
+                        if verbose:
+                            print(f"  [OK] Created import relationship", flush=True)
+                    elif verbose:
+                        print(f"  [WARN] No matching script found in Neo4j", flush=True)
+
+            # Find imports: "import pss" or "import pss.assets"
+            for match in import_matches:
+                import_path = match.group(1)
+                top_module = import_path.split(".")[0]
+                
+                if verbose:
+                    print(
+                        f"[DEBUG] Trying to link Script '{script_name}' → imports '{import_path}'",
+                        flush=True,
+                    )
+                
+                if top_module in ("system", "java", "os", "re", "json", "math", "datetime", "time"):
+                    continue
+                
+                if top_module in script_modules:
+                    if self.graph.create_script_call(
+                        "Script",
+                        script_name,
+                        import_path,
+                        "import",
+                        script.project,
+                    ):
+                        counts["script_to_script"] += 1
+                        if verbose:
+                            print(f"  [OK] Created import relationship", flush=True)
+                    elif verbose:
+                        print(f"  [WARN] No matching script found in Neo4j", flush=True)
+
+        # 2. Parse gateway events for cross-references
+        for event in backup.gateway_events:
+            if not event.script:
+                continue
+
+            # Build event name matching neo4j storage
+            if event.script_type in ("startup", "shutdown"):
+                event_name = f"{event.project}/{event.script_type}"
+            elif event.script_type == "timer" and event.name:
+                event_name = f"{event.project}/timer/{event.name}"
+            elif event.script_type == "message_handler" and event.name:
+                event_name = f"{event.project}/message/{event.name}"
+            else:
+                event_name = f"{event.project}/{event.script_type}"
+
+            # Find named query calls
+            for match in query_pattern.finditer(event.script):
+                query_path = match.group(1)
+                if self.graph.create_query_usage(
+                    "GatewayEvent", event_name, query_path, event.project
+                ):
+                    counts["event_to_query"] += 1
+                    if verbose:
+                        print(f"[DEBUG] Event '{event_name}' → Query '{query_path}'")
+
+            # Find script module calls
+            for match in module_call_pattern.finditer(event.script):
+                module_name = match.group(1)
+                function_name = match.group(2)
+
+                if module_name in (
+                    "system",
+                    "self",
+                    "java",
+                    "str",
+                    "int",
+                    "len",
+                    "range",
+                ):
+                    continue
+
+                if module_name in script_modules:
+                    if self.graph.create_script_call(
+                        "GatewayEvent",
+                        event_name,
+                        module_name,
+                        function_name,
+                        event.project,
+                    ):
+                        counts["event_to_script"] += 1
+                        if verbose:
+                            print(
+                                f"[DEBUG] Event '{event_name}' → Script '{module_name}.{function_name}()'"
+                            )
+
+        # 3. Parse view event scripts for cross-references
+        # This requires traversing the view component tree
+        for window in backup.windows:
+            view_name = self._qualify_name(window.name, window.project)
+
+            # Recursively extract event scripts from components
+            event_scripts = self._extract_event_scripts(window.components)
+
+            for component_path, event_type, script_text in event_scripts:
+                # Find named query calls
+                for match in query_pattern.finditer(script_text):
+                    query_path = match.group(1)
+                    if self.graph.create_query_usage(
+                        "View", view_name, query_path, window.project
+                    ):
+                        counts["view_to_query"] += 1
+                        if verbose:
+                            print(f"[DEBUG] View '{view_name}' → Query '{query_path}'")
+
+                # Find script module calls
+                for match in module_call_pattern.finditer(script_text):
+                    module_name = match.group(1)
+                    function_name = match.group(2)
+
+                    if module_name in (
+                        "system",
+                        "self",
+                        "java",
+                        "str",
+                        "int",
+                        "len",
+                        "range",
+                    ):
+                        continue
+
+                    if module_name in script_modules:
+                        if self.graph.create_script_call(
+                            "View",
+                            view_name,
+                            module_name,
+                            function_name,
+                            window.project,
+                        ):
+                            counts["view_to_script"] += 1
+                            if verbose:
+                                print(
+                                    f"[DEBUG] View '{view_name}' → Script '{module_name}.{function_name}()'"
+                                )
+
+        return counts
+
+    def _extract_event_scripts(
+        self, components: List, parent_path: str = ""
+    ) -> List[tuple]:
+        """Recursively extract event scripts from UI components.
+
+        Returns:
+            List of (component_path, event_type, script_text) tuples
+        """
+        results = []
+
+        for comp in components:
+            comp_name = comp.name or "unnamed"
+            comp_path = f"{parent_path}/{comp_name}" if parent_path else comp_name
+
+            # Check for event scripts in props
+            # Ignition stores event scripts in props with keys like "events" or in bindings
+            if hasattr(comp, "props") and isinstance(comp.props, dict):
+                # Check for events object
+                events = comp.props.get("events", {})
+                if isinstance(events, dict):
+                    for event_type, event_data in events.items():
+                        if isinstance(event_data, dict):
+                            script = event_data.get("script", "")
+                            if script:
+                                results.append((comp_path, event_type, script))
+                        elif isinstance(event_data, str) and event_data:
+                            results.append((comp_path, event_type, event_data))
+
+            # Recurse into children
+            if hasattr(comp, "children") and comp.children:
+                results.extend(self._extract_event_scripts(comp.children, comp_path))
+
+        return results
 
     def _infer_component_purpose(self, comp) -> str:
         """Infer semantic purpose from component type and props."""

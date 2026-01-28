@@ -1240,9 +1240,7 @@ body {
   font-family: var(--font-mono);
   font-size: 13px;
   text-align: center;
-}
-
-.enrichment-panel input[type="number"]:focus {
+}.enrichment-panel input[type="number"]:focus {
   outline: none;
   border-color: var(--accent-cyan);
 }

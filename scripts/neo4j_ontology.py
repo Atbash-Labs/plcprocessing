@@ -1833,6 +1833,162 @@ class OntologyGraph:
             return result.single() is not None
 
     # =========================================================================
+    # Cross-Reference Relationships (Script/Query/View calls)
+    # =========================================================================
+
+    def create_script_call(
+        self,
+        source_type: str,
+        source_name: str,
+        target_script: str,
+        function_name: str = "",
+        source_project: str = "",
+    ) -> bool:
+        """Create a CALLS_SCRIPT relationship between entities.
+
+        Args:
+            source_type: Type of caller (Script, View, GatewayEvent)
+            source_name: Name of the calling entity
+            target_script: Name/path of the target script module
+            function_name: Optional function being called
+            source_project: Project context for the source (needed for Views)
+
+        Returns:
+            True if relationship was created
+        """
+        with self.session() as session:
+            # Build source match based on type
+            if source_type == "View":
+                # Views use project-qualified names
+                source_match = "MATCH (s:View {name: $source})"
+            elif source_type == "GatewayEvent":
+                source_match = "MATCH (s:GatewayEvent {name: $source})"
+            else:
+                source_match = "MATCH (s:Script {name: $source})"
+
+            # Match scripts where the path starts with the module name
+            # e.g., target="pss" should match path="pss/assets" or name containing "pss"
+            result = session.run(
+                f"""
+                {source_match}
+                MATCH (t:Script)
+                WHERE t.name = $target 
+                   OR t.path = $target 
+                   OR t.path STARTS WITH $target + '/'
+                   OR t.name STARTS WITH $target + '/'
+                   OR t.path CONTAINS '/' + $target + '/'
+                MERGE (s)-[r:CALLS_SCRIPT]->(t)
+                SET r.function = $function,
+                    r.source_project = $source_project
+                RETURN s.name as source, t.name as target
+            """,
+                {
+                    "source": source_name,
+                    "target": target_script,
+                    "function": function_name,
+                    "source_project": source_project,
+                },
+            )
+            return result.single() is not None
+
+    def create_query_usage(
+        self,
+        source_type: str,
+        source_name: str,
+        query_path: str,
+        source_project: str = "",
+    ) -> bool:
+        """Create a USES_QUERY relationship between an entity and a NamedQuery.
+
+        Args:
+            source_type: Type of caller (Script, View, GatewayEvent)
+            source_name: Name of the calling entity
+            query_path: Path of the named query (e.g., "GIS/GetAreaById")
+            source_project: Project context for the source
+
+        Returns:
+            True if relationship was created
+        """
+        with self.session() as session:
+            # Build source match based on type
+            if source_type == "View":
+                source_match = "MATCH (s:View {name: $source})"
+            elif source_type == "GatewayEvent":
+                source_match = "MATCH (s:GatewayEvent {name: $source})"
+            elif source_type == "ViewComponent":
+                source_match = "MATCH (s:ViewComponent {path: $source})"
+            else:
+                source_match = "MATCH (s:Script {name: $source})"
+
+            # Try to match query by path or name
+            # Query names in Neo4j are project-qualified: "ProveIT/Charts/GetEquipmentRunTimeByID"
+            # Query path from code can be: "Charts/GetEquipmentRunTimeByID" or just "GetEquipmentRunTimeByID"
+            result = session.run(
+                f"""
+                {source_match}
+                MATCH (q:NamedQuery)
+                WHERE q.name = $query_path 
+                   OR q.name ENDS WITH '/' + $query_path
+                   OR q.name ENDS WITH $query_path
+                   OR $query_path ENDS WITH '/' + q.name
+                   OR q.name CONTAINS $query_path
+                WITH s, q LIMIT 1
+                MERGE (s)-[r:USES_QUERY]->(q)
+                SET r.source_project = $source_project,
+                    r.query_path = $query_path
+                RETURN s.name as source, q.name as query
+            """,
+                {
+                    "source": source_name,
+                    "query_path": query_path,
+                    "source_project": source_project,
+                },
+            )
+            return result.single() is not None
+
+    def create_view_script_event(
+        self,
+        view_name: str,
+        component_path: str,
+        event_type: str,
+        script_text: str,
+    ) -> bool:
+        """Create a HAS_EVENT_SCRIPT relationship for view components with scripts.
+
+        This stores the event script text on the relationship for later analysis.
+
+        Args:
+            view_name: Name of the view
+            component_path: Path to the component within the view
+            event_type: Type of event (onClick, onChange, etc.)
+            script_text: The script code
+
+        Returns:
+            True if relationship was created
+        """
+        with self.session() as session:
+            # Create or update the component node and relationship
+            result = session.run(
+                """
+                MATCH (v:View {name: $view})
+                MERGE (c:ViewComponent {path: $component_path})
+                SET c.view = $view
+                MERGE (v)-[:HAS_COMPONENT]->(c)
+                MERGE (c)-[r:HAS_EVENT_SCRIPT]->(v)
+                SET r.event_type = $event_type,
+                    r.script_preview = left($script, 500)
+                RETURN v.name as view, c.path as component
+            """,
+                {
+                    "view": view_name,
+                    "component_path": component_path,
+                    "event_type": event_type,
+                    "script": script_text,
+                },
+            )
+            return result.single() is not None
+
+    # =========================================================================
     # Unified Ontology / Cross-System Mappings
     # =========================================================================
 

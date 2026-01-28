@@ -15,6 +15,12 @@ import anthropic
 from dotenv import load_dotenv
 
 from neo4j_ontology import OntologyGraph, get_ontology_graph
+from mes_ontology import (
+    MES_TOOL_DEFINITIONS,
+    MESTools,
+    extend_ontology,
+    MES_SYSTEM_PROMPT_EXTENSION,
+)
 
 
 # Load environment variables
@@ -40,9 +46,18 @@ class OntologyTools:
     - get_schema: Discover node labels, relationship types, and properties
     - run_query: Execute Cypher queries to explore data
     - get_node: Get a specific node by label and name
+    
+    Also includes MES/RCA tools for ISA-95 Level 3-4 integration:
+    - get_batch_context: Full batch RCA context
+    - get_equipment_rca: Equipment RCA with PLC/SCADA chain
+    - get_ccp_context: Critical Control Point monitoring context
+    - search_by_symptom: Search by operator observations
+    - trace_tag_impact: Trace PLC tag to business impact
+    - get_process_ccps: List CCPs for a process
+    - get_open_deviations: Open deviations with context
     """
 
-    # Tool definitions for Claude
+    # Tool definitions for Claude (base + MES tools)
     TOOL_DEFINITIONS = [
         {
             "name": "get_schema",
@@ -111,13 +126,19 @@ class OntologyTools:
                 "required": ["aoi_name", "scada_name", "mapping_type", "description"],
             },
         },
-    ]
+    ] + MES_TOOL_DEFINITIONS  # Add MES/RCA tools
 
     def __init__(self, graph: OntologyGraph):
         """Initialize with Neo4j graph connection."""
         self.graph = graph
+        
+        # Extend graph with MES methods
+        extend_ontology(graph)
+        
+        # Initialize MES tools
+        self._mes_tools = MESTools(graph)
 
-        # Map tool names to methods
+        # Map tool names to methods (base tools)
         self._tools: Dict[str, Callable] = {
             "get_schema": self._get_schema,
             "run_query": self._run_query,
@@ -127,6 +148,11 @@ class OntologyTools:
 
     def execute(self, tool_name: str, tool_input: Dict) -> str:
         """Execute a tool and return the result as a string."""
+        # Check if it's a MES tool
+        if tool_name in self._mes_tools._tools:
+            return self._mes_tools.execute(tool_name, tool_input)
+        
+        # Check base tools
         if tool_name not in self._tools:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
@@ -212,7 +238,9 @@ class OntologyTools:
                 "Use MATCH (a)-[:REL_TYPE]->(b) to follow relationships",
                 "Use WHERE toLower(n.property) CONTAINS toLower($term) for text search",
                 "Use RETURN n.prop1, n.prop2 to select specific properties",
-                "Common labels: AOI (PLC components), Tag, UDT (SCADA types), FaultSymptom",
+                "PLC/SCADA labels: AOI, Tag, UDT, FaultSymptom, Equipment, View",
+                "MES/ERP labels: Material, Batch, ProductionOrder, Operation, CriticalControlPoint, ProcessDeviation",
+                "Key cross-layer relationships: Equipment-[:CONTROLLED_BY]->AOI, CriticalControlPoint-[:MONITORED_BY]->Equipment",
             ],
         }
 
@@ -394,6 +422,12 @@ class ClaudeClient:
 
     Provides generic graph exploration tools that give Claude
     maximum flexibility to query and understand the ontology.
+    
+    Includes both PLC/SCADA tools and MES/ERP tools:
+    - Base tools: get_schema, run_query, get_node, create_mapping
+    - MES tools: get_batch_context, get_equipment_rca, get_ccp_context,
+                 search_by_symptom, trace_tag_impact, get_process_ccps,
+                 get_open_deviations
     """
 
     def __init__(
@@ -441,8 +475,13 @@ class ClaudeClient:
         return self._graph
 
     def _init_tools(self) -> None:
-        """Initialize Neo4j tools."""
+        """Initialize Neo4j tools (includes MES tools)."""
         self._tools = OntologyTools(self._get_graph())
+
+    @staticmethod
+    def get_mes_system_prompt() -> str:
+        """Get the MES system prompt extension for RCA workflows."""
+        return MES_SYSTEM_PROMPT_EXTENSION
 
     def _stream_response(
         self,
@@ -455,13 +494,17 @@ class ClaudeClient:
         print("[STREAM] ", end="", file=sys.stderr, flush=True)
         
         try:
-            with self.client.messages.stream(
-                model=self.model,
-                max_tokens=max_tokens,
-                system=system_prompt,
-                messages=messages,
-                tools=tools,
-            ) as stream:
+            # Build kwargs - only include tools if provided
+            kwargs = {
+                "model": self.model,
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": messages,
+            }
+            if tools:
+                kwargs["tools"] = tools
+            
+            with self.client.messages.stream(**kwargs) as stream:
                 # Track if we got any text (tool_use responses might not have text)
                 got_text = False
                 try:
@@ -565,13 +608,16 @@ class ClaudeClient:
                     system_prompt, messages, max_tokens, tools
                 )
             else:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    system=system_prompt,
-                    messages=messages,
-                    tools=tools,
-                )
+                # Build kwargs - only include tools if provided
+                kwargs = {
+                    "model": self.model,
+                    "max_tokens": max_tokens,
+                    "system": system_prompt,
+                    "messages": messages,
+                }
+                if tools:
+                    kwargs["tools"] = tools
+                response = self.client.messages.create(**kwargs)
             api_elapsed = time.time() - api_start
 
             total_input_tokens += response.usage.input_tokens
@@ -879,10 +925,17 @@ def main():
 
     parser = argparse.ArgumentParser(description="Test Claude client with Neo4j tools")
     parser.add_argument("prompt", nargs="?", help="User prompt to send")
+    default_system = (
+        "You are an expert PLC/SCADA/MES engineer specializing in pharmaceutical manufacturing. "
+        "Use the available tools to explore the ontology database and answer questions. "
+        "The database contains PLC control logic (AOIs, Tags), SCADA components (UDTs, Views), "
+        "and MES/ERP data (Materials, Batches, Production Orders, Critical Control Points). "
+        "When troubleshooting, trace from operator symptoms through equipment to PLC tags."
+    )
     parser.add_argument(
         "--system",
         "-s",
-        default="You are an expert PLC/SCADA engineer. Use the available tools to explore the ontology database and answer questions.",
+        default=default_system,
         help="System prompt",
     )
     parser.add_argument("--no-tools", action="store_true", help="Disable Neo4j tools")
