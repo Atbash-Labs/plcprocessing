@@ -7,6 +7,9 @@ let mainWindow;
 // Path to scripts directory (relative to project root)
 const scriptsDir = path.join(__dirname, '..', 'scripts');
 
+// Cross-platform Python command (Windows uses 'python', macOS/Linux use 'python3')
+const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -51,7 +54,7 @@ function runPythonScript(scriptName, args = [], options = {}) {
   return new Promise((resolve, reject) => {
     const scriptPath = path.join(scriptsDir, scriptName);
     // Use -u for unbuffered output to enable real-time streaming
-    const pythonProcess = spawn('python', ['-u', scriptPath, ...args], {
+    const pythonProcess = spawn(pythonCmd, ['-u', scriptPath, ...args], {
       cwd: path.join(__dirname, '..'),
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
     });
@@ -224,7 +227,7 @@ ipcMain.handle('clear-database', async () => {
     const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
     
     return new Promise((resolve, reject) => {
-      const proc = spawn('python', ['-u', scriptPath, 'clear'], {
+      const proc = spawn(pythonCmd, ['-u', scriptPath, 'clear'], {
         cwd: path.join(__dirname, '..'),
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
       });
@@ -287,7 +290,7 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
     
     return new Promise((resolve, reject) => {
       // Use -u for unbuffered output to enable real-time streaming
-      const proc = spawn('python', ['-u', scriptPath, '--history', '-v'], {
+      const proc = spawn(pythonCmd, ['-u', scriptPath, '--history', '-v'], {
         cwd: path.join(__dirname, '..'),
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
       });
@@ -447,7 +450,7 @@ ipcMain.handle('load-database', async () => {
     const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
     
     return new Promise((resolve) => {
-      const proc = spawn('python', ['-u', scriptPath, 'load', '-f', filePath, '--yes'], {
+      const proc = spawn(pythonCmd, ['-u', scriptPath, 'load', '-f', filePath, '--yes'], {
         cwd: path.join(__dirname, '..'),
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
       });
@@ -485,7 +488,7 @@ ipcMain.handle('get-projects', async () => {
     const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
     
     return new Promise((resolve) => {
-      const proc = spawn('python', ['-u', scriptPath, 'projects', '--json'], {
+      const proc = spawn(pythonCmd, ['-u', scriptPath, 'projects', '--json'], {
         cwd: path.join(__dirname, '..'),
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
       });
@@ -520,7 +523,7 @@ ipcMain.handle('get-gateway-resources', async () => {
     const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
     
     return new Promise((resolve) => {
-      const proc = spawn('python', ['-u', scriptPath, 'gateway-resources', '--json'], {
+      const proc = spawn(pythonCmd, ['-u', scriptPath, 'gateway-resources', '--json'], {
         cwd: path.join(__dirname, '..'),
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
       });
@@ -555,7 +558,7 @@ ipcMain.handle('get-project-resources', async (event, projectName) => {
     const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
     
     return new Promise((resolve) => {
-      const proc = spawn('python', ['-u', scriptPath, 'project-resources', '--project', projectName, '--json'], {
+      const proc = spawn(pythonCmd, ['-u', scriptPath, 'project-resources', '--project', projectName, '--json'], {
         cwd: path.join(__dirname, '..'),
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
       });
