@@ -630,3 +630,278 @@ ipcMain.handle('enrich-batch', async (event, options = {}) => {
     return { success: false, error: error.message, streamId };
   }
 });
+
+// ============================================
+// Graph API IPC Handlers
+// ============================================
+
+// Load graph data
+ipcMain.handle('graph:load', async (event, options = {}) => {
+  try {
+    const args = ['load'];
+    if (options.types && options.types.length > 0) {
+      args.push('--types', ...options.types);
+    }
+    if (options.limit) {
+      args.push('--limit', String(options.limit));
+    }
+    
+    const output = await runPythonScript('graph_api.py', args);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get node neighbors
+ipcMain.handle('graph:neighbors', async (event, options = {}) => {
+  try {
+    const args = ['neighbors', options.nodeId];
+    if (options.nodeType) {
+      args.push('--type', options.nodeType);
+    }
+    if (options.hops) {
+      args.push('--hops', String(options.hops));
+    }
+    if (options.maxNodes) {
+      args.push('--max', String(options.maxNodes));
+    }
+    if (options.includeTypes && options.includeTypes.length > 0) {
+      args.push('--include', ...options.includeTypes);
+    }
+    
+    const output = await runPythonScript('graph_api.py', args);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get node details
+ipcMain.handle('graph:node-details', async (event, nodeId, nodeType = null) => {
+  try {
+    const args = ['details', nodeId];
+    if (nodeType) {
+      args.push('--type', nodeType);
+    }
+    
+    const output = await runPythonScript('graph_api.py', args);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Search nodes
+ipcMain.handle('graph:search', async (event, query, options = {}) => {
+  try {
+    const args = ['search', query];
+    if (options.types && options.types.length > 0) {
+      args.push('--types', ...options.types);
+    }
+    if (options.limit) {
+      args.push('--limit', String(options.limit));
+    }
+    
+    const output = await runPythonScript('graph_api.py', args);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get graph schema
+ipcMain.handle('graph:schema', async () => {
+  try {
+    const output = await runPythonScript('graph_api.py', ['schema']);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Create node
+ipcMain.handle('graph:create-node', async (event, nodeType, name, properties = {}) => {
+  try {
+    const args = ['create-node', nodeType, name];
+    if (Object.keys(properties).length > 0) {
+      args.push('--props', JSON.stringify(properties));
+    }
+    
+    const output = await runPythonScript('graph_api.py', args);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Update node
+ipcMain.handle('graph:update-node', async (event, nodeType, name, properties) => {
+  try {
+    const args = ['update-node', nodeType, name, JSON.stringify(properties)];
+    
+    const output = await runPythonScript('graph_api.py', args);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Delete node
+ipcMain.handle('graph:delete-node', async (event, nodeType, name) => {
+  try {
+    const output = await runPythonScript('graph_api.py', ['delete-node', nodeType, name]);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Create edge
+ipcMain.handle('graph:create-edge', async (event, sourceType, sourceName, targetType, targetName, relType, properties = {}) => {
+  try {
+    const args = ['create-edge', sourceType, sourceName, targetType, targetName, relType];
+    if (Object.keys(properties).length > 0) {
+      args.push('--props', JSON.stringify(properties));
+    }
+    
+    const output = await runPythonScript('graph_api.py', args);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Delete edge
+ipcMain.handle('graph:delete-edge', async (event, sourceType, sourceName, targetType, targetName, relType) => {
+  try {
+    const output = await runPythonScript('graph_api.py', ['delete-edge', sourceType, sourceName, targetType, targetName, relType]);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Apply batch changes
+ipcMain.handle('graph:apply-batch', async (event, changes) => {
+  try {
+    const scriptPath = path.join(scriptsDir, 'graph_api.py');
+    
+    return new Promise((resolve, reject) => {
+      const proc = spawn('python', ['-u', scriptPath, 'batch'], {
+        cwd: path.join(__dirname, '..'),
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
+      });
+      
+      // Send changes as JSON to stdin
+      proc.stdin.write(JSON.stringify(changes));
+      proc.stdin.end();
+      
+      let stdout = '';
+      let stderr = '';
+      
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      
+      proc.on('close', (code) => {
+        if (code === 0) {
+          try {
+            resolve(JSON.parse(stdout));
+          } catch (e) {
+            resolve({ success: false, error: 'Failed to parse response' });
+          }
+        } else {
+          resolve({ success: false, error: stderr || 'Batch operation failed' });
+        }
+      });
+      
+      proc.on('error', (err) => {
+        resolve({ success: false, error: err.message });
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// AI: Propose relationship changes (with streaming)
+ipcMain.handle('graph:ai-propose', async (event, description) => {
+  const streamId = `ai-propose-${Date.now()}`;
+  
+  try {
+    const scriptPath = path.join(scriptsDir, 'claude_client.py');
+    
+    return new Promise((resolve, reject) => {
+      const proc = spawn('python', ['-u', scriptPath, '--propose-relationship'], {
+        cwd: path.join(__dirname, '..'),
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
+      });
+      
+      // Send description as JSON
+      const payload = JSON.stringify({ description });
+      proc.stdin.write(payload);
+      proc.stdin.end();
+      
+      let stdout = '';
+      let stderr = '';
+      
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+      
+      proc.stderr.on('data', (data) => {
+        const text = data.toString();
+        stderr += text;
+        
+        // Stream tool calls to frontend
+        if (mainWindow && text.includes('[TOOL]')) {
+          const lines = text.split('\n');
+          for (const line of lines) {
+            if (line.startsWith('[TOOL]')) {
+              mainWindow.webContents.send('tool-call', {
+                streamId,
+                tool: line.replace('[TOOL]', '').trim()
+              });
+            }
+          }
+        }
+      });
+      
+      proc.on('close', (code) => {
+        if (mainWindow) {
+          mainWindow.webContents.send('stream-complete', {
+            streamId,
+            success: code === 0
+          });
+        }
+        
+        if (code === 0) {
+          try {
+            const result = JSON.parse(stdout);
+            resolve({ success: true, ...result, streamId });
+          } catch (e) {
+            resolve({ success: false, error: 'Failed to parse AI response', streamId });
+          }
+        } else {
+          resolve({ success: false, error: stderr || 'AI proposal failed', streamId });
+        }
+      });
+      
+      proc.on('error', (err) => {
+        resolve({ success: false, error: err.message, streamId });
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message, streamId };
+  }
+});
+
+// AI: Explain selected nodes/edges
+ipcMain.handle('graph:ai-explain', async (event, nodeNames) => {
+  try {
+    const output = await runPythonScript('claude_client.py', ['--explain-nodes', ...nodeNames]);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});

@@ -1276,3 +1276,782 @@ body {
   background: var(--border-subtle);
   margin: 0 8px;
 }
+
+/* ============================================
+   Graph Tab - Ontology Visualization & Editing
+   ============================================ */
+
+/* Main graph layout */
+.graph-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr 280px;
+  gap: 16px;
+  height: calc(100vh - 180px);
+}
+
+/* Graph sidebars */
+.graph-sidebar {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  overflow-y: auto;
+}
+
+.graph-sidebar-left {
+  padding: 16px;
+}
+
+.graph-sidebar-right {
+  padding: 16px;
+}
+
+.sidebar-section {
+  margin-bottom: 20px;
+}
+
+.sidebar-section h4 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-cyan);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* Pending changes */
+.pending-changes-summary {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.pending-changes-summary .no-changes {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.pending-changes-summary .change-count {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pending-changes-summary .count-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pending-changes-summary .count-item.add { color: var(--accent-green); }
+.pending-changes-summary .count-item.update { color: var(--accent-orange); }
+.pending-changes-summary .count-item.delete { color: var(--accent-red); }
+
+.pending-changes-list {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.pending-change-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+  font-size: 11px;
+}
+
+.pending-change-item.add {
+  border-left: 3px solid var(--accent-green);
+}
+
+.pending-change-item.delete {
+  border-left: 3px solid var(--accent-red);
+}
+
+.pending-change-item.update {
+  border-left: 3px solid var(--accent-orange);
+}
+
+.pending-changes-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.pending-changes-actions .btn {
+  flex: 1;
+  margin: 0;
+}
+
+/* Main graph area */
+.graph-main {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* Graph toolbar */
+.graph-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.graph-search {
+  width: 200px;
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.graph-search:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.graph-filter {
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.toolbar-group .btn-small.active {
+  background: var(--accent-cyan);
+  color: #000;
+  border-color: var(--accent-cyan);
+}
+
+/* Graph container */
+.graph-container {
+  flex: 1;
+  position: relative;
+  min-height: 400px;
+  background: var(--bg-dark);
+}
+
+.graph-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  color: var(--text-muted);
+  display: none;
+}
+
+.graph-loading.active {
+  display: block;
+}
+
+/* AI Drawer */
+.ai-drawer {
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+
+.ai-drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.ai-drawer-header:hover {
+  background: var(--bg-card);
+}
+
+.ai-drawer-content {
+  padding: 16px;
+  display: none;
+}
+
+.ai-drawer.expanded .ai-drawer-content {
+  display: block;
+}
+
+.ai-drawer.expanded .ai-drawer-header button {
+  transform: rotate(180deg);
+}
+
+.ai-input-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.ai-input-row input {
+  flex: 1;
+  padding: 10px 14px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.ai-input-row input:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.ai-proposals {
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.ai-proposal {
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+
+.ai-proposal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.ai-proposal-type {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(0, 212, 255, 0.15);
+  color: var(--accent-cyan);
+}
+
+.ai-proposal-confidence {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ai-proposal-description {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.ai-proposal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ai-proposal-actions .btn-small {
+  flex: 1;
+}
+
+/* Node details */
+.node-details {
+  font-size: 12px;
+}
+
+.node-details .no-selection {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.node-details .detail-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.node-details .detail-row:last-child {
+  border-bottom: none;
+}
+
+.node-details .detail-label {
+  color: var(--text-muted);
+}
+
+.node-details .detail-value {
+  color: var(--text-primary);
+  text-align: right;
+  word-break: break-word;
+  max-width: 150px;
+}
+
+.node-details .node-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent-cyan);
+  margin-bottom: 12px;
+  word-break: break-word;
+}
+
+.node-details .node-type {
+  display: inline-block;
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.node-details .relationships-section {
+  margin-top: 16px;
+}
+
+.node-details .relationships-section h5 {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.node-details .relationship-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 11px;
+}
+
+.node-details .relationship-item .rel-type {
+  color: var(--accent-cyan);
+}
+
+.node-details .relationship-item .rel-target {
+  color: var(--text-secondary);
+}
+
+/* Edit form */
+.edit-form, .add-form {
+  font-size: 12px;
+}
+
+.form-group {
+  margin-bottom: 12px;
+}
+
+.form-group label {
+  display: block;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+
+.form-group input,
+.form-group select {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.form-group input:focus,
+.form-group select:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.form-group input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.form-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
+
+.form-actions .btn {
+  flex: 1;
+  margin: 0;
+}
+
+/* Hint text in sidebar */
+.sidebar-section .hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 0 0 12px 0;
+  font-style: italic;
+}
+
+/* Dynamic property editing */
+.dynamic-props {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.prop-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.prop-row .prop-key {
+  flex: 0 0 80px;
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prop-row input,
+.prop-row textarea {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 11px;
+  resize: vertical;
+}
+
+.prop-row textarea {
+  min-height: 40px;
+  font-family: inherit;
+}
+
+.prop-row.readonly {
+  opacity: 0.7;
+}
+
+.prop-row .prop-value-readonly {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prop-separator {
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 8px 0 4px 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.prop-row .btn-small {
+  padding: 4px 8px;
+  font-size: 10px;
+}
+
+.add-prop-row {
+  display: flex;
+  gap: 4px;
+}
+
+.add-prop-row input {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+
+.add-prop-row .btn-small {
+  padding: 4px 10px;
+}
+
+/* ============================================
+   Graph Modal - Contextual View
+   ============================================ */
+
+.graph-modal {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(10, 10, 15, 0.9);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+
+.graph-modal.active {
+  display: flex;
+}
+
+.graph-modal-content {
+  width: 100%;
+  max-width: 1200px;
+  height: 100%;
+  max-height: 800px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.graph-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.graph-modal-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent-cyan);
+}
+
+.graph-modal-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.graph-modal-controls .btn-small.active {
+  background: var(--accent-cyan);
+  color: #000;
+}
+
+.graph-modal-controls .close-modal {
+  margin-left: 16px;
+  background: var(--accent-red);
+  border-color: var(--accent-red);
+  color: #fff;
+}
+
+.graph-modal-controls .close-modal:hover {
+  filter: brightness(1.2);
+}
+
+.graph-modal-body {
+  display: grid;
+  grid-template-columns: 1fr 250px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.graph-modal-canvas {
+  background: var(--bg-dark);
+  position: relative;
+}
+
+.graph-modal-sidebar {
+  padding: 16px;
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--border-subtle);
+  overflow-y: auto;
+}
+
+.modal-node-details {
+  font-size: 12px;
+}
+
+.modal-node-details .no-selection {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.modal-node-details .node-not-found {
+  padding: 8px 0;
+}
+
+.modal-node-details .node-not-found p {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+}
+
+.modal-node-details .node-not-found .hint {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.graph-modal-footer {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: var(--bg-elevated);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Resource item with graph button */
+.resource-item .graph-btn {
+  margin-left: auto;
+  padding: 2px 6px;
+  font-size: 10px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.resource-item:hover .graph-btn {
+  opacity: 1;
+}
+
+.resource-item .graph-btn:hover {
+  background: var(--accent-cyan);
+  color: #000;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1200px) {
+  .graph-layout {
+    grid-template-columns: 180px 1fr 220px;
+  }
+}
+
+@media (max-width: 900px) {
+  .graph-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+  }
+  
+  .graph-sidebar-left,
+  .graph-sidebar-right {
+    max-height: 200px;
+  }
+  
+  .graph-modal-body {
+    grid-template-columns: 1fr;
+  }
+  
+  .graph-modal-sidebar {
+    display: none;
+  }
+}
+
+/* ============================================
+   Graph Reference (inline in chat)
+   ============================================ */
+
+.graph-ref {
+  display: inline;
+  padding: 1px 6px;
+  background: rgba(0, 188, 212, 0.15);
+  border: 1px solid rgba(0, 188, 212, 0.3);
+  border-radius: 4px;
+  color: var(--accent-cyan);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.graph-ref:hover {
+  background: rgba(0, 188, 212, 0.25);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 8px rgba(0, 188, 212, 0.3);
+}
+
+/* Graph Hover Preview Popup */
+.graph-hover-preview {
+  position: fixed;
+  z-index: 2000;
+  width: 320px;
+  height: 280px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.graph-hover-preview.active {
+  display: flex;
+  pointer-events: auto;
+}
+
+.graph-hover-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.graph-hover-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.graph-hover-type {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--accent-cyan);
+  color: #000;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.graph-hover-canvas {
+  flex: 1;
+  min-height: 180px;
+  background: var(--bg-secondary);
+}
+
+.graph-hover-footer {
+  padding: 6px 12px;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border-subtle);
+  text-align: center;
+}
+
+.graph-hover-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.graph-hover-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.graph-hover-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+  padding: 16px;
+}

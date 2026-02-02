@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://unpkg.com;">
   <title>PLC Ontology Assistant</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -32,6 +32,10 @@
         <button class="nav-btn" data-tab="database">
           <span class="icon">🗄️</span>
           <span>Database</span>
+        </button>
+        <button class="nav-btn" data-tab="graph">
+          <span class="icon">🕸️</span>
+          <span>Graph</span>
         </button>
       </nav>
       
@@ -292,6 +296,7 @@
           
           <div class="chat-input-container">
             <button class="btn-small" id="btn-clear-chat" title="Clear conversation">🗑️ Clear</button>
+            <button class="btn-small" id="btn-show-graph" title="Show related graph">🕸️ Graph</button>
             <input type="text" 
                    id="chat-input" 
                    class="chat-input" 
@@ -357,7 +362,244 @@
           </div>
         </div>
       </section>
+
+      <!-- Graph Tab -->
+      <section class="tab-content" id="tab-graph">
+        <header class="tab-header">
+          <h2>Ontology Graph</h2>
+          <p>Visualize and edit the knowledge graph with AI assistance</p>
+        </header>
+        
+        <div class="graph-layout">
+          <!-- Left Sidebar: Pending Changes -->
+          <aside class="graph-sidebar graph-sidebar-left" id="graph-changes-panel">
+            <div class="sidebar-section">
+              <h4>Pending Changes</h4>
+              <div class="pending-changes-summary" id="pending-changes-summary">
+                <p class="no-changes">No pending changes</p>
+              </div>
+              <div class="pending-changes-list" id="pending-changes-list"></div>
+              <div class="pending-changes-actions">
+                <button class="btn primary" id="btn-apply-changes" disabled>Apply All</button>
+                <button class="btn secondary" id="btn-discard-changes" disabled>Discard</button>
+              </div>
+            </div>
+          </aside>
+          
+          <!-- Center: Graph Canvas -->
+          <div class="graph-main">
+            <div class="graph-toolbar">
+              <div class="toolbar-group">
+                <input type="text" id="graph-search" class="graph-search" placeholder="Search nodes...">
+                <select id="graph-filter" class="graph-filter">
+                  <option value="all">All Types</option>
+                  <option value="plc">PLC Layer</option>
+                  <option value="scada">SCADA Layer</option>
+                  <option value="mes">MES Layer</option>
+                  <option value="troubleshooting">Troubleshooting</option>
+                  <option value="flows">Flows</option>
+                </select>
+              </div>
+              <div class="toolbar-group">
+                <button class="btn-small" id="btn-layout-force" title="Force-directed layout">Force</button>
+                <button class="btn-small active" id="btn-layout-hierarchical" title="Hierarchical layout">Hierarchical</button>
+              </div>
+              <div class="toolbar-group">
+                <button class="btn-small" id="btn-zoom-in" title="Zoom in">+</button>
+                <button class="btn-small" id="btn-zoom-out" title="Zoom out">−</button>
+                <button class="btn-small" id="btn-fit" title="Fit to view">⊡</button>
+              </div>
+              <div class="toolbar-group">
+                <button class="btn-small" id="btn-refresh-graph" title="Reload graph">↻ Refresh</button>
+              </div>
+            </div>
+            
+            <div class="graph-container" id="graph-container">
+              <!-- Cytoscape.js renders here -->
+              <div class="graph-loading" id="graph-loading">
+                <div class="loading-spinner"></div>
+                <p>Loading graph...</p>
+              </div>
+            </div>
+            
+            <!-- AI Assistant Drawer -->
+            <div class="ai-drawer" id="ai-drawer">
+              <div class="ai-drawer-header">
+                <span>AI Relationship Assistant</span>
+                <button class="btn-small" id="btn-toggle-ai-drawer">▼</button>
+              </div>
+              <div class="ai-drawer-content" id="ai-drawer-content">
+                <div class="ai-input-row">
+                  <input type="text" id="ai-relationship-input" 
+                         placeholder="Describe a relationship (e.g., 'Motor_001 is controlled by MotorStarter AOI')">
+                  <button class="btn primary" id="btn-ai-propose">Propose</button>
+                </div>
+                <div class="ai-proposals" id="ai-proposals">
+                  <!-- AI proposals appear here -->
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Right Sidebar: Node Details -->
+          <aside class="graph-sidebar graph-sidebar-right" id="graph-details-panel">
+            <div class="sidebar-section">
+              <h4>Details</h4>
+              <div class="node-details" id="node-details">
+                <p class="no-selection">Select a node or edge to view details</p>
+              </div>
+            </div>
+            <div class="sidebar-section" id="edit-section" style="display: none;">
+              <h4>Edit Properties</h4>
+              <div class="edit-form" id="edit-form">
+                <div class="form-group">
+                  <label>Name</label>
+                  <input type="text" id="edit-name" readonly>
+                </div>
+                <div class="form-group">
+                  <label>Type</label>
+                  <input type="text" id="edit-type" readonly>
+                </div>
+                <div class="dynamic-props" id="edit-dynamic-props">
+                  <!-- Dynamic property fields added here -->
+                </div>
+                <div class="form-group">
+                  <label>Add Property</label>
+                  <div class="add-prop-row">
+                    <input type="text" id="new-prop-key" placeholder="Key">
+                    <input type="text" id="new-prop-value" placeholder="Value">
+                    <button class="btn-small" id="btn-add-prop">+</button>
+                  </div>
+                </div>
+                <div class="form-actions">
+                  <button class="btn primary btn-small" id="btn-save-node">Save</button>
+                  <button class="btn danger btn-small" id="btn-delete-selected">Delete</button>
+                </div>
+              </div>
+            </div>
+            <div class="sidebar-section" id="add-relationship-section" style="display: none;">
+              <h4>Add Relationship</h4>
+              <p class="hint">Select source, then Shift+click target</p>
+              <div class="add-form">
+                <div class="form-group">
+                  <label>Source</label>
+                  <input type="text" id="rel-source" readonly placeholder="Click a node...">
+                </div>
+                <div class="form-group">
+                  <label>Relationship Type</label>
+                  <select id="rel-type">
+                    <option value="">Select type...</option>
+                    <optgroup label="Structure">
+                      <option value="HAS_COMPONENT">HAS_COMPONENT</option>
+                      <option value="PART_OF">PART_OF</option>
+                      <option value="BELONGS_TO">BELONGS_TO</option>
+                    </optgroup>
+                    <optgroup label="Control">
+                      <option value="CONTROLS">CONTROLS</option>
+                      <option value="HAS_TAG">HAS_TAG</option>
+                      <option value="HAS_PATTERN">HAS_PATTERN</option>
+                    </optgroup>
+                    <optgroup label="Data Flow">
+                      <option value="LOGS_TO">LOGS_TO</option>
+                      <option value="LOGGED_BY">LOGGED_BY</option>
+                    </optgroup>
+                    <optgroup label="Safety">
+                      <option value="SAFETY_CRITICAL">SAFETY_CRITICAL</option>
+                      <option value="DEMAND_ON">DEMAND_ON</option>
+                    </optgroup>
+                    <optgroup label="Location">
+                      <option value="LOCATED_AT">LOCATED_AT</option>
+                      <option value="MANAGED_BY">MANAGED_BY</option>
+                    </optgroup>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Target</label>
+                  <input type="text" id="rel-target" readonly placeholder="Shift+click a node...">
+                </div>
+                <div class="form-actions">
+                  <button class="btn primary btn-small" id="btn-add-relationship">Add Relationship</button>
+                  <button class="btn secondary btn-small" id="btn-clear-relationship">Clear</button>
+                </div>
+              </div>
+            </div>
+            <div class="sidebar-section">
+              <h4>Add New Node</h4>
+              <div class="add-form">
+                <div class="form-group">
+                  <label>Node Type</label>
+                  <select id="new-node-type">
+                    <option value="">Select type...</option>
+                    <optgroup label="PLC">
+                      <option value="AOI">AOI</option>
+                      <option value="Tag">Tag</option>
+                    </optgroup>
+                    <optgroup label="SCADA">
+                      <option value="UDT">UDT</option>
+                      <option value="Equipment">Equipment</option>
+                      <option value="View">View</option>
+                    </optgroup>
+                    <optgroup label="MES">
+                      <option value="Material">Material</option>
+                      <option value="Batch">Batch</option>
+                      <option value="Operation">Operation</option>
+                    </optgroup>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Name</label>
+                  <input type="text" id="new-node-name" placeholder="Enter name...">
+                </div>
+                <button class="btn secondary" id="btn-add-node">Add Node</button>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
     </main>
+  </div>
+
+  <!-- Graph Hover Preview (for inline references in chat) -->
+  <div class="graph-hover-preview" id="graph-hover-preview">
+    <div class="graph-hover-header">
+      <span class="graph-hover-title">Loading...</span>
+      <span class="graph-hover-type"></span>
+    </div>
+    <div class="graph-hover-canvas" id="graph-hover-canvas"></div>
+    <div class="graph-hover-footer">
+      <span class="graph-hover-hint">Click to open full graph</span>
+    </div>
+  </div>
+
+  <!-- Graph Modal (for Browse/Troubleshoot contextual views) -->
+  <div class="graph-modal" id="graph-modal">
+    <div class="graph-modal-content">
+      <div class="graph-modal-header">
+        <h3 id="graph-modal-title">Graph: Node</h3>
+        <div class="graph-modal-controls">
+          <button class="btn-small" id="modal-btn-layout-force">Force</button>
+          <button class="btn-small active" id="modal-btn-layout-hierarchical">Hierarchical</button>
+          <button class="btn-small" id="modal-btn-zoom-in">+</button>
+          <button class="btn-small" id="modal-btn-zoom-out">−</button>
+          <button class="btn-small" id="modal-btn-fit">⊡</button>
+          <button class="btn-small close-modal" id="btn-close-modal">✕</button>
+        </div>
+      </div>
+      <div class="graph-modal-body">
+        <div class="graph-modal-canvas" id="graph-modal-canvas">
+          <!-- Modal Cytoscape renders here -->
+        </div>
+        <div class="graph-modal-sidebar" id="graph-modal-sidebar">
+          <div class="modal-node-details" id="modal-node-details">
+            <p class="no-selection">Select a node to view details</p>
+          </div>
+        </div>
+      </div>
+      <div class="graph-modal-footer">
+        <button class="btn-small" id="btn-show-more">Show More Neighbors</button>
+        <button class="btn-small" id="btn-open-in-graph-tab">Open in Graph Tab</button>
+      </div>
+    </div>
   </div>
 
   <!-- Loading Overlay -->
@@ -366,6 +608,13 @@
     <p id="loading-text">Processing...</p>
   </div>
 
+  <!-- Cytoscape.js and layout extensions -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+  <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
+  
+  <script src="graph-renderer.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

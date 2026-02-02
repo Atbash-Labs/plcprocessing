@@ -34,6 +34,23 @@ contextBridge.exposeInMainWorld('api', {
   getEnrichmentStatus: (options) => ipcRenderer.invoke('get-enrichment-status', options),
   enrichBatch: (options) => ipcRenderer.invoke('enrich-batch', options),
   
+  // Graph API
+  graphLoad: (options) => ipcRenderer.invoke('graph:load', options),
+  graphNeighbors: (options) => ipcRenderer.invoke('graph:neighbors', options),
+  graphNodeDetails: (nodeId, nodeType) => ipcRenderer.invoke('graph:node-details', nodeId, nodeType),
+  graphSearch: (query, options) => ipcRenderer.invoke('graph:search', query, options),
+  graphSchema: () => ipcRenderer.invoke('graph:schema'),
+  graphCreateNode: (nodeType, name, properties) => ipcRenderer.invoke('graph:create-node', nodeType, name, properties),
+  graphUpdateNode: (nodeType, name, properties) => ipcRenderer.invoke('graph:update-node', nodeType, name, properties),
+  graphDeleteNode: (nodeType, name) => ipcRenderer.invoke('graph:delete-node', nodeType, name),
+  graphCreateEdge: (sourceType, sourceName, targetType, targetName, relType, properties) => 
+    ipcRenderer.invoke('graph:create-edge', sourceType, sourceName, targetType, targetName, relType, properties),
+  graphDeleteEdge: (sourceType, sourceName, targetType, targetName, relType) => 
+    ipcRenderer.invoke('graph:delete-edge', sourceType, sourceName, targetType, targetName, relType),
+  graphApplyBatch: (changes) => ipcRenderer.invoke('graph:apply-batch', changes),
+  graphAiPropose: (description) => ipcRenderer.invoke('graph:ai-propose', description),
+  graphAiExplain: (nodeNames) => ipcRenderer.invoke('graph:ai-explain', nodeNames),
+  
   // Event listeners for streaming (returns cleanup function)
   onStreamOutput: (callback) => {
     const handler = (event, data) => callback(data);

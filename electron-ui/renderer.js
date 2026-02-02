@@ -222,7 +222,7 @@ function formatResponse(text) {
     .join('\n');
   
   // Basic markdown formatting
-  return text
+  let formatted = text
     // Headers
     .replace(/^### (.*$)/gm, '<h4>$1</h4>')
     .replace(/^## (.*$)/gm, '<h3>$1</h3>')
@@ -231,14 +231,36 @@ function formatResponse(text) {
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     // Code blocks
     .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
-    // Inline code
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Inline code - make these graph references
+    .replace(/`([^`]+)`/g, (match, name) => {
+      return createGraphRef(name);
+    })
     // Horizontal rules
     .replace(/^---$/gm, '<hr>')
     // Lists
     .replace(/^- (.*$)/gm, '• $1')
     // Line breaks
     .replace(/\n/g, '<br>');
+  
+  // Also detect node-like patterns (CamelCase_Names, prefixed names)
+  // Match patterns like: View:Dashboard, AOI:MotorStart, PLX-SLS-001
+  formatted = formatted.replace(/\b(AOI|View|UDT|Tag|Equipment|SIF|Script|Query|Component)[:]\s*([A-Za-z0-9_\-\/]+)/gi, (match, type, name) => {
+    return `${type}: ${createGraphRef(name, type)}`;
+  });
+  
+  return formatted;
+}
+
+// Create a graph reference span for interactive hover
+function createGraphRef(name, type = null) {
+  // Skip very short names or common words
+  const skipWords = ['the', 'and', 'for', 'with', 'this', 'that', 'from', 'true', 'false', 'null', 'name', 'type', 'path'];
+  if (name.length < 3 || skipWords.includes(name.toLowerCase())) {
+    return `<code>${name}</code>`;
+  }
+  
+  const dataType = type ? `data-type="${type}"` : '';
+  return `<span class="graph-ref" data-name="${escapeHtml(name)}" ${dataType}>${name}</span>`;
 }
 
 async function sendMessage() {
@@ -365,6 +387,211 @@ document.getElementById('btn-clear-chat').addEventListener('click', () => {
   `;
   chatMessages.innerHTML = welcomeHtml;
 });
+
+// Show graph button in troubleshoot - shows graph of last mentioned node
+document.getElementById('btn-show-graph')?.addEventListener('click', async () => {
+  // Try to find node names mentioned in the conversation
+  const messages = chatMessages.querySelectorAll('.message-content');
+  let foundNode = null;
+  
+  // Look for node names in the conversation (patterns like AOI names, equipment, etc.)
+  const nodePatterns = [
+    /\b([A-Z][a-zA-Z0-9_]+_[A-Z][a-zA-Z0-9_]+)\b/g,  // AOI-style names like Motor_Start
+    /\b(AOI|UDT|View|Equipment|Tag):\s*([A-Za-z0-9_]+)/gi,  // Explicit mentions
+  ];
+  
+  // Search backwards through messages to find most recent node mention
+  for (let i = messages.length - 1; i >= 0 && !foundNode; i--) {
+    const text = messages[i].textContent || '';
+    
+    for (const pattern of nodePatterns) {
+      const matches = text.matchAll(pattern);
+      for (const match of matches) {
+        foundNode = match[1] || match[2];
+        break;
+      }
+      if (foundNode) break;
+    }
+  }
+  
+  if (foundNode) {
+    // Try to determine the type
+    openGraphModal(foundNode, null, foundNode);
+  } else {
+    // No specific node found - show full graph
+    // Switch to graph tab
+    navButtons.forEach(b => b.classList.remove('active'));
+    document.querySelector('[data-tab="graph"]')?.classList.add('active');
+    
+    tabContents.forEach(tab => tab.classList.remove('active'));
+    document.getElementById('tab-graph')?.classList.add('active');
+    
+    initGraphTab();
+  }
+});
+
+// ============================================
+// Graph Hover Preview (for inline references)
+// ============================================
+
+let hoverGraphRenderer = null;
+let hoverTimeout = null;
+let currentHoverNode = null;
+
+const hoverPreview = document.getElementById('graph-hover-preview');
+const hoverCanvas = document.getElementById('graph-hover-canvas');
+
+// Event delegation for graph references in chat
+chatMessages?.addEventListener('mouseover', (e) => {
+  const ref = e.target.closest('.graph-ref');
+  if (!ref) return;
+  
+  const nodeName = ref.dataset.name;
+  const nodeType = ref.dataset.type || null;
+  
+  if (!nodeName || nodeName === currentHoverNode) return;
+  
+  // Clear any pending hide
+  clearTimeout(hoverTimeout);
+  
+  // Show preview after small delay
+  hoverTimeout = setTimeout(() => {
+    showGraphHoverPreview(ref, nodeName, nodeType);
+  }, 300);
+});
+
+chatMessages?.addEventListener('mouseout', (e) => {
+  const ref = e.target.closest('.graph-ref');
+  if (!ref) return;
+  
+  // Hide after delay (allow moving to the preview)
+  hoverTimeout = setTimeout(() => {
+    hideGraphHoverPreview();
+  }, 200);
+});
+
+// Keep preview open when hovering over it
+hoverPreview?.addEventListener('mouseover', () => {
+  clearTimeout(hoverTimeout);
+});
+
+hoverPreview?.addEventListener('mouseout', () => {
+  hoverTimeout = setTimeout(() => {
+    hideGraphHoverPreview();
+  }, 200);
+});
+
+// Click on preview opens full modal
+hoverPreview?.addEventListener('click', () => {
+  if (currentHoverNode) {
+    hideGraphHoverPreview();
+    openGraphModal(currentHoverNode, null, currentHoverNode);
+  }
+});
+
+async function showGraphHoverPreview(refElement, nodeName, nodeType) {
+  if (!hoverPreview || !hoverCanvas) return;
+  
+  currentHoverNode = nodeName;
+  
+  // Position the preview near the reference
+  const rect = refElement.getBoundingClientRect();
+  const previewWidth = 320;
+  const previewHeight = 280;
+  
+  let left = rect.left;
+  let top = rect.bottom + 8;
+  
+  // Adjust if off-screen
+  if (left + previewWidth > window.innerWidth) {
+    left = window.innerWidth - previewWidth - 16;
+  }
+  if (top + previewHeight > window.innerHeight) {
+    top = rect.top - previewHeight - 8;
+  }
+  
+  hoverPreview.style.left = `${left}px`;
+  hoverPreview.style.top = `${top}px`;
+  
+  // Update header
+  document.querySelector('.graph-hover-title').textContent = nodeName;
+  document.querySelector('.graph-hover-type').textContent = nodeType || 'Node';
+  
+  // Show loading state
+  hoverCanvas.innerHTML = '<div class="graph-hover-loading">Loading graph...</div>';
+  hoverPreview.classList.add('active');
+  
+  // Load graph data
+  try {
+    const result = await window.api.graphNeighbors({
+      nodeId: nodeName,
+      nodeType: nodeType,
+      hops: 1,
+      maxNodes: 15
+    });
+    
+    if (!result.success || !result.nodes || result.nodes.length === 0) {
+      // Try search
+      const searchResult = await window.api.graphSearch(nodeName, { limit: 5 });
+      if (searchResult.success && searchResult.nodes && searchResult.nodes.length > 0) {
+        const firstMatch = searchResult.nodes[0];
+        const neighborResult = await window.api.graphNeighbors({
+          nodeId: firstMatch.label,
+          nodeType: firstMatch.type,
+          hops: 1,
+          maxNodes: 15
+        });
+        
+        if (neighborResult.success && neighborResult.nodes?.length > 0) {
+          renderHoverGraph(neighborResult);
+          return;
+        }
+      }
+      
+      hoverCanvas.innerHTML = '<div class="graph-hover-error">Node not found in database.<br>It may not be ingested yet.</div>';
+      return;
+    }
+    
+    renderHoverGraph(result);
+    
+  } catch (error) {
+    console.error('Hover preview error:', error);
+    hoverCanvas.innerHTML = '<div class="graph-hover-error">Error loading graph</div>';
+  }
+}
+
+function renderHoverGraph(data) {
+  // Clear previous
+  hoverCanvas.innerHTML = '';
+  
+  // Destroy old renderer
+  if (hoverGraphRenderer) {
+    hoverGraphRenderer.destroy();
+    hoverGraphRenderer = null;
+  }
+  
+  // Create mini graph renderer
+  hoverGraphRenderer = new GraphRenderer(hoverCanvas, {
+    editable: false,
+    layout: 'force'
+  });
+  
+  hoverGraphRenderer.loadData(data);
+  
+  // Fit after layout
+  setTimeout(() => {
+    if (hoverGraphRenderer) {
+      hoverGraphRenderer.fit();
+    }
+  }, 300);
+}
+
+function hideGraphHoverPreview() {
+  if (hoverPreview) {
+    hoverPreview.classList.remove('active');
+  }
+  currentHoverNode = null;
+}
 
 // ============================================
 // Database Tab
@@ -825,7 +1052,24 @@ function renderResourceList(containerOrId, items, labelField) {
       el.classList.add('pending');
     }
     
-    el.textContent = item[labelField] || item.name || 'Unknown';
+    // Create name span
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = item[labelField] || item.name || 'Unknown';
+    el.appendChild(nameSpan);
+    
+    // Add graph button
+    const graphBtn = document.createElement('button');
+    graphBtn.className = 'btn-small graph-btn';
+    graphBtn.textContent = '🕸️';
+    graphBtn.title = 'View in graph';
+    graphBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const nodeName = item[labelField] || item.name;
+      const nodeType = item.type || guessNodeType(containerOrId);
+      openGraphModal(nodeName, nodeType, nodeName);
+    });
+    el.appendChild(graphBtn);
+    
     container.appendChild(el);
   }
   
@@ -836,6 +1080,20 @@ function renderResourceList(containerOrId, items, labelField) {
     more.textContent = `... and ${items.length - 50} more`;
     container.appendChild(more);
   }
+}
+
+// Guess node type from container ID
+function guessNodeType(containerId) {
+  if (typeof containerId !== 'string') return 'Unknown';
+  if (containerId.includes('tag')) return 'ScadaTag';
+  if (containerId.includes('udt')) return 'UDT';
+  if (containerId.includes('aoi')) return 'AOI';
+  if (containerId.includes('view')) return 'View';
+  if (containerId.includes('script')) return 'Script';
+  if (containerId.includes('query')) return 'NamedQuery';
+  if (containerId.includes('event')) return 'GatewayEvent';
+  if (containerId.includes('component')) return 'ViewComponent';
+  return 'Unknown';
 }
 
 // Render view list with component counts
@@ -876,6 +1134,17 @@ function renderViewList(container, views) {
       badge.title = `${view.enriched_count} of ${view.component_count} components enriched`;
       el.appendChild(badge);
     }
+    
+    // Add graph button
+    const graphBtn = document.createElement('button');
+    graphBtn.className = 'btn-small graph-btn';
+    graphBtn.textContent = '🕸️';
+    graphBtn.title = 'View in graph';
+    graphBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openGraphModal(view.name, 'View', view.name);
+    });
+    el.appendChild(graphBtn);
     
     container.appendChild(el);
   }
@@ -1116,11 +1385,940 @@ window.api.onStreamComplete((data) => {
 });
 
 // ============================================
+// Graph Tab
+// ============================================
+
+let graphRenderer = null;
+let modalGraphRenderer = null;
+let graphState = {
+  loaded: false,
+  currentNode: null,
+  modalNode: null,
+  relSource: null,  // For relationship creation
+  relTarget: null   // For relationship creation
+};
+
+// Initialize graph tab when it becomes active
+function initGraphTab() {
+  if (graphState.loaded) return;
+  
+  const container = document.getElementById('graph-container');
+  if (!container) return;
+  
+  // Show loading
+  const loading = document.getElementById('graph-loading');
+  if (loading) loading.classList.add('active');
+  
+  // Create graph renderer (editable mode)
+  graphRenderer = new GraphRenderer(container, {
+    editable: true,
+    layout: 'hierarchical',
+    onNodeSelect: onGraphNodeSelect,
+    onEdgeSelect: onGraphEdgeSelect
+  });
+  
+  // Set up double-click handler for expansion
+  graphRenderer.onNodeDoubleClick = (nodeData) => {
+    loadNodeNeighbors(nodeData.fullLabel || nodeData.label, nodeData.type);
+  };
+  
+  // Load graph data
+  loadGraphData();
+  
+  graphState.loaded = true;
+}
+
+// Load graph data from backend
+async function loadGraphData() {
+  const loading = document.getElementById('graph-loading');
+  if (loading) loading.classList.add('active');
+  
+  try {
+    const result = await window.api.graphLoad({ limit: 500 });
+    
+    if (result.success && graphRenderer) {
+      graphRenderer.loadData(result);
+      if (loading) loading.classList.remove('active');
+    } else {
+      console.error('Failed to load graph:', result.error);
+      if (loading) {
+        loading.innerHTML = `<p>Error loading graph: ${result.error}</p>`;
+      }
+    }
+  } catch (error) {
+    console.error('Failed to load graph:', error);
+    if (loading) {
+      loading.innerHTML = `<p>Error: ${error.message}</p>`;
+    }
+  }
+}
+
+// Load neighbors for a node
+async function loadNodeNeighbors(nodeName, nodeType) {
+  const loading = document.getElementById('graph-loading');
+  if (loading) loading.classList.add('active');
+  
+  try {
+    const result = await window.api.graphNeighbors({
+      nodeId: nodeName,
+      nodeType: nodeType,
+      hops: 2,
+      maxNodes: 50
+    });
+    
+    if (result.success && graphRenderer) {
+      graphRenderer.loadData(result);
+      if (loading) loading.classList.remove('active');
+    } else {
+      console.error('Failed to load neighbors:', result.error);
+      if (loading) loading.classList.remove('active');
+    }
+  } catch (error) {
+    console.error('Failed to load neighbors:', error);
+    if (loading) loading.classList.remove('active');
+  }
+}
+
+// Handle node selection in graph
+function onGraphNodeSelect(nodeData, event) {
+  graphState.currentNode = nodeData;
+  updateNodeDetailsPanel(nodeData);
+  
+  // Show edit section
+  const editSection = document.getElementById('edit-section');
+  if (editSection) editSection.style.display = 'block';
+  
+  // Show relationship section
+  const relSection = document.getElementById('add-relationship-section');
+  if (relSection) relSection.style.display = 'block';
+  
+  // Check if shift key is held - set as target, otherwise set as source
+  const nodeName = nodeData.fullLabel || nodeData.label;
+  const isShiftClick = event && event.shiftKey;
+  
+  if (isShiftClick && graphState.relSource) {
+    // Set as target (shift+click)
+    graphState.relTarget = { name: nodeName, type: nodeData.type, id: nodeData.id };
+    document.getElementById('rel-target').value = nodeName;
+  } else {
+    // Set as source (normal click)
+    graphState.relSource = { name: nodeName, type: nodeData.type, id: nodeData.id };
+    document.getElementById('rel-source').value = nodeName;
+    // Clear target when selecting new source
+    graphState.relTarget = null;
+    document.getElementById('rel-target').value = '';
+  }
+  
+  // Populate edit form
+  const editName = document.getElementById('edit-name');
+  const editType = document.getElementById('edit-type');
+  const dynamicProps = document.getElementById('edit-dynamic-props');
+  
+  if (editName) editName.value = nodeName;
+  if (editType) editType.value = nodeData.type;
+  
+  // Build dynamic property fields
+  if (dynamicProps) {
+    let propsHtml = '';
+    const props = nodeData.properties || {};
+    
+    // Read-only system properties (not editable)
+    const readOnlyProps = [
+      'name', 'path', 'project', 'view',
+      'query_text', 'script_text', 'props',
+      'semantic_status',
+      'created_at', 'updated_at', 'analyzed_at',
+      'source_file', 'revision', 'vendor'
+    ];
+    
+    // Editable properties (user can modify these)
+    const editableProps = ['purpose', 'inferred_purpose', 'type', 'description', 'notes', 'tags', 'category'];
+    
+    // Show editable properties first
+    for (const key of editableProps) {
+      if (props[key] !== undefined && props[key] !== null) {
+        const value = props[key];
+        if (typeof value === 'object') continue;
+        
+        const displayValue = typeof value === 'string' ? value : JSON.stringify(value);
+        propsHtml += `
+          <div class="prop-row editable" data-key="${key}">
+            <span class="prop-key" title="${key}">${key}</span>
+            <textarea class="prop-value" rows="2">${escapeHtml(displayValue)}</textarea>
+          </div>
+        `;
+      }
+    }
+    
+    // Add separator if we have both editable and read-only
+    let hasReadOnly = false;
+    for (const [key, value] of Object.entries(props)) {
+      if (editableProps.includes(key)) continue;
+      if (value === null || value === undefined) continue;
+      if (typeof value === 'object') continue;
+      hasReadOnly = true;
+      break;
+    }
+    
+    if (propsHtml && hasReadOnly) {
+      propsHtml += '<div class="prop-separator">Read-only</div>';
+    }
+    
+    // Show read-only properties (display only, not in form)
+    for (const [key, value] of Object.entries(props)) {
+      if (editableProps.includes(key)) continue;
+      if (value === null || value === undefined) continue;
+      if (typeof value === 'object') continue;
+      
+      let displayValue = typeof value === 'string' ? value : JSON.stringify(value);
+      // Truncate long values
+      if (displayValue.length > 100) {
+        displayValue = displayValue.substring(0, 100) + '...';
+      }
+      
+      propsHtml += `
+        <div class="prop-row readonly" data-key="${key}">
+          <span class="prop-key" title="${key}">${key}</span>
+          <span class="prop-value-readonly" title="${escapeHtml(String(props[key]))}">${escapeHtml(displayValue)}</span>
+        </div>
+      `;
+    }
+    
+    dynamicProps.innerHTML = propsHtml || '<p style="color: var(--text-muted); font-size: 11px;">No properties</p>';
+  }
+}
+
+// Escape HTML for safe display
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Handle edge selection in graph
+function onGraphEdgeSelect(edgeData) {
+  const detailsPanel = document.getElementById('node-details');
+  if (!detailsPanel) return;
+  
+  detailsPanel.innerHTML = `
+    <div class="node-name">Relationship</div>
+    <div class="node-type">${edgeData.type}</div>
+    <div class="detail-row">
+      <span class="detail-label">From</span>
+      <span class="detail-value">${edgeData.source}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">To</span>
+      <span class="detail-value">${edgeData.target}</span>
+    </div>
+  `;
+  
+  // Hide edit section for edges (or show edge edit options)
+  const editSection = document.getElementById('edit-section');
+  if (editSection) editSection.style.display = 'none';
+}
+
+// Update node details panel
+function updateNodeDetailsPanel(nodeData) {
+  const detailsPanel = document.getElementById('node-details');
+  if (!detailsPanel) return;
+  
+  let html = `
+    <div class="node-name">${nodeData.fullLabel || nodeData.label}</div>
+    <div class="node-type">${nodeData.type} (${nodeData.group})</div>
+  `;
+  
+  // Add properties
+  const props = nodeData.properties || {};
+  for (const [key, value] of Object.entries(props)) {
+    if (key === 'name' || value === null || value === undefined) continue;
+    
+    let displayValue = value;
+    if (typeof value === 'object') {
+      displayValue = JSON.stringify(value).substring(0, 50) + '...';
+    } else if (typeof value === 'string' && value.length > 50) {
+      displayValue = value.substring(0, 50) + '...';
+    }
+    
+    html += `
+      <div class="detail-row">
+        <span class="detail-label">${key.replace(/_/g, ' ')}</span>
+        <span class="detail-value">${displayValue}</span>
+      </div>
+    `;
+  }
+  
+  detailsPanel.innerHTML = html;
+}
+
+// Update pending changes display
+function updatePendingChangesDisplay() {
+  if (!graphRenderer) return;
+  
+  const counts = graphRenderer.getPendingChangesCount();
+  const summaryEl = document.getElementById('pending-changes-summary');
+  const listEl = document.getElementById('pending-changes-list');
+  const applyBtn = document.getElementById('btn-apply-changes');
+  const discardBtn = document.getElementById('btn-discard-changes');
+  
+  if (counts.total === 0) {
+    summaryEl.innerHTML = '<p class="no-changes">No pending changes</p>';
+    listEl.innerHTML = '';
+    applyBtn.disabled = true;
+    discardBtn.disabled = true;
+    return;
+  }
+  
+  applyBtn.disabled = false;
+  discardBtn.disabled = false;
+  
+  let summaryHtml = '<div class="change-count">';
+  if (counts.nodesCreate + counts.edgesCreate > 0) {
+    summaryHtml += `<span class="count-item add">+${counts.nodesCreate + counts.edgesCreate} add</span>`;
+  }
+  if (counts.nodesUpdate > 0) {
+    summaryHtml += `<span class="count-item update">~${counts.nodesUpdate} update</span>`;
+  }
+  if (counts.nodesDelete + counts.edgesDelete > 0) {
+    summaryHtml += `<span class="count-item delete">-${counts.nodesDelete + counts.edgesDelete} delete</span>`;
+  }
+  summaryHtml += '</div>';
+  
+  summaryEl.innerHTML = summaryHtml;
+  
+  // Show pending items in list
+  const changes = graphRenderer.getPendingChanges();
+  let listHtml = '';
+  
+  for (const node of changes.nodes.create) {
+    listHtml += `<div class="pending-change-item add">${node.type}: ${node.name}</div>`;
+  }
+  for (const node of changes.nodes.delete) {
+    listHtml += `<div class="pending-change-item delete">${node.type}: ${node.name}</div>`;
+  }
+  for (const edge of changes.edges.create) {
+    listHtml += `<div class="pending-change-item add">${edge.sourceName} → ${edge.targetName}</div>`;
+  }
+  for (const edge of changes.edges.delete) {
+    listHtml += `<div class="pending-change-item delete">${edge.sourceName} → ${edge.targetName}</div>`;
+  }
+  
+  listEl.innerHTML = listHtml;
+}
+
+// Graph toolbar handlers
+document.getElementById('graph-search')?.addEventListener('input', (e) => {
+  if (graphRenderer) {
+    graphRenderer.search(e.target.value);
+  }
+});
+
+document.getElementById('graph-filter')?.addEventListener('change', (e) => {
+  if (graphRenderer) {
+    graphRenderer.filterByType(e.target.value);
+  }
+});
+
+document.getElementById('btn-layout-force')?.addEventListener('click', () => {
+  if (graphRenderer) {
+    graphRenderer.switchLayout('force');
+    document.getElementById('btn-layout-force').classList.add('active');
+    document.getElementById('btn-layout-hierarchical').classList.remove('active');
+  }
+});
+
+document.getElementById('btn-layout-hierarchical')?.addEventListener('click', () => {
+  if (graphRenderer) {
+    graphRenderer.switchLayout('hierarchical');
+    document.getElementById('btn-layout-hierarchical').classList.add('active');
+    document.getElementById('btn-layout-force').classList.remove('active');
+  }
+});
+
+document.getElementById('btn-zoom-in')?.addEventListener('click', () => {
+  if (graphRenderer) graphRenderer.zoomIn();
+});
+
+document.getElementById('btn-zoom-out')?.addEventListener('click', () => {
+  if (graphRenderer) graphRenderer.zoomOut();
+});
+
+document.getElementById('btn-fit')?.addEventListener('click', () => {
+  if (graphRenderer) graphRenderer.fit();
+});
+
+document.getElementById('btn-refresh-graph')?.addEventListener('click', () => {
+  loadGraphData();
+});
+
+// AI drawer toggle
+document.getElementById('btn-toggle-ai-drawer')?.addEventListener('click', () => {
+  const drawer = document.getElementById('ai-drawer');
+  if (drawer) drawer.classList.toggle('expanded');
+});
+
+// AI propose button
+document.getElementById('btn-ai-propose')?.addEventListener('click', async () => {
+  const input = document.getElementById('ai-relationship-input');
+  const proposalsEl = document.getElementById('ai-proposals');
+  
+  if (!input || !input.value.trim()) return;
+  
+  const description = input.value.trim();
+  input.disabled = true;
+  proposalsEl.innerHTML = '<p style="color: var(--text-muted);">Analyzing...</p>';
+  
+  try {
+    const result = await window.api.graphAiPropose(description);
+    
+    if (result.success && result.proposed_changes) {
+      let html = '';
+      for (const change of result.proposed_changes) {
+        html += `
+          <div class="ai-proposal">
+            <div class="ai-proposal-header">
+              <span class="ai-proposal-type">${change.action}</span>
+              <span class="ai-proposal-confidence">${Math.round((change.confidence || 0.8) * 100)}% confidence</span>
+            </div>
+            <div class="ai-proposal-description">
+              ${change.source || change.name} ${change.type ? `→ ${change.target}` : ''}
+            </div>
+            <div class="ai-proposal-actions">
+              <button class="btn-small" onclick="acceptAiProposal(${JSON.stringify(change).replace(/"/g, '&quot;')})">Accept</button>
+              <button class="btn-small" onclick="this.closest('.ai-proposal').remove()">Reject</button>
+            </div>
+          </div>
+        `;
+      }
+      
+      if (result.explanation) {
+        html = `<p style="color: var(--text-secondary); margin-bottom: 12px;">${result.explanation}</p>` + html;
+      }
+      
+      proposalsEl.innerHTML = html || '<p>No changes proposed</p>';
+    } else {
+      proposalsEl.innerHTML = `<p style="color: var(--accent-red);">Error: ${result.error || 'Unknown error'}</p>`;
+    }
+  } catch (error) {
+    proposalsEl.innerHTML = `<p style="color: var(--accent-red);">Error: ${error.message}</p>`;
+  }
+  
+  input.disabled = false;
+});
+
+// Accept AI proposal
+function acceptAiProposal(change) {
+  if (!graphRenderer) return;
+  
+  if (change.action === 'create_edge') {
+    graphRenderer.addPendingEdge({
+      sourceType: change.source_type || 'Unknown',
+      sourceName: change.source,
+      targetType: change.target_type || 'Unknown',
+      targetName: change.target,
+      type: change.type
+    });
+  } else if (change.action === 'create_node') {
+    graphRenderer.addPendingNode({
+      type: change.node_type,
+      name: change.name,
+      properties: change.properties || {}
+    });
+  }
+  
+  updatePendingChangesDisplay();
+}
+
+// Make function available globally
+window.acceptAiProposal = acceptAiProposal;
+
+// Add node button
+document.getElementById('btn-add-node')?.addEventListener('click', () => {
+  const typeSelect = document.getElementById('new-node-type');
+  const nameInput = document.getElementById('new-node-name');
+  
+  if (!typeSelect || !nameInput) return;
+  
+  const nodeType = typeSelect.value;
+  const nodeName = nameInput.value.trim();
+  
+  if (!nodeType || !nodeName) {
+    alert('Please select a type and enter a name');
+    return;
+  }
+  
+  if (graphRenderer) {
+    graphRenderer.addPendingNode({
+      type: nodeType,
+      name: nodeName,
+      properties: {}
+    });
+    updatePendingChangesDisplay();
+    
+    // Clear inputs
+    nameInput.value = '';
+  }
+});
+
+// Save node properties
+document.getElementById('btn-save-node')?.addEventListener('click', async () => {
+  if (!graphState.currentNode) return;
+  
+  const nodeType = graphState.currentNode.type;
+  const nodeName = graphState.currentNode.fullLabel || graphState.currentNode.label;
+  
+  // Collect property values from EDITABLE inputs only
+  const propsContainer = document.getElementById('edit-dynamic-props');
+  const properties = {};
+  
+  if (propsContainer) {
+    propsContainer.querySelectorAll('.prop-row.editable').forEach(row => {
+      const key = row.dataset.key;
+      const input = row.querySelector('.prop-value');
+      const value = input?.value;
+      if (key && value !== undefined) {
+        properties[key] = value;
+      }
+    });
+  }
+  
+  if (Object.keys(properties).length === 0) {
+    alert('No editable properties to save.');
+    return;
+  }
+  
+  // Call API to update node
+  const btn = document.getElementById('btn-save-node');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  
+  try {
+    // Capitalize first letter of type for Neo4j label
+    const labelType = nodeType.charAt(0).toUpperCase() + nodeType.slice(1);
+    const result = await window.api.graphUpdateNode(labelType, nodeName, properties);
+    
+    if (result.success) {
+      alert('Node properties saved!');
+      // Reload graph to show updates
+      loadGraphData();
+    } else {
+      alert(`Failed to save: ${result.error}`);
+    }
+  } catch (error) {
+    alert(`Error: ${error.message}`);
+  }
+  
+  btn.disabled = false;
+  btn.textContent = 'Save';
+});
+
+// Add new property (added as editable)
+document.getElementById('btn-add-prop')?.addEventListener('click', () => {
+  const keyInput = document.getElementById('new-prop-key');
+  const valueInput = document.getElementById('new-prop-value');
+  const propsContainer = document.getElementById('edit-dynamic-props');
+  
+  if (!keyInput || !valueInput || !propsContainer) return;
+  
+  const key = keyInput.value.trim().toLowerCase().replace(/\s+/g, '_');
+  const value = valueInput.value.trim();
+  
+  if (!key) {
+    alert('Please enter a property name');
+    return;
+  }
+  
+  // Check if property already exists
+  if (propsContainer.querySelector(`[data-key="${key}"]`)) {
+    alert(`Property "${key}" already exists`);
+    return;
+  }
+  
+  // Find the separator or insert at end of editable section
+  const separator = propsContainer.querySelector('.prop-separator');
+  
+  // Add new property row (as editable)
+  const row = document.createElement('div');
+  row.className = 'prop-row editable';
+  row.dataset.key = key;
+  row.innerHTML = `
+    <span class="prop-key" title="${key}">${key}</span>
+    <textarea class="prop-value" rows="2">${escapeHtml(value)}</textarea>
+  `;
+  
+  if (separator) {
+    propsContainer.insertBefore(row, separator);
+  } else {
+    propsContainer.appendChild(row);
+  }
+  
+  // Clear inputs
+  keyInput.value = '';
+  valueInput.value = '';
+});
+
+// Delete selected node
+document.getElementById('btn-delete-selected')?.addEventListener('click', () => {
+  if (!graphRenderer || !graphState.currentNode) return;
+  
+  const confirmed = confirm(`Delete ${graphState.currentNode.type} "${graphState.currentNode.fullLabel || graphState.currentNode.label}"?`);
+  if (!confirmed) return;
+  
+  graphRenderer.markNodeForDeletion(graphState.currentNode.id);
+  updatePendingChangesDisplay();
+  
+  // Clear selection
+  graphState.currentNode = null;
+  document.getElementById('node-details').innerHTML = '<p class="no-selection">Select a node or edge to view details</p>';
+  document.getElementById('edit-section').style.display = 'none';
+});
+
+// Add relationship between nodes
+document.getElementById('btn-add-relationship')?.addEventListener('click', () => {
+  if (!graphRenderer) return;
+  
+  const source = graphState.relSource;
+  const target = graphState.relTarget;
+  const relType = document.getElementById('rel-type')?.value;
+  
+  if (!source || !target) {
+    alert('Please select both source and target nodes.\n\nClick a node to set as source, then Shift+click another node to set as target.');
+    return;
+  }
+  
+  if (!relType) {
+    alert('Please select a relationship type.');
+    return;
+  }
+  
+  if (source.id === target.id) {
+    alert('Source and target cannot be the same node.');
+    return;
+  }
+  
+  // Add to pending changes
+  graphRenderer.addPendingEdge({
+    sourceId: source.id,
+    sourceName: source.name,
+    sourceType: source.type,
+    targetId: target.id,
+    targetName: target.name,
+    targetType: target.type,
+    type: relType
+  });
+  
+  updatePendingChangesDisplay();
+  
+  // Clear the form
+  clearRelationshipForm();
+});
+
+// Clear relationship form
+document.getElementById('btn-clear-relationship')?.addEventListener('click', () => {
+  clearRelationshipForm();
+});
+
+function clearRelationshipForm() {
+  graphState.relSource = null;
+  graphState.relTarget = null;
+  document.getElementById('rel-source').value = '';
+  document.getElementById('rel-target').value = '';
+  document.getElementById('rel-type').value = '';
+}
+
+// Apply pending changes
+document.getElementById('btn-apply-changes')?.addEventListener('click', async () => {
+  if (!graphRenderer) return;
+  
+  const changes = graphRenderer.getPendingChanges();
+  const btn = document.getElementById('btn-apply-changes');
+  
+  btn.disabled = true;
+  btn.textContent = 'Applying...';
+  
+  try {
+    const result = await window.api.graphApplyBatch(changes);
+    
+    if (result.success) {
+      graphRenderer.commitPendingChanges();
+      updatePendingChangesDisplay();
+      
+      // Reload graph to get updated data
+      await loadGraphData();
+      
+      alert('Changes applied successfully!');
+    } else {
+      alert(`Failed to apply changes: ${result.errors?.join(', ') || result.error}`);
+    }
+  } catch (error) {
+    alert(`Error: ${error.message}`);
+  }
+  
+  btn.disabled = false;
+  btn.textContent = 'Apply All';
+});
+
+// Discard pending changes
+document.getElementById('btn-discard-changes')?.addEventListener('click', () => {
+  if (!graphRenderer) return;
+  
+  const confirmed = confirm('Discard all pending changes?');
+  if (!confirmed) return;
+  
+  graphRenderer.clearPendingChanges();
+  updatePendingChangesDisplay();
+});
+
+// ============================================
+// Graph Modal (for Browse/Troubleshoot)
+// ============================================
+
+function openGraphModal(nodeName, nodeType, title) {
+  const modal = document.getElementById('graph-modal');
+  const modalTitle = document.getElementById('graph-modal-title');
+  const canvas = document.getElementById('graph-modal-canvas');
+  
+  if (!modal || !canvas) return;
+  
+  // Set title
+  if (modalTitle) modalTitle.textContent = `Graph: ${nodeName}`;
+  
+  // Show modal first (so canvas has dimensions)
+  modal.classList.add('active');
+  
+  // Store current node for "show more" functionality
+  graphState.modalNode = { name: nodeName, type: nodeType };
+  
+  // Small delay to ensure modal is rendered before creating Cytoscape
+  setTimeout(() => {
+    // Destroy old renderer if exists (to reinitialize with correct size)
+    if (modalGraphRenderer) {
+      modalGraphRenderer.destroy();
+      modalGraphRenderer = null;
+    }
+    
+    // Create modal renderer
+    modalGraphRenderer = new GraphRenderer(canvas, {
+      editable: false,
+      layout: 'force',  // Force layout works better for small subgraphs
+      onNodeSelect: onModalNodeSelect
+    });
+    
+    // Set up double-click for expansion
+    modalGraphRenderer.onNodeDoubleClick = (nodeData) => {
+      loadModalNeighbors(nodeData.fullLabel || nodeData.label, nodeData.type);
+    };
+    
+    // Load neighbors
+    loadModalNeighbors(nodeName, nodeType);
+  }, 100);
+}
+
+async function loadModalNeighbors(nodeName, nodeType, hops = 1) {
+  const detailsEl = document.getElementById('modal-node-details');
+  
+  try {
+    console.log(`[Graph Modal] Loading neighbors for ${nodeType}:${nodeName} with ${hops} hops`);
+    
+    // First try direct neighbor lookup
+    let result = await window.api.graphNeighbors({
+      nodeId: nodeName,
+      nodeType: nodeType,
+      hops: hops,
+      maxNodes: 30
+    });
+    
+    // If that fails, try without type constraint
+    if (!result.success || !result.nodes || result.nodes.length === 0) {
+      console.log('[Graph Modal] Direct lookup failed, trying without type...');
+      result = await window.api.graphNeighbors({
+        nodeId: nodeName,
+        hops: hops,
+        maxNodes: 30
+      });
+    }
+    
+    // If still no results, try searching
+    if (!result.success || !result.nodes || result.nodes.length === 0) {
+      console.log('[Graph Modal] Neighbor lookup failed, trying search...');
+      const searchResult = await window.api.graphSearch(nodeName, { limit: 10 });
+      
+      if (searchResult.success && searchResult.nodes && searchResult.nodes.length > 0) {
+        // Found nodes via search - use the first match
+        const firstNode = searchResult.nodes[0];
+        console.log('[Graph Modal] Found via search:', firstNode.label);
+        
+        result = await window.api.graphNeighbors({
+          nodeId: firstNode.label,
+          nodeType: firstNode.type,
+          hops: hops,
+          maxNodes: 30
+        });
+      }
+    }
+    
+    console.log('[Graph Modal] Final result:', result);
+    
+    if (result.success && modalGraphRenderer) {
+      if (result.nodes && result.nodes.length > 0) {
+        modalGraphRenderer.loadData(result);
+        // Fit view after loading
+        setTimeout(() => modalGraphRenderer.fit(), 200);
+      } else {
+        showNodeNotFoundMessage(nodeName, detailsEl);
+      }
+    } else if (!result.success) {
+      console.error('[Graph Modal] Error:', result.error);
+      showNodeNotFoundMessage(nodeName, detailsEl);
+    }
+  } catch (error) {
+    console.error('Failed to load modal neighbors:', error);
+    if (detailsEl) {
+      detailsEl.innerHTML = `<p class="no-selection">Error loading graph: ${error.message}</p>`;
+    }
+  }
+}
+
+// Show a helpful message when node is not found in the database
+function showNodeNotFoundMessage(nodeName, detailsEl) {
+  if (!detailsEl) return;
+  
+  detailsEl.innerHTML = `
+    <div class="node-not-found">
+      <p><strong>"${nodeName}"</strong> was not found in the ontology database.</p>
+      <p class="hint">This item exists in the source data but hasn't been ingested into Neo4j yet.</p>
+      <p class="hint">Use the <strong>Ingest</strong> tab to load source files, or browse existing nodes in the <strong>Graph</strong> tab.</p>
+    </div>
+  `;
+}
+
+function onModalNodeSelect(nodeData) {
+  const detailsEl = document.getElementById('modal-node-details');
+  if (!detailsEl) return;
+  
+  let html = `
+    <div class="node-name">${nodeData.fullLabel || nodeData.label}</div>
+    <div class="node-type">${nodeData.type}</div>
+  `;
+  
+  const props = nodeData.properties || {};
+  for (const [key, value] of Object.entries(props)) {
+    if (key === 'name' || value === null || value === undefined) continue;
+    
+    let displayValue = value;
+    if (typeof value === 'string' && value.length > 30) {
+      displayValue = value.substring(0, 30) + '...';
+    }
+    
+    html += `
+      <div class="detail-row">
+        <span class="detail-label">${key.replace(/_/g, ' ')}</span>
+        <span class="detail-value">${displayValue}</span>
+      </div>
+    `;
+  }
+  
+  detailsEl.innerHTML = html;
+}
+
+// Close modal
+document.getElementById('btn-close-modal')?.addEventListener('click', () => {
+  const modal = document.getElementById('graph-modal');
+  if (modal) modal.classList.remove('active');
+});
+
+// Modal layout buttons
+document.getElementById('modal-btn-layout-force')?.addEventListener('click', () => {
+  if (modalGraphRenderer) {
+    modalGraphRenderer.switchLayout('force');
+    document.getElementById('modal-btn-layout-force').classList.add('active');
+    document.getElementById('modal-btn-layout-hierarchical').classList.remove('active');
+  }
+});
+
+document.getElementById('modal-btn-layout-hierarchical')?.addEventListener('click', () => {
+  if (modalGraphRenderer) {
+    modalGraphRenderer.switchLayout('hierarchical');
+    document.getElementById('modal-btn-layout-hierarchical').classList.add('active');
+    document.getElementById('modal-btn-layout-force').classList.remove('active');
+  }
+});
+
+document.getElementById('modal-btn-zoom-in')?.addEventListener('click', () => {
+  if (modalGraphRenderer) modalGraphRenderer.zoomIn();
+});
+
+document.getElementById('modal-btn-zoom-out')?.addEventListener('click', () => {
+  if (modalGraphRenderer) modalGraphRenderer.zoomOut();
+});
+
+document.getElementById('modal-btn-fit')?.addEventListener('click', () => {
+  if (modalGraphRenderer) modalGraphRenderer.fit();
+});
+
+// Show more neighbors
+document.getElementById('btn-show-more')?.addEventListener('click', () => {
+  if (!graphState.modalNode) return;
+  loadModalNeighbors(graphState.modalNode.name, graphState.modalNode.type, 2);
+});
+
+// Open in graph tab
+document.getElementById('btn-open-in-graph-tab')?.addEventListener('click', () => {
+  const modal = document.getElementById('graph-modal');
+  if (modal) modal.classList.remove('active');
+  
+  // Switch to graph tab
+  navButtons.forEach(b => b.classList.remove('active'));
+  document.querySelector('[data-tab="graph"]')?.classList.add('active');
+  
+  tabContents.forEach(tab => tab.classList.remove('active'));
+  document.getElementById('tab-graph')?.classList.add('active');
+  
+  // Initialize graph tab if needed
+  initGraphTab();
+  
+  // Load the node's neighbors
+  if (graphState.modalNode) {
+    loadNodeNeighbors(graphState.modalNode.name, graphState.modalNode.type);
+  }
+});
+
+// Close modal on background click
+document.getElementById('graph-modal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'graph-modal') {
+    e.target.classList.remove('active');
+  }
+});
+
+// Escape key closes modal
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const modal = document.getElementById('graph-modal');
+    if (modal && modal.classList.contains('active')) {
+      modal.classList.remove('active');
+    }
+  }
+});
+
+// Make openGraphModal available globally
+window.openGraphModal = openGraphModal;
+
+// ============================================
 // Initial Load
 // ============================================
 
 // Initialize Browse tab
 initBrowseSubTabs();
+
+// Initialize graph tab when it's first shown
+navButtons.forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.tab === 'graph') {
+      // Slight delay to ensure DOM is ready
+      setTimeout(initGraphTab, 100);
+    }
+  });
+});
 
 // Check connection and load stats on startup
 setTimeout(() => {
