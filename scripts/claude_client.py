@@ -46,7 +46,7 @@ class OntologyTools:
     - get_schema: Discover node labels, relationship types, and properties
     - run_query: Execute Cypher queries to explore data
     - get_node: Get a specific node by label and name
-    
+
     Also includes MES/RCA tools for ISA-95 Level 3-4 integration:
     - get_batch_context: Full batch RCA context
     - get_equipment_rca: Equipment RCA with PLC/SCADA chain
@@ -131,10 +131,10 @@ class OntologyTools:
     def __init__(self, graph: OntologyGraph):
         """Initialize with Neo4j graph connection."""
         self.graph = graph
-        
+
         # Extend graph with MES methods
         extend_ontology(graph)
-        
+
         # Initialize MES tools
         self._mes_tools = MESTools(graph)
 
@@ -151,7 +151,7 @@ class OntologyTools:
         # Check if it's a MES tool
         if tool_name in self._mes_tools._tools:
             return self._mes_tools.execute(tool_name, tool_input)
-        
+
         # Check base tools
         if tool_name not in self._tools:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
@@ -422,7 +422,7 @@ class ClaudeClient:
 
     Provides generic graph exploration tools that give Claude
     maximum flexibility to query and understand the ontology.
-    
+
     Includes both PLC/SCADA tools and MES/ERP tools:
     - Base tools: get_schema, run_query, get_node, create_mapping
     - MES tools: get_batch_context, get_equipment_rca, get_ccp_context,
@@ -492,7 +492,7 @@ class ClaudeClient:
     ):
         """Stream response from Claude, printing text as it arrives."""
         print("[STREAM] ", end="", file=sys.stderr, flush=True)
-        
+
         try:
             # Build kwargs - only include tools if provided
             kwargs = {
@@ -503,7 +503,7 @@ class ClaudeClient:
             }
             if tools:
                 kwargs["tools"] = tools
-            
+
             with self.client.messages.stream(**kwargs) as stream:
                 # Track if we got any text (tool_use responses might not have text)
                 got_text = False
@@ -514,24 +514,32 @@ class ClaudeClient:
                         print(text, end="", file=sys.stderr, flush=True)
                 except Exception as e:
                     # text_stream can fail if Claude is doing tool_use
-                    print(f"\n[STREAM END: {type(e).__name__}]", file=sys.stderr, flush=True)
-                
+                    print(
+                        f"\n[STREAM END: {type(e).__name__}]",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
                 # Get the final message
                 response = stream.get_final_message()
-                
+
                 if not got_text and response.stop_reason == "tool_use":
                     print("[TOOL CALL]", file=sys.stderr, flush=True)
-            
+
             return response
-            
+
         except anthropic.APITimeoutError as e:
-            print(f"\n[TIMEOUT] API request timed out: {e}", file=sys.stderr, flush=True)
+            print(
+                f"\n[TIMEOUT] API request timed out: {e}", file=sys.stderr, flush=True
+            )
             raise
         except anthropic.APIConnectionError as e:
             print(f"\n[CONNECTION ERROR] {e}", file=sys.stderr, flush=True)
             raise
         except Exception as e:
-            print(f"\n[STREAM ERROR] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            print(
+                f"\n[STREAM ERROR] {type(e).__name__}: {e}", file=sys.stderr, flush=True
+            )
             raise
 
     def close(self) -> None:
@@ -674,7 +682,7 @@ class ClaudeClient:
                     tool_start = time.time()
                     result = self._tools.execute(tool_use.name, tool_use.input)
                     tool_elapsed = time.time() - tool_start
-                    
+
                     tool_calls_made.append(
                         {
                             "name": tool_use.name,
@@ -918,6 +926,88 @@ def get_claude_client(
     return ClaudeClient(model=model, enable_tools=enable_tools)
 
 
+# Relationship proposal system prompt
+RELATIONSHIP_PROPOSAL_PROMPT = """You are an expert at understanding industrial automation ontology relationships.
+
+Given a natural language description of a relationship, you will:
+1. Use tools to explore the existing ontology and find the referenced nodes
+2. Determine what graph changes are needed to represent the relationship
+3. Return a structured JSON response with proposed changes
+
+Available node types in the ontology:
+- PLC Layer: AOI, Tag
+- SCADA Layer: UDT, Equipment, View, Script, NamedQuery, Project, ViewComponent
+- MES Layer: Material, Batch, ProductionOrder, Operation, CCP (Critical Control Point)
+- Troubleshooting: FaultSymptom, FaultCause, OperatorPhrase
+
+Common relationship types:
+- CONTROLLED_BY: Equipment controlled by AOI
+- INSTANCE_OF: Equipment is instance of UDT
+- MAPS_TO_SCADA: PLC component maps to SCADA component
+- DISPLAYS: View displays UDT/Equipment
+- HAS_TAG: AOI has tag
+- HAS_SYMPTOM: AOI has fault symptom
+- MONITORED_BY: CCP monitored by equipment
+- BINDS_TO: ViewComponent binds to UDT/Equipment
+
+IMPORTANT: First use tools to verify that the referenced nodes exist. If they don't exist, include a create_node action.
+
+Return your response as JSON with this structure:
+{
+  "proposed_changes": [
+    {"action": "create_edge", "source": "SourceName", "source_type": "NodeType", "target": "TargetName", "target_type": "NodeType", "type": "RELATIONSHIP_TYPE", "confidence": 0.0-1.0},
+    {"action": "create_node", "name": "NodeName", "node_type": "NodeType", "properties": {}, "confidence": 0.0-1.0}
+  ],
+  "explanation": "Brief explanation of why these changes are proposed"
+}
+"""
+
+
+def propose_relationship(
+    client: "ClaudeClient", description: str, verbose: bool = False
+) -> Dict:
+    """
+    Use AI to propose graph changes based on natural language description.
+
+    Args:
+        client: Claude client instance
+        description: Natural language description of the relationship
+        verbose: Print debug info to stderr
+
+    Returns:
+        Dict with proposed_changes and explanation
+    """
+    user_prompt = f"""Analyze this relationship description and propose graph changes:
+
+"{description}"
+
+First, use tools to find if the referenced nodes exist in the database. Then return the JSON with proposed changes."""
+
+    result = client.query_json(
+        system_prompt=RELATIONSHIP_PROPOSAL_PROMPT,
+        user_prompt=user_prompt,
+        use_tools=True,
+        verbose=verbose,
+    )
+
+    if result.get("error"):
+        return {
+            "success": False,
+            "error": result["error"],
+            "proposed_changes": [],
+            "explanation": "",
+        }
+
+    data = result.get("data", {})
+
+    return {
+        "success": True,
+        "proposed_changes": data.get("proposed_changes", []),
+        "explanation": data.get("explanation", ""),
+        "tool_calls": result.get("tool_calls", []),
+    }
+
+
 # CLI for testing
 def main():
     import argparse
@@ -944,6 +1034,16 @@ def main():
         "--test-tools", action="store_true", help="Test tool execution directly"
     )
     parser.add_argument("--schema", action="store_true", help="Show database schema")
+    parser.add_argument(
+        "--propose-relationship",
+        action="store_true",
+        help="Propose relationship changes from JSON on stdin",
+    )
+    parser.add_argument(
+        "--explain-nodes",
+        nargs="*",
+        help="Explain the relationships between specified nodes",
+    )
 
     args = parser.parse_args()
 
@@ -952,7 +1052,66 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     with ClaudeClient(enable_tools=not args.no_tools) as client:
-        if args.test_tools or args.schema:
+        if args.propose_relationship:
+            # Read JSON from stdin with description
+            try:
+                input_data = json.load(sys.stdin)
+                description = input_data.get("description", "")
+
+                if not description:
+                    print(
+                        json.dumps(
+                            {"success": False, "error": "No description provided"}
+                        )
+                    )
+                    sys.exit(1)
+
+                result = propose_relationship(client, description, verbose=args.verbose)
+                print(json.dumps(result))
+
+            except json.JSONDecodeError as e:
+                print(
+                    json.dumps({"success": False, "error": f"Invalid JSON input: {e}"})
+                )
+                sys.exit(1)
+            except Exception as e:
+                print(json.dumps({"success": False, "error": str(e)}))
+                sys.exit(1)
+
+        elif args.explain_nodes:
+            # Explain relationships between nodes
+            node_names = args.explain_nodes
+            if not node_names:
+                print(json.dumps({"success": False, "error": "No node names provided"}))
+                sys.exit(1)
+
+            prompt = f"""Explain the relationships between these nodes in the ontology graph: {', '.join(node_names)}
+
+Use tools to find these nodes and their connections. Describe:
+1. What each node represents
+2. How they are connected
+3. The purpose of these relationships in the automation context
+
+Return a JSON response:
+{{
+  "nodes": [{{"name": "...", "type": "...", "purpose": "..."}}],
+  "relationships": [{{"from": "...", "to": "...", "type": "...", "description": "..."}}],
+  "summary": "Brief summary of how these components work together"
+}}"""
+
+            result = client.query_json(
+                system_prompt=default_system,
+                user_prompt=prompt,
+                use_tools=True,
+                verbose=args.verbose,
+            )
+
+            if result.get("error"):
+                print(json.dumps({"success": False, "error": result["error"]}))
+            else:
+                print(json.dumps({"success": True, **result.get("data", {})}))
+
+        elif args.test_tools or args.schema:
             # Test tools directly
             print("\n=== Database Schema ===\n")
             tools = client._tools
