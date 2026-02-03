@@ -681,21 +681,49 @@ class OntologyViewer:
             position: absolute;
             bottom: 20px;
             left: 20px;
-            background: rgba(22, 33, 62, 0.9);
-            padding: 15px;
+            background: rgba(22, 33, 62, 0.95);
+            padding: 15px 20px;
             border-radius: 8px;
             font-size: 12px;
+            max-height: calc(100vh - 100px);
+            overflow-y: auto;
+            min-width: 180px;
+        }}
+        #legend h4 {{
+            color: #e94560;
+            font-size: 14px;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #0f3460;
+        }}
+        .legend-group {{
+            margin-bottom: 12px;
+        }}
+        .legend-group-title {{
+            color: #00d9ff;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+            font-weight: 600;
         }}
         .legend-item {{
             display: flex;
             align-items: center;
-            margin: 5px 0;
+            margin: 4px 0;
+            padding: 2px 0;
         }}
         .legend-color {{
-            width: 16px;
-            height: 16px;
+            width: 14px;
+            height: 14px;
             border-radius: 50%;
-            margin-right: 8px;
+            margin-right: 10px;
+            flex-shrink: 0;
+            border: 1px solid rgba(255,255,255,0.2);
+        }}
+        .legend-label {{
+            color: #ccc;
+            font-size: 11px;
         }}
         #controls {{
             position: absolute;
@@ -1005,15 +1033,82 @@ class OntologyViewer:
             link.classed('dimmed', l => l.source.group !== group && l.target.group !== group);
         }};
 
-        // Legend
-        const legendGroups = [...new Set(nodes.map(n => n.type))];
+        // Legend - organized by group with human-readable labels
+        const legendLabels = {{
+            // Node types with friendly names
+            'aoi': 'Add-On Instruction',
+            'aoiinstance': 'AOI Instance',
+            'tag': 'Tag',
+            'udt': 'User-Defined Type',
+            'udttype': 'UDT Type',
+            'equipment': 'Equipment',
+            'view': 'View',
+            'perspectiveview': 'Perspective View',
+            'project': 'Project',
+            'endtoendflow': 'End-to-End Flow',
+            'dataflow': 'Data Flow',
+            'faultsymptom': 'Fault Symptom',
+            'operatorphrase': 'Operator Phrase',
+            'commonphrase': 'Common Phrase',
+            'controlpattern': 'Control Pattern',
+            'safetyelement': 'Safety Element',
+            'systemoverview': 'System Overview',
+            'flow': 'Flow',
+            'safety': 'Safety',
+            'responsibility': 'Responsibility',
+            'recommendation': 'Recommendation',
+            'overview': 'Overview'
+        }};
+
+        const groupLabels = {{
+            'plc': 'PLC Layer',
+            'scada': 'SCADA / HMI',
+            'flows': 'Data Flows',
+            'troubleshooting': 'Troubleshooting',
+            'patterns': 'Patterns & Safety',
+            'overview': 'System Overview',
+            'other': 'Other'
+        }};
+
+        // Get unique types present in the graph, organized by group
+        const presentTypes = [...new Set(nodes.map(n => n.type))];
+        const presentGroups = [...new Set(nodes.map(n => n.group))];
+        
+        // Build legend HTML organized by group
         const legend = document.getElementById('legend');
-        legend.innerHTML = legendGroups.map(type => `
-            <div class="legend-item">
-                <div class="legend-color" style="background: ${{colors[type] || '#666'}}"></div>
-                <span>${{type}}</span>
-            </div>
-        `).join('');
+        let legendHtml = '<h4>Legend</h4>';
+        
+        // Define group order
+        const groupOrder = ['plc', 'scada', 'flows', 'troubleshooting', 'patterns', 'overview', 'other'];
+        
+        groupOrder.forEach(group => {{
+            if (!presentGroups.includes(group)) return;
+            
+            // Get types in this group that are present
+            const typesInGroup = presentTypes.filter(type => {{
+                const nodesOfType = nodes.filter(n => n.type === type);
+                return nodesOfType.some(n => n.group === group);
+            }});
+            
+            if (typesInGroup.length === 0) return;
+            
+            legendHtml += `<div class="legend-group">`;
+            legendHtml += `<div class="legend-group-title">${{groupLabels[group] || group}}</div>`;
+            
+            typesInGroup.forEach(type => {{
+                const label = legendLabels[type] || type.charAt(0).toUpperCase() + type.slice(1);
+                const color = colors[type] || colors[group] || '#666';
+                legendHtml += `
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: ${{color}}"></div>
+                        <span class="legend-label">${{label}}</span>
+                    </div>`;
+            }});
+            
+            legendHtml += `</div>`;
+        }});
+        
+        legend.innerHTML = legendHtml;
 
         // Double-click to reset highlight
         svg.on('dblclick', () => {{

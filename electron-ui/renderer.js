@@ -1059,8 +1059,8 @@ function renderResourceList(containerOrId, items, labelField) {
     
     // Add graph button
     const graphBtn = document.createElement('button');
-    graphBtn.className = 'btn-small graph-btn';
-    graphBtn.textContent = '🕸️';
+    graphBtn.className = 'btn btn-sm btn-ghost graph-btn';
+    graphBtn.textContent = '⤢';
     graphBtn.title = 'View in graph';
     graphBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1137,8 +1137,8 @@ function renderViewList(container, views) {
     
     // Add graph button
     const graphBtn = document.createElement('button');
-    graphBtn.className = 'btn-small graph-btn';
-    graphBtn.textContent = '🕸️';
+    graphBtn.className = 'btn btn-sm btn-ghost graph-btn';
+    graphBtn.textContent = '⤢';
     graphBtn.title = 'View in graph';
     graphBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1784,8 +1784,8 @@ document.getElementById('btn-ai-propose')?.addEventListener('click', async () =>
               ${change.source || change.name} ${change.type ? `→ ${change.target}` : ''}
             </div>
             <div class="ai-proposal-actions">
-              <button class="btn-small" onclick="acceptAiProposal(${JSON.stringify(change).replace(/"/g, '&quot;')})">Accept</button>
-              <button class="btn-small" onclick="this.closest('.ai-proposal').remove()">Reject</button>
+              <button class="btn btn-sm btn-primary" onclick="acceptAiProposal(${JSON.stringify(change).replace(/"/g, '&quot;')})">Accept</button>
+              <button class="btn btn-sm btn-ghost" onclick="this.closest('.ai-proposal').remove()">Reject</button>
             </div>
           </div>
         `;

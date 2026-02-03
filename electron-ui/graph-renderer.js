@@ -76,16 +76,29 @@ class GraphRenderer {
             'text-valign': 'bottom',
             'text-halign': 'center',
             'text-margin-y': 8,
-            'font-size': 11,
+            'font-size': 10,
             'font-family': 'Inter, sans-serif',
-            'color': '#e8e8f0',
+            'color': '#888898',
             'text-outline-width': 2,
             'text-outline-color': '#0a0a0f',
             'background-color': 'data(color)',
-            'width': 40,
-            'height': 40,
+            'width': 36,
+            'height': 36,
+            'border-width': 1,
+            'border-color': '#2a2a3a',
+            'transition-property': 'width, height, border-width, border-color',
+            'transition-duration': '0.15s'
+          }
+        },
+        // Hovered node
+        {
+          selector: 'node:active, node:grabbed',
+          style: {
+            'width': 44,
+            'height': 44,
             'border-width': 2,
-            'border-color': '#2a2a3a'
+            'color': '#e8e8f0',
+            'font-size': 11
           }
         },
         // Center node (for neighbor view)
@@ -135,22 +148,34 @@ class GraphRenderer {
           }
         },
         
-        // Edge styles
+        // Edge styles - subtle by default, labels hidden
         {
           selector: 'edge',
           style: {
-            'width': 2,
-            'line-color': '#3a3a4a',
-            'target-arrow-color': '#3a3a4a',
+            'width': 1,
+            'line-color': '#2a2a35',
+            'target-arrow-color': '#2a2a35',
             'target-arrow-shape': 'triangle',
             'curve-style': 'bezier',
+            'label': '',
+            'opacity': 0.4
+          }
+        },
+        // Highlighted edges (on node hover)
+        {
+          selector: 'edge.highlighted',
+          style: {
+            'width': 2,
+            'line-color': '#5a5a6a',
+            'target-arrow-color': '#5a5a6a',
             'label': 'data(label)',
             'font-size': 9,
-            'color': '#8888a0',
+            'color': '#a0a0b0',
             'text-rotation': 'autorotate',
             'text-margin-y': -10,
             'text-outline-width': 2,
-            'text-outline-color': '#0a0a0f'
+            'text-outline-color': '#0a0a0f',
+            'opacity': 1
           }
         },
         // Selected edge
@@ -159,7 +184,15 @@ class GraphRenderer {
           style: {
             'width': 3,
             'line-color': '#00d4ff',
-            'target-arrow-color': '#00d4ff'
+            'target-arrow-color': '#00d4ff',
+            'label': 'data(label)',
+            'font-size': 9,
+            'color': '#00d4ff',
+            'text-rotation': 'autorotate',
+            'text-margin-y': -10,
+            'text-outline-width': 2,
+            'text-outline-color': '#0a0a0f',
+            'opacity': 1
           }
         },
         // Pending create edge
@@ -186,6 +219,45 @@ class GraphRenderer {
           selector: '.dimmed',
           style: {
             'opacity': 0.15
+          }
+        },
+        // Hovered node - make it stand out
+        {
+          selector: 'node.hovered',
+          style: {
+            'width': 44,
+            'height': 44,
+            'border-width': 3,
+            'border-color': '#00d4ff',
+            'color': '#ffffff',
+            'font-size': 12,
+            'font-weight': 600,
+            'z-index': 999
+          }
+        },
+        // Neighbor highlighted (on node hover)
+        {
+          selector: 'node.neighbor-highlighted',
+          style: {
+            'border-width': 2,
+            'border-color': '#5a5a6a',
+            'color': '#c0c0d0',
+            'font-size': 11
+          }
+        },
+        // Faded nodes (not connected to hovered)
+        {
+          selector: 'node.faded',
+          style: {
+            'opacity': 0.25,
+            'label': ''
+          }
+        },
+        // Faded edges
+        {
+          selector: 'edge.faded',
+          style: {
+            'opacity': 0.08
           }
         }
       ],
@@ -261,11 +333,42 @@ class GraphRenderer {
       const zoom = this.cy.zoom();
       if (zoom < 0.5) {
         this.cy.style().selector('node').style('label', '').update();
-        this.cy.style().selector('edge').style('label', '').update();
       } else {
         this.cy.style().selector('node').style('label', 'data(label)').update();
-        this.cy.style().selector('edge').style('label', 'data(label)').update();
       }
+    });
+    
+    // Node hover - highlight connected, dim others
+    this.cy.on('mouseover', 'node', (evt) => {
+      const node = evt.target;
+      const connectedNodes = node.neighborhood('node');
+      const connectedEdges = node.connectedEdges();
+      
+      // Add hovered class to the node
+      node.addClass('hovered');
+      
+      // Highlight connected edges
+      connectedEdges.addClass('highlighted');
+      
+      // Highlight connected nodes
+      connectedNodes.addClass('neighbor-highlighted');
+      
+      // Dim all other nodes (not hovered, not connected)
+      this.cy.nodes().not(node).not(connectedNodes).addClass('faded');
+      
+      // Dim all other edges
+      this.cy.edges().not(connectedEdges).addClass('faded');
+    });
+    
+    this.cy.on('mouseout', 'node', (evt) => {
+      const node = evt.target;
+      
+      // Remove all hover classes
+      node.removeClass('hovered');
+      this.cy.nodes().removeClass('neighbor-highlighted');
+      this.cy.nodes().removeClass('faded');
+      this.cy.edges().removeClass('highlighted');
+      this.cy.edges().removeClass('faded');
     });
   }
   

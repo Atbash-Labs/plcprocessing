@@ -4,51 +4,89 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://unpkg.com;">
-  <title>PLC Ontology Assistant</title>
+  <title>Axilon</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="app">
-    <!-- Sidebar -->
-    <aside class="sidebar">
+    <!-- Sidebar - Collapsible -->
+    <aside class="sidebar" id="sidebar">
       <div class="logo">
-        <div class="logo-icon">⚙️</div>
-        <h1>Ontology<br>Assistant</h1>
+        <!-- Empty spacer for collapsed sidebar -->
       </div>
       
       <nav class="nav">
-        <button class="nav-btn active" data-tab="ingest">
-          <span class="icon">📥</span>
-          <span>Ingest Data</span>
+        <button class="nav-btn active" data-tab="ingest" title="Ingest Data">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          <span class="nav-label">Ingest</span>
         </button>
-        <button class="nav-btn" data-tab="browse">
-          <span class="icon">📊</span>
-          <span>Browse</span>
+        <button class="nav-btn" data-tab="browse" title="Browse Resources">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 3h18v18H3zM3 9h18M9 21V9"/>
+          </svg>
+          <span class="nav-label">Browse</span>
         </button>
-        <button class="nav-btn" data-tab="troubleshoot">
-          <span class="icon">🔧</span>
-          <span>Troubleshoot</span>
+        <button class="nav-btn" data-tab="troubleshoot" title="Troubleshoot">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+          </svg>
+          <span class="nav-label">Assist</span>
         </button>
-        <button class="nav-btn" data-tab="database">
-          <span class="icon">🗄️</span>
-          <span>Database</span>
+        <button class="nav-btn" data-tab="database" title="Database">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/>
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+          </svg>
+          <span class="nav-label">Database</span>
         </button>
-        <button class="nav-btn" data-tab="graph">
-          <span class="icon">🕸️</span>
-          <span>Graph</span>
+        <button class="nav-btn" data-tab="graph" title="Graph View">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="18" cy="5" r="3"/>
+            <circle cx="6" cy="12" r="3"/>
+            <circle cx="18" cy="19" r="3"/>
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/>
+            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+          </svg>
+          <span class="nav-label">Graph</span>
+        </button>
+        <button class="nav-btn" data-tab="gallery" title="UI Gallery">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7"/>
+            <rect x="14" y="3" width="7" height="7"/>
+            <rect x="14" y="14" width="7" height="7"/>
+            <rect x="3" y="14" width="7" height="7"/>
+          </svg>
+          <span class="nav-label">Gallery</span>
         </button>
       </nav>
       
       <div class="sidebar-footer">
         <div class="status" id="neo4j-status">
           <span class="status-dot"></span>
-          <span>Checking Neo4j...</span>
+          <span class="status-text">Neo4j</span>
         </div>
       </div>
     </aside>
 
     <!-- Main Content -->
     <main class="main">
+      <!-- App Header with Axilon Logo -->
+      <header class="app-header">
+        <svg class="app-logo" viewBox="0 0 824 297" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M806.832 115.125L824 105.217V189.643L731.638 136.779V190.998L714.814 181.227L714.471 181.419V105.097L806.832 158.24V115.125Z" fill="currentColor"/>
+          <path d="M329.917 192.028V114.787L347.084 105.003V182.243L329.917 192.028Z" fill="currentColor"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M573.297 109.407H635.317L659.534 123.184V176.161L637.588 188.68H572.184L548.975 175.477V123.281L573.297 109.407ZM566.143 125.474V172.613H642.367V125.474H566.143Z" fill="currentColor"/>
+          <path d="M411.634 115.856L411.634 175.918L434.206 188.724H511.679L484.288 173.529H428.802L428.802 106.063L411.634 115.856Z" fill="currentColor"/>
+          <path d="M219.947 139.868L274.294 108.771V128.352L237.057 149.658L274.294 170.965V190.546L219.947 159.449L164.632 191.1L164.421 190.98V171.64L202.837 149.658L164.421 127.677V108.095L219.947 139.868Z" fill="currentColor"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M109.904 180.87V120.574L91.8091 109.457H15.3343L0.3125 118.216V177.165L23.1867 190.976L91.8091 153.248V190.976L109.904 180.87ZM16.6999 125.428V174.133L102.795 125.428H16.6999Z" fill="currentColor"/>
+        </svg>
+      </header>
+
       <!-- Ingest Tab -->
       <section class="tab-content active" id="tab-ingest">
         <header class="tab-header">
@@ -58,62 +96,68 @@
         
         <div class="cards">
           <div class="card">
-            <div class="card-icon">🔌</div>
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="4" y="4" width="16" height="16" rx="2"/>
+                <path d="M9 9h6M9 12h6M9 15h4"/>
+              </svg>
+            </div>
             <h3>PLC Files</h3>
             <p>Import Rockwell L5X exports (.sc files or directories)</p>
-            <button class="btn primary" id="btn-ingest-plc">
-              Select PLC File/Folder
-            </button>
+            <button class="btn btn-primary" id="btn-ingest-plc">Select File</button>
           </div>
           
           <div class="card">
-            <div class="card-icon">📊</div>
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                <path d="M3 9h18M9 21V9"/>
+              </svg>
+            </div>
             <h3>Ignition SCADA</h3>
             <p>Import Ignition project backup JSON files</p>
             
-            <!-- Optional directory paths for inlining code/SQL -->
             <div class="directory-pickers">
               <div class="directory-picker">
-                <button class="btn-small" id="btn-pick-script-library" title="Select script_library folder">📁 Scripts</button>
+                <button class="btn btn-sm btn-secondary" id="btn-pick-script-library" title="Select script_library folder">Scripts</button>
                 <span class="directory-path" id="script-library-path">auto-detect</span>
               </div>
               <div class="directory-picker">
-                <button class="btn-small" id="btn-pick-named-queries" title="Select named_queries_library folder">📁 Queries</button>
+                <button class="btn btn-sm btn-secondary" id="btn-pick-named-queries" title="Select named_queries_library folder">Queries</button>
                 <span class="directory-path" id="named-queries-path">auto-detect</span>
               </div>
             </div>
             
-            <button class="btn primary" id="btn-ingest-ignition">
-              Select Ignition Backup
-            </button>
+            <button class="btn btn-primary" id="btn-ingest-ignition">Select Backup</button>
           </div>
           
           <div class="card">
-            <div class="card-icon">🔗</div>
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+              </svg>
+            </div>
             <h3>Link & Enrich</h3>
             <p>Create PLC↔SCADA mappings and add troubleshooting data</p>
-            <button class="btn secondary" id="btn-run-unified">
-              Run Unified Analysis
-            </button>
-            <button class="btn secondary" id="btn-run-enrichment">
-              Add Troubleshooting
-            </button>
+            <button class="btn btn-secondary" id="btn-run-unified">Unified Analysis</button>
+            <button class="btn btn-secondary" id="btn-run-enrichment">Add Troubleshooting</button>
           </div>
         </div>
         
         <div class="output-panel" id="ingest-output">
           <div class="output-header">
             <h4>Output</h4>
-            <button class="btn-small" id="btn-clear-ingest-output">Clear</button>
+            <button class="btn btn-sm btn-ghost" id="btn-clear-ingest-output">Clear</button>
           </div>
           <pre class="output-content"></pre>
         </div>
 
         <!-- Project Discovery Panel (shown after Ignition import) -->
         <div class="project-discovery-panel hidden" id="project-discovery">
-          <h4>📁 Projects Discovered</h4>
+          <h4>Projects Discovered</h4>
           <div class="project-tree" id="project-tree"></div>
-          <button class="btn secondary" id="btn-goto-browse">→ Go to Browse Tab</button>
+          <button class="btn btn-secondary" id="btn-goto-browse">Go to Browse Tab</button>
         </div>
       </section>
 
@@ -127,7 +171,7 @@
         <!-- Enrichment Controls -->
         <div class="enrichment-panel">
           <div class="enrichment-file">
-            <button class="btn-small" id="btn-load-ignition-file">📂 Load File</button>
+            <button class="btn btn-sm btn-secondary" id="btn-load-ignition-file">Load File</button>
             <span class="enrichment-file-name" id="enrichment-file-name">No file loaded</span>
           </div>
           <div class="enrichment-divider"></div>
@@ -146,7 +190,7 @@
         <div class="output-panel" id="enrichment-output" style="margin-top: 20px;">
           <div class="output-header">
             <h4>Enrichment Log</h4>
-            <button class="btn-small" id="btn-clear-enrichment-output">Clear</button>
+            <button class="btn btn-sm btn-ghost" id="btn-clear-enrichment-output">Clear</button>
           </div>
           <pre class="output-content" id="enrichment-log"></pre>
         </div>
@@ -157,12 +201,12 @@
           
           <div class="resource-section" id="section-tags">
             <div class="section-header">
-              <span class="section-icon">🏷️</span>
+              <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg></span>
               <span class="section-title">Tags</span>
               <span class="section-count" id="tag-count">(loading...)</span>
               <div class="enrichment-controls">
                 <span class="enrichment-status" id="tag-enrichment-status"></span>
-                <button class="btn-small" id="btn-enrich-tags">▶ Enrich Batch</button>
+                <button class="btn btn-sm btn-secondary" id="btn-enrich-tags">Enrich</button>
               </div>
             </div>
             <div class="resource-list" id="tag-list"></div>
@@ -170,12 +214,12 @@
           
           <div class="resource-section" id="section-udts">
             <div class="section-header">
-              <span class="section-icon">📦</span>
+              <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
               <span class="section-title">UDT Definitions</span>
               <span class="section-count" id="udt-count">(loading...)</span>
               <div class="enrichment-controls">
                 <span class="enrichment-status" id="udt-enrichment-status"></span>
-                <button class="btn-small" id="btn-enrich-udts">▶ Enrich Batch</button>
+                <button class="btn btn-sm btn-secondary" id="btn-enrich-udts">Enrich</button>
               </div>
             </div>
             <div class="resource-list" id="udt-list"></div>
@@ -183,12 +227,12 @@
           
           <div class="resource-section" id="section-aois">
             <div class="section-header">
-              <span class="section-icon">⚙️</span>
+              <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
               <span class="section-title">AOIs (PLC)</span>
               <span class="section-count" id="aoi-count">(loading...)</span>
               <div class="enrichment-controls">
                 <span class="enrichment-status" id="aoi-enrichment-status"></span>
-                <button class="btn-small" id="btn-enrich-aois">▶ Enrich Batch</button>
+                <button class="btn btn-sm btn-secondary" id="btn-enrich-aois">Enrich</button>
               </div>
             </div>
             <div class="resource-list" id="aoi-list"></div>
@@ -205,12 +249,12 @@
             
             <div class="resource-section section-views">
               <div class="section-header">
-                <span class="section-icon">🖥️</span>
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>
                 <span class="section-title">Views</span>
                 <span class="section-count">(loading...)</span>
                 <div class="enrichment-controls">
                   <span class="enrichment-status"></span>
-                  <button class="btn-small btn-enrich-views">▶ Enrich Batch</button>
+                  <button class="btn btn-sm btn-secondary btn-enrich-views">Enrich</button>
                 </div>
               </div>
               <div class="resource-list view-list"></div>
@@ -218,12 +262,12 @@
             
             <div class="resource-section section-scripts">
               <div class="section-header">
-                <span class="section-icon">📜</span>
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span>
                 <span class="section-title">Scripts</span>
                 <span class="section-count">(loading...)</span>
                 <div class="enrichment-controls">
                   <span class="enrichment-status"></span>
-                  <button class="btn-small btn-enrich-scripts">▶ Enrich Batch</button>
+                  <button class="btn btn-sm btn-secondary btn-enrich-scripts">Enrich</button>
                 </div>
               </div>
               <div class="resource-list script-list"></div>
@@ -231,12 +275,12 @@
             
             <div class="resource-section section-queries">
               <div class="section-header">
-                <span class="section-icon">🔍</span>
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
                 <span class="section-title">Named Queries</span>
                 <span class="section-count">(loading...)</span>
                 <div class="enrichment-controls">
                   <span class="enrichment-status"></span>
-                  <button class="btn-small btn-enrich-queries">▶ Enrich Batch</button>
+                  <button class="btn btn-sm btn-secondary btn-enrich-queries">Enrich</button>
                 </div>
               </div>
               <div class="resource-list query-list"></div>
@@ -244,12 +288,12 @@
             
             <div class="resource-section section-events">
               <div class="section-header">
-                <span class="section-icon">⚡</span>
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>
                 <span class="section-title">Gateway Events</span>
                 <span class="section-count">(loading...)</span>
                 <div class="enrichment-controls">
                   <span class="enrichment-status"></span>
-                  <button class="btn-small btn-enrich-events">▶ Enrich Batch</button>
+                  <button class="btn btn-sm btn-secondary btn-enrich-events">Enrich</button>
                 </div>
               </div>
               <div class="resource-list event-list"></div>
@@ -257,12 +301,12 @@
             
             <div class="resource-section section-components">
               <div class="section-header">
-                <span class="section-icon">🧩</span>
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
                 <span class="section-title">View Components</span>
                 <span class="section-count">(loading...)</span>
                 <div class="enrichment-controls">
                   <span class="enrichment-status"></span>
-                  <button class="btn-small btn-enrich-components">▶ Enrich Batch</button>
+                  <button class="btn btn-sm btn-secondary btn-enrich-components">Enrich</button>
                 </div>
               </div>
               <div class="resource-list component-list"></div>
@@ -282,7 +326,7 @@
           <div class="chat-messages" id="chat-messages">
             <div class="message assistant">
               <div class="message-content">
-                <p>👋 Hi! I'm your PLC/SCADA troubleshooting assistant. Describe your problem and I'll help diagnose it.</p>
+                <p>I'm your PLC/SCADA troubleshooting assistant. Describe your problem and I'll help diagnose it.</p>
                 <p class="examples">Try asking things like:</p>
                 <ul>
                   <li>"The motor won't start"</li>
@@ -295,17 +339,18 @@
           </div>
           
           <div class="chat-input-container">
-            <button class="btn-small" id="btn-clear-chat" title="Clear conversation">🗑️ Clear</button>
-            <button class="btn-small" id="btn-show-graph" title="Show related graph">🕸️ Graph</button>
+            <button class="btn btn-icon btn-ghost" id="btn-clear-chat" title="Clear conversation">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+            <button class="btn btn-icon btn-ghost" id="btn-show-graph" title="Show related graph">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+            </button>
             <input type="text" 
                    id="chat-input" 
                    class="chat-input" 
                    placeholder="Describe your problem..."
                    autocomplete="off">
-            <button class="btn primary" id="btn-send">
-              <span>Send</span>
-              <span class="icon">→</span>
-            </button>
+            <button class="btn btn-primary" id="btn-send">Send</button>
           </div>
         </div>
       </section>
@@ -313,52 +358,56 @@
       <!-- Database Tab -->
       <section class="tab-content" id="tab-database">
         <header class="tab-header">
-          <h2>Database Management</h2>
+          <h2>Database</h2>
           <p>Manage the Neo4j ontology database</p>
         </header>
         
         <div class="cards">
           <div class="card">
-            <div class="card-icon">📈</div>
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+              </svg>
+            </div>
             <h3>Statistics</h3>
             <p>View current database contents</p>
-            <button class="btn secondary" id="btn-get-stats">
-              Refresh Stats
-            </button>
+            <button class="btn btn-secondary" id="btn-get-stats">Refresh Stats</button>
             <pre class="stats-display" id="stats-display">Click "Refresh Stats" to load...</pre>
           </div>
           
           <div class="card">
-            <div class="card-icon">💾</div>
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+              </svg>
+            </div>
             <h3>Backup & Restore</h3>
             <p>Save or load the database to/from a file</p>
-            <button class="btn primary" id="btn-save-db">
-              Save Database
-            </button>
-            <button class="btn secondary" id="btn-load-db">
-              Load Database
-            </button>
+            <button class="btn btn-primary" id="btn-save-db">Save</button>
+            <button class="btn btn-secondary" id="btn-load-db">Load</button>
           </div>
           
           <div class="card">
-            <div class="card-icon">🌐</div>
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+              </svg>
+            </div>
             <h3>Visualization</h3>
             <p>Generate interactive graph visualization</p>
-            <button class="btn secondary" id="btn-generate-viz">
-              Generate HTML View
-            </button>
+            <button class="btn btn-secondary" id="btn-generate-viz">Generate HTML</button>
           </div>
           
           <div class="card danger">
-            <div class="card-icon">⚠️</div>
-            <h3>Clear Database</h3>
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+            </div>
+            <h3>Danger Zone</h3>
             <p>Remove all data from the ontology database</p>
-            <button class="btn danger" id="btn-clear-db">
-              Clear All Data
-            </button>
-            <button class="btn secondary" id="btn-init-db">
-              Initialize Schema
-            </button>
+            <button class="btn btn-danger" id="btn-clear-db">Clear All</button>
+            <button class="btn btn-secondary" id="btn-init-db">Init Schema</button>
           </div>
         </div>
       </section>
@@ -373,25 +422,30 @@
         <div class="graph-layout">
           <!-- Left Sidebar: Pending Changes -->
           <aside class="graph-sidebar graph-sidebar-left" id="graph-changes-panel">
-            <div class="sidebar-section">
-              <h4>Pending Changes</h4>
-              <div class="pending-changes-summary" id="pending-changes-summary">
-                <p class="no-changes">No pending changes</p>
-              </div>
-              <div class="pending-changes-list" id="pending-changes-list"></div>
-              <div class="pending-changes-actions">
-                <button class="btn primary" id="btn-apply-changes" disabled>Apply All</button>
-                <button class="btn secondary" id="btn-discard-changes" disabled>Discard</button>
+            <div class="sidebar-section-collapsible" id="pending-changes-section">
+              <button class="section-trigger" onclick="this.parentElement.classList.toggle('collapsed')">
+                <span>Pending Changes</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="section-body">
+                <div class="pending-changes-summary" id="pending-changes-summary">
+                  <p class="no-changes text-muted text-sm">No pending changes</p>
+                </div>
+                <div class="pending-changes-list" id="pending-changes-list"></div>
+                <div class="pending-changes-actions">
+                  <button class="btn btn-sm btn-primary" id="btn-apply-changes" disabled>Apply All</button>
+                  <button class="btn btn-sm btn-secondary" id="btn-discard-changes" disabled>Discard</button>
+                </div>
               </div>
             </div>
           </aside>
           
           <!-- Center: Graph Canvas -->
           <div class="graph-main">
-            <div class="graph-toolbar">
+            <div class="toolbar">
               <div class="toolbar-group">
-                <input type="text" id="graph-search" class="graph-search" placeholder="Search nodes...">
-                <select id="graph-filter" class="graph-filter">
+                <input type="text" id="graph-search" class="input input-sm" style="width: 180px;" placeholder="Search nodes...">
+                <select id="graph-filter" class="input input-sm" style="width: 130px;">
                   <option value="all">All Types</option>
                   <option value="plc">PLC Layer</option>
                   <option value="scada">SCADA Layer</option>
@@ -400,17 +454,31 @@
                   <option value="flows">Flows</option>
                 </select>
               </div>
+              <div class="toolbar-separator"></div>
               <div class="toolbar-group">
-                <button class="btn-small" id="btn-layout-force" title="Force-directed layout">Force</button>
-                <button class="btn-small active" id="btn-layout-hierarchical" title="Hierarchical layout">Hierarchical</button>
+                <div class="segmented-control">
+                  <button class="segmented-control-item" id="btn-layout-force" title="Force-directed layout">Force</button>
+                  <button class="segmented-control-item active" id="btn-layout-hierarchical" title="Hierarchical layout">Hierarchical</button>
+                </div>
               </div>
+              <div class="toolbar-separator"></div>
               <div class="toolbar-group">
-                <button class="btn-small" id="btn-zoom-in" title="Zoom in">+</button>
-                <button class="btn-small" id="btn-zoom-out" title="Zoom out">−</button>
-                <button class="btn-small" id="btn-fit" title="Fit to view">⊡</button>
+                <button class="btn btn-sm btn-ghost btn-icon" id="btn-zoom-in" title="Zoom in">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                </button>
+                <button class="btn btn-sm btn-ghost btn-icon" id="btn-zoom-out" title="Zoom out">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                </button>
+                <button class="btn btn-sm btn-ghost btn-icon" id="btn-fit" title="Fit to view">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+                </button>
               </div>
+              <div class="toolbar-separator"></div>
               <div class="toolbar-group">
-                <button class="btn-small" id="btn-refresh-graph" title="Reload graph">↻ Refresh</button>
+                <button class="btn btn-sm btn-secondary" id="btn-refresh-graph" title="Reload graph">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                  Refresh
+                </button>
               </div>
             </div>
             
@@ -420,19 +488,68 @@
                 <div class="loading-spinner"></div>
                 <p>Loading graph...</p>
               </div>
+              
+              <!-- Color Legend - Hover to expand -->
+              <div class="graph-legend" id="graph-legend">
+                <div class="legend-header">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+                  Legend
+                </div>
+                <div class="legend-body">
+                  <div class="legend-group">
+                    <div class="legend-group-title">PLC Layer</div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: var(--color-node-plc);"></span>
+                      <span class="legend-label">AOI / Tag</span>
+                    </div>
+                  </div>
+                  <div class="legend-group">
+                    <div class="legend-group-title">SCADA / HMI</div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: var(--color-node-scada);"></span>
+                      <span class="legend-label">UDT / View / Script</span>
+                    </div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: var(--color-node-project);"></span>
+                      <span class="legend-label">Project</span>
+                    </div>
+                  </div>
+                  <div class="legend-group">
+                    <div class="legend-group-title">MES</div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: var(--color-node-mes);"></span>
+                      <span class="legend-label">Material / Batch / Op</span>
+                    </div>
+                  </div>
+                  <div class="legend-group">
+                    <div class="legend-group-title">Troubleshooting</div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: var(--color-node-fault);"></span>
+                      <span class="legend-label">Fault / Symptom</span>
+                    </div>
+                  </div>
+                  <div class="legend-group">
+                    <div class="legend-group-title">Other</div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: var(--color-node-default);"></span>
+                      <span class="legend-label">Other Nodes</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
             
             <!-- AI Assistant Drawer -->
             <div class="ai-drawer" id="ai-drawer">
               <div class="ai-drawer-header">
                 <span>AI Relationship Assistant</span>
-                <button class="btn-small" id="btn-toggle-ai-drawer">▼</button>
+                <button class="btn btn-sm btn-ghost" id="btn-toggle-ai-drawer">▼</button>
               </div>
               <div class="ai-drawer-content" id="ai-drawer-content">
                 <div class="ai-input-row">
                   <input type="text" id="ai-relationship-input" 
                          placeholder="Describe a relationship (e.g., 'Motor_001 is controlled by MotorStarter AOI')">
-                  <button class="btn primary" id="btn-ai-propose">Propose</button>
+                  <button class="btn btn-primary" id="btn-ai-propose">Propose</button>
                 </div>
                 <div class="ai-proposals" id="ai-proposals">
                   <!-- AI proposals appear here -->
@@ -441,16 +558,16 @@
             </div>
           </div>
           
-          <!-- Right Sidebar: Node Details -->
+          <!-- Right Sidebar: Inspector -->
           <aside class="graph-sidebar graph-sidebar-right" id="graph-details-panel">
             <div class="sidebar-section">
-              <h4>Details</h4>
+              <h4>Inspector</h4>
               <div class="node-details" id="node-details">
-                <p class="no-selection">Select a node or edge to view details</p>
+                <p class="no-selection text-muted text-sm">Select a node or edge to view details</p>
               </div>
             </div>
             <div class="sidebar-section" id="edit-section" style="display: none;">
-              <h4>Edit Properties</h4>
+              <h4>Properties</h4>
               <div class="edit-form" id="edit-form">
                 <div class="form-group">
                   <label>Name</label>
@@ -468,12 +585,12 @@
                   <div class="add-prop-row">
                     <input type="text" id="new-prop-key" placeholder="Key">
                     <input type="text" id="new-prop-value" placeholder="Value">
-                    <button class="btn-small" id="btn-add-prop">+</button>
+                    <button class="btn btn-sm btn-secondary" id="btn-add-prop">+</button>
                   </div>
                 </div>
                 <div class="form-actions">
-                  <button class="btn primary btn-small" id="btn-save-node">Save</button>
-                  <button class="btn danger btn-small" id="btn-delete-selected">Delete</button>
+                  <button class="btn btn-sm btn-primary" id="btn-save-node">Save</button>
+                  <button class="btn btn-sm btn-danger" id="btn-delete-selected">Delete</button>
                 </div>
               </div>
             </div>
@@ -518,8 +635,8 @@
                   <input type="text" id="rel-target" readonly placeholder="Shift+click a node...">
                 </div>
                 <div class="form-actions">
-                  <button class="btn primary btn-small" id="btn-add-relationship">Add Relationship</button>
-                  <button class="btn secondary btn-small" id="btn-clear-relationship">Clear</button>
+                  <button class="btn btn-sm btn-primary" id="btn-add-relationship">Add Relationship</button>
+                  <button class="btn btn-sm btn-secondary" id="btn-clear-relationship">Clear</button>
                 </div>
               </div>
             </div>
@@ -550,10 +667,244 @@
                   <label>Name</label>
                   <input type="text" id="new-node-name" placeholder="Enter name...">
                 </div>
-                <button class="btn secondary" id="btn-add-node">Add Node</button>
+                <button class="btn btn-secondary" id="btn-add-node">Add Node</button>
               </div>
             </div>
           </aside>
+        </div>
+      </section>
+
+      <!-- UI Gallery Tab -->
+      <section class="tab-content" id="tab-gallery">
+        <header class="tab-header">
+          <h2>UI Gallery</h2>
+          <p>Design system reference — all primitives and their states</p>
+        </header>
+        
+        <div class="gallery-grid">
+          <!-- Colors -->
+          <div class="gallery-section">
+            <h3>Color Tokens</h3>
+            <div class="gallery-row">
+              <span class="gallery-label">Backgrounds</span>
+              <div class="gallery-colors">
+                <div class="color-swatch" style="background: var(--color-bg);" data-name="bg"></div>
+                <div class="color-swatch" style="background: var(--color-bg-panel);" data-name="panel"></div>
+                <div class="color-swatch" style="background: var(--color-bg-panel-2);" data-name="panel-2"></div>
+                <div class="color-swatch" style="background: var(--color-bg-elevated);" data-name="elevated"></div>
+              </div>
+            </div>
+            <div class="gallery-row">
+              <span class="gallery-label">Accent</span>
+              <div class="gallery-colors">
+                <div class="color-swatch" style="background: var(--color-accent);" data-name="accent"></div>
+                <div class="color-swatch" style="background: var(--color-accent-dim);" data-name="dim"></div>
+              </div>
+            </div>
+            <div class="gallery-row">
+              <span class="gallery-label">Semantic</span>
+              <div class="gallery-colors">
+                <div class="color-swatch" style="background: var(--color-success);" data-name="success"></div>
+                <div class="color-swatch" style="background: var(--color-warning);" data-name="warning"></div>
+                <div class="color-swatch" style="background: var(--color-danger);" data-name="danger"></div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Buttons -->
+          <div class="gallery-section">
+            <h3>Buttons</h3>
+            <div class="gallery-row">
+              <span class="gallery-label">Primary</span>
+              <button class="btn btn-primary">Primary</button>
+              <button class="btn btn-primary" disabled>Disabled</button>
+            </div>
+            <div class="gallery-row">
+              <span class="gallery-label">Secondary</span>
+              <button class="btn btn-secondary">Secondary</button>
+              <button class="btn btn-secondary" disabled>Disabled</button>
+            </div>
+            <div class="gallery-row">
+              <span class="gallery-label">Ghost</span>
+              <button class="btn btn-ghost">Ghost</button>
+            </div>
+            <div class="gallery-row">
+              <span class="gallery-label">Danger</span>
+              <button class="btn btn-danger">Danger</button>
+            </div>
+            <div class="gallery-row">
+              <span class="gallery-label">Small</span>
+              <button class="btn btn-sm btn-secondary">Small</button>
+              <button class="btn btn-sm btn-primary">Primary SM</button>
+              <button class="btn btn-sm btn-secondary active">Active</button>
+            </div>
+            <div class="gallery-row">
+              <span class="gallery-label">Icon</span>
+              <button class="btn btn-icon btn-secondary">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+              <button class="btn btn-icon btn-ghost">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              </button>
+            </div>
+          </div>
+          
+          <!-- Inputs -->
+          <div class="gallery-section">
+            <h3>Inputs</h3>
+            <div class="gallery-row">
+              <input class="input" type="text" placeholder="Default input">
+            </div>
+            <div class="gallery-row">
+              <input class="input input-sm" type="text" placeholder="Small input">
+            </div>
+            <div class="gallery-row">
+              <select class="input">
+                <option>Select option</option>
+                <option>Option A</option>
+                <option>Option B</option>
+              </select>
+            </div>
+            <div class="gallery-row">
+              <input class="input input-mono" type="text" placeholder="Monospace input" value="code-style">
+            </div>
+          </div>
+          
+          <!-- Segmented Control -->
+          <div class="gallery-section">
+            <h3>Segmented Control</h3>
+            <div class="gallery-row">
+              <div class="segmented-control">
+                <button class="segmented-control-item active">Force</button>
+                <button class="segmented-control-item">Hierarchical</button>
+              </div>
+            </div>
+            <div class="gallery-row">
+              <div class="segmented-control">
+                <button class="segmented-control-item">All</button>
+                <button class="segmented-control-item active">PLC</button>
+                <button class="segmented-control-item">SCADA</button>
+                <button class="segmented-control-item">MES</button>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Badges -->
+          <div class="gallery-section">
+            <h3>Badges</h3>
+            <div class="gallery-row">
+              <span class="badge">Default</span>
+              <span class="badge badge-accent">Accent</span>
+              <span class="badge badge-success">Success</span>
+              <span class="badge badge-warning">Warning</span>
+              <span class="badge badge-danger">Danger</span>
+            </div>
+          </div>
+          
+          <!-- Status Dots -->
+          <div class="gallery-section">
+            <h3>Status Indicators</h3>
+            <div class="gallery-row">
+              <span class="gallery-label">Dots</span>
+              <span class="status-dot"></span>
+              <span class="status-dot status-dot-connected"></span>
+              <span class="status-dot status-dot-error"></span>
+            </div>
+          </div>
+          
+          <!-- Panel -->
+          <div class="gallery-section">
+            <h3>Panel</h3>
+            <div class="panel" style="margin-bottom: var(--space-3);">
+              <div class="panel-header">
+                <span class="panel-header-title">Panel Title</span>
+                <button class="btn btn-sm btn-ghost">Action</button>
+              </div>
+              <div class="panel-body">
+                Panel content goes here.
+              </div>
+            </div>
+          </div>
+          
+          <!-- Inspector Rows -->
+          <div class="gallery-section">
+            <h3>Inspector Rows</h3>
+            <div class="inspector-section">
+              <div class="inspector-section-title">Properties</div>
+              <div class="inspector-row">
+                <span class="inspector-label">Name</span>
+                <span class="inspector-value">Motor_001</span>
+              </div>
+              <div class="inspector-row">
+                <span class="inspector-label">Type</span>
+                <span class="inspector-value">AOI</span>
+              </div>
+              <div class="inspector-row">
+                <span class="inspector-label">Description</span>
+                <span class="inspector-value">Main conveyor motor controller</span>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Log Viewer -->
+          <div class="gallery-section">
+            <h3>Log Viewer</h3>
+            <div class="log-viewer">
+              <div class="log-viewer-header">
+                <span class="log-viewer-title">Output</span>
+                <button class="btn btn-sm btn-ghost">Clear</button>
+              </div>
+              <div class="log-viewer-content">Processing Motor_001...
+[INFO] Found 12 related tags
+[INFO] Analysis complete</div>
+            </div>
+          </div>
+          
+          <!-- Collapsible -->
+          <div class="gallery-section">
+            <h3>Collapsible</h3>
+            <div class="collapsible">
+              <button class="collapsible-trigger" onclick="this.parentElement.classList.toggle('open')">
+                Diagnostics / Trace
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="collapsible-content">
+                <code class="code-block">Query: MATCH (n:AOI) RETURN n LIMIT 10
+Execution time: 12ms</code>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Typography -->
+          <div class="gallery-section">
+            <h3>Typography</h3>
+            <div class="gallery-row" style="flex-direction: column; align-items: flex-start;">
+              <span class="text-xl font-semibold">Heading XL (20px)</span>
+              <span class="text-lg font-semibold">Heading LG (16px)</span>
+              <span class="text-md font-medium">Heading MD (14px)</span>
+              <span class="text-base">Body Base (13px)</span>
+              <span class="text-sm text-secondary">Body SM Secondary (12px)</span>
+              <span class="text-xs text-muted">Caption XS Muted (11px)</span>
+              <span class="text-sm font-mono">Monospace (12px)</span>
+            </div>
+          </div>
+          
+          <!-- Spacing -->
+          <div class="gallery-section">
+            <h3>Spacing (8px Grid)</h3>
+            <div style="display: flex; align-items: flex-end; gap: var(--space-2);">
+              <div style="width: 4px; height: 4px; background: var(--color-accent);" title="space-1"></div>
+              <div style="width: 8px; height: 8px; background: var(--color-accent);" title="space-2"></div>
+              <div style="width: 12px; height: 12px; background: var(--color-accent);" title="space-3"></div>
+              <div style="width: 16px; height: 16px; background: var(--color-accent);" title="space-4"></div>
+              <div style="width: 20px; height: 20px; background: var(--color-accent);" title="space-5"></div>
+              <div style="width: 24px; height: 24px; background: var(--color-accent);" title="space-6"></div>
+              <div style="width: 32px; height: 32px; background: var(--color-accent);" title="space-8"></div>
+            </div>
+            <div class="text-xs text-muted" style="margin-top: var(--space-2);">
+              4 • 8 • 12 • 16 • 20 • 24 • 32
+            </div>
+          </div>
         </div>
       </section>
     </main>
@@ -577,17 +928,42 @@
       <div class="graph-modal-header">
         <h3 id="graph-modal-title">Graph: Node</h3>
         <div class="graph-modal-controls">
-          <button class="btn-small" id="modal-btn-layout-force">Force</button>
-          <button class="btn-small active" id="modal-btn-layout-hierarchical">Hierarchical</button>
-          <button class="btn-small" id="modal-btn-zoom-in">+</button>
-          <button class="btn-small" id="modal-btn-zoom-out">−</button>
-          <button class="btn-small" id="modal-btn-fit">⊡</button>
-          <button class="btn-small close-modal" id="btn-close-modal">✕</button>
+          <button class="btn btn-sm btn-secondary" id="modal-btn-layout-force">Force</button>
+          <button class="btn btn-sm btn-secondary active" id="modal-btn-layout-hierarchical">Hierarchical</button>
+          <button class="btn btn-sm btn-ghost btn-icon" id="modal-btn-zoom-in">+</button>
+          <button class="btn btn-sm btn-ghost btn-icon" id="modal-btn-zoom-out">−</button>
+          <button class="btn btn-sm btn-ghost btn-icon" id="modal-btn-fit">⊡</button>
+          <button class="btn btn-sm btn-danger" id="btn-close-modal">✕</button>
         </div>
       </div>
       <div class="graph-modal-body">
         <div class="graph-modal-canvas" id="graph-modal-canvas">
           <!-- Modal Cytoscape renders here -->
+          <!-- Modal Legend - Hover to expand -->
+          <div class="graph-legend graph-legend-modal">
+            <div class="legend-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+              Legend
+            </div>
+            <div class="legend-body">
+              <div class="legend-item">
+                <span class="legend-color" style="background: var(--color-node-plc);"></span>
+                <span class="legend-label">PLC (AOI/Tag)</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-color" style="background: var(--color-node-scada);"></span>
+                <span class="legend-label">SCADA (UDT/View)</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-color" style="background: var(--color-node-mes);"></span>
+                <span class="legend-label">MES</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-color" style="background: var(--color-node-fault);"></span>
+                <span class="legend-label">Troubleshooting</span>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="graph-modal-sidebar" id="graph-modal-sidebar">
           <div class="modal-node-details" id="modal-node-details">
@@ -596,8 +972,8 @@
         </div>
       </div>
       <div class="graph-modal-footer">
-        <button class="btn-small" id="btn-show-more">Show More Neighbors</button>
-        <button class="btn-small" id="btn-open-in-graph-tab">Open in Graph Tab</button>
+        <button class="btn btn-sm btn-secondary" id="btn-show-more">Show More Neighbors</button>
+        <button class="btn btn-sm btn-secondary" id="btn-open-in-graph-tab">Open in Graph Tab</button>
       </div>
     </div>
   </div>
