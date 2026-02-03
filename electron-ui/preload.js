@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('api', {
   // Ingestion
   ingestPLC: (filePath) => ipcRenderer.invoke('ingest-plc', filePath),
   ingestIgnition: (filePath) => ipcRenderer.invoke('ingest-ignition', filePath),
+  ingestWorkbench: (folderPath) => ipcRenderer.invoke('ingest-workbench', folderPath),
   
   // Analysis
   runUnified: () => ipcRenderer.invoke('run-unified'),

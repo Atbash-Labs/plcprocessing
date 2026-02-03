@@ -14,6 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from ignition_parser import IgnitionParser, IgnitionBackup, UDTDefinition
+from workbench_parser import WorkbenchParser
 from neo4j_ontology import OntologyGraph, get_ontology_graph
 from claude_client import ClaudeClient
 
@@ -605,12 +606,16 @@ class IncrementalAnalyzer:
                         break
                     # Check if full name ends with the key (suffix match)
                     # e.g., "ProveIT/Charts/GetEquipmentRunTimeByID" ends with "GetEquipmentRunTimeByID"
-                    if name_lower.endswith("/" + key_lower) or name_lower.endswith("\\" + key_lower):
+                    if name_lower.endswith("/" + key_lower) or name_lower.endswith(
+                        "\\" + key_lower
+                    ):
                         results[name] = {"purpose": value}
                         found = True
                         break
                 if not found:
-                    results[name] = {"error": f"No analysis returned by Claude (expected key: {name})"}
+                    results[name] = {
+                        "error": f"No analysis returned by Claude (expected key: {name})"
+                    }
 
         return results
 
@@ -1117,9 +1122,37 @@ def main():
             print("[ERROR] --input required for analyze command")
             return
 
-        # Parse backup
-        ignition_parser = IgnitionParser()
-        backup = ignition_parser.parse_file(args.input)
+        # Parse backup - auto-detect format (workbench vs baseline)
+        input_path = Path(args.input)
+
+        # Check if input is a directory (workbench backup folder)
+        if input_path.is_dir():
+            project_json = input_path / "project.json"
+            if project_json.exists():
+                print(f"[INFO] Detected workbench backup folder: {input_path}")
+                wb_parser = WorkbenchParser()
+                backup = wb_parser.parse_file(str(project_json))
+            else:
+                print(f"[ERROR] No project.json found in {input_path}")
+                return
+        else:
+            # Check if it's a workbench project.json
+            try:
+                import json
+
+                with open(args.input, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if WorkbenchParser.is_workbench_format(data):
+                    print(f"[INFO] Detected workbench format: {args.input}")
+                    wb_parser = WorkbenchParser()
+                    backup = wb_parser.parse_file(args.input)
+                else:
+                    # Standard baseline format
+                    ignition_parser = IgnitionParser()
+                    backup = ignition_parser.parse_file(args.input)
+            except Exception as e:
+                print(f"[ERROR] Failed to parse input file: {e}")
+                return
 
         proj_info = f" (project filter: {args.project})" if args.project else ""
         print(

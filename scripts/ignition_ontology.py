@@ -238,12 +238,12 @@ class IgnitionOntologyAnalyzer:
         if verbose:
             print(
                 f"[OK] Created {total_xrefs} cross-references: "
-                f"{xref_counts['script_to_script']} script→script, "
-                f"{xref_counts['script_to_query']} script→query, "
-                f"{xref_counts['view_to_query']} view→query, "
-                f"{xref_counts['view_to_script']} view→script, "
-                f"{xref_counts['event_to_query']} event→query, "
-                f"{xref_counts['event_to_script']} event→script",
+                f"{xref_counts['script_to_script']} script->script, "
+                f"{xref_counts['script_to_query']} script->query, "
+                f"{xref_counts['view_to_query']} view->query, "
+                f"{xref_counts['view_to_script']} view->script, "
+                f"{xref_counts['event_to_query']} event->query, "
+                f"{xref_counts['event_to_script']} event->script",
                 flush=True,
             )
 
@@ -455,7 +455,7 @@ class IgnitionOntologyAnalyzer:
     def _create_view_components(
         self, backup: IgnitionBackup, verbose: bool = False
     ) -> tuple:
-        """Create ViewComponent nodes from parsed windows and link to UDTs/Tags.
+        """Create ViewComponent nodes from parsed windows and link to UDTs/Tags/Queries.
 
         Returns:
             Tuple of (component_count, binding_count)
@@ -469,6 +469,16 @@ class IgnitionOntologyAnalyzer:
 
         # Build ScadaTag lookup for direct tag bindings
         tag_names = {tag.name for tag in backup.tags}
+
+        # Build NamedQuery lookup for query bindings
+        query_paths = set()
+        for query in backup.named_queries:
+            # Add various path formats for matching
+            if query.folder_path:
+                query_paths.add(f"{query.folder_path}/{query.name}")
+            query_paths.add(query.name)
+            if query.id:
+                query_paths.add(query.id)
 
         component_count = 0
         binding_count = 0
@@ -484,6 +494,8 @@ class IgnitionOntologyAnalyzer:
                 udt_names,
                 member_to_udt,
                 tag_names,
+                query_paths,
+                window.project,
                 verbose,
             )
             component_count += components_created
@@ -499,6 +511,8 @@ class IgnitionOntologyAnalyzer:
         udt_names: set,
         member_to_udt: dict,
         tag_names: set,
+        query_paths: set,
+        project: str,
         verbose: bool = False,
     ) -> tuple:
         """Recursively process UI components and create nodes.
@@ -531,9 +545,27 @@ class IgnitionOntologyAnalyzer:
             if success:
                 component_count += 1
 
-            # Process bindings to link component to UDTs or Tags
+            # Process bindings to link component to UDTs, Tags, or Queries
             for binding in comp.bindings:
-                # First try to resolve to a UDT
+                # Check if this is a query binding
+                if binding.binding_type == "query":
+                    # Link to NamedQuery
+                    query_path = binding.target
+                    bind_success = self.graph.create_query_usage(
+                        source_type="ViewComponent",
+                        source_name=f"{view_name}/{comp_path}",
+                        query_path=query_path,
+                        source_project=project or "",
+                    )
+                    if bind_success:
+                        binding_count += 1
+                        if verbose:
+                            print(
+                                f"[DEBUG] Component '{comp_path}' binds to Query '{query_path}' via {binding.property_path}"
+                            )
+                    continue
+
+                # First try to resolve to a UDT (for tag bindings)
                 udt_name = self._resolve_binding_to_udt(
                     binding.target, udt_names, member_to_udt
                 )
@@ -578,6 +610,8 @@ class IgnitionOntologyAnalyzer:
                     udt_names,
                     member_to_udt,
                     tag_names,
+                    query_paths,
+                    project,
                     verbose,
                 )
                 component_count += child_comps
@@ -763,11 +797,11 @@ class IgnitionOntologyAnalyzer:
         # - import pss
         import_from_pattern = re.compile(
             r"^\s*from\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)\s+import",
-            re.MULTILINE
+            re.MULTILINE,
         )
         import_pattern = re.compile(
             r"^\s*import\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)",
-            re.MULTILINE
+            re.MULTILINE,
         )
 
         # 1. Parse script library for cross-references
@@ -787,8 +821,10 @@ class IgnitionOntologyAnalyzer:
             module_matches = list(module_call_pattern.finditer(script.script_text))
             import_from_matches = list(import_from_pattern.finditer(script.script_text))
             import_matches = list(import_pattern.finditer(script.script_text))
-            
-            if verbose and (query_matches or module_matches or import_from_matches or import_matches):
+
+            if verbose and (
+                query_matches or module_matches or import_from_matches or import_matches
+            ):
                 print(
                     f"[DEBUG] Script '{script_name}': {len(query_matches)} query calls, "
                     f"{len(module_matches)} module calls, {len(import_from_matches) + len(import_matches)} imports",
@@ -854,17 +890,26 @@ class IgnitionOntologyAnalyzer:
                 import_path = match.group(1)
                 # Get the top-level module name
                 top_module = import_path.split(".")[0]
-                
+
                 if verbose:
                     print(
                         f"[DEBUG] Trying to link Script '{script_name}' → imports '{import_path}'",
                         flush=True,
                     )
-                
+
                 # Skip standard library imports
-                if top_module in ("system", "java", "os", "re", "json", "math", "datetime", "time"):
+                if top_module in (
+                    "system",
+                    "java",
+                    "os",
+                    "re",
+                    "json",
+                    "math",
+                    "datetime",
+                    "time",
+                ):
                     continue
-                
+
                 if top_module in script_modules:
                     if self.graph.create_script_call(
                         "Script",
@@ -883,16 +928,25 @@ class IgnitionOntologyAnalyzer:
             for match in import_matches:
                 import_path = match.group(1)
                 top_module = import_path.split(".")[0]
-                
+
                 if verbose:
                     print(
                         f"[DEBUG] Trying to link Script '{script_name}' → imports '{import_path}'",
                         flush=True,
                     )
-                
-                if top_module in ("system", "java", "os", "re", "json", "math", "datetime", "time"):
+
+                if top_module in (
+                    "system",
+                    "java",
+                    "os",
+                    "re",
+                    "json",
+                    "math",
+                    "datetime",
+                    "time",
+                ):
                     continue
-                
+
                 if top_module in script_modules:
                     if self.graph.create_script_call(
                         "Script",

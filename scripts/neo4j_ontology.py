@@ -1049,7 +1049,13 @@ class OntologyGraph:
             Dict with views, scripts, queries, events, components lists
         """
         with self.session() as session:
-            resources = {"views": [], "scripts": [], "queries": [], "events": [], "components": []}
+            resources = {
+                "views": [],
+                "scripts": [],
+                "queries": [],
+                "events": [],
+                "components": [],
+            }
 
             # Get views with component counts
             result = session.run(
@@ -1901,8 +1907,8 @@ class OntologyGraph:
         """Create a USES_QUERY relationship between an entity and a NamedQuery.
 
         Args:
-            source_type: Type of caller (Script, View, GatewayEvent)
-            source_name: Name of the calling entity
+            source_type: Type of caller (Script, View, GatewayEvent, ViewComponent)
+            source_name: Name of the calling entity. For ViewComponent, use format "view_name/component_path"
             query_path: Path of the named query (e.g., "GIS/GetAreaById")
             source_project: Project context for the source
 
@@ -1913,16 +1919,39 @@ class OntologyGraph:
             # Build source match based on type
             if source_type == "View":
                 source_match = "MATCH (s:View {name: $source})"
+                params = {"source": source_name}
             elif source_type == "GatewayEvent":
                 source_match = "MATCH (s:GatewayEvent {name: $source})"
+                params = {"source": source_name}
             elif source_type == "ViewComponent":
-                source_match = "MATCH (s:ViewComponent {path: $source})"
+                # source_name format: "view_name/component_path" e.g. "ProveIT/Run Data/root/areaLineDropdown"
+                # ViewComponent is matched by view + path
+                # Split to get view_name and component_path
+                parts = source_name.split("/", 2)  # Split into at most 3 parts
+                if len(parts) >= 3:
+                    # Format: project/viewname/component_path
+                    view_name = f"{parts[0]}/{parts[1]}"
+                    comp_path = parts[2] if len(parts) > 2 else ""
+                elif len(parts) == 2:
+                    view_name = parts[0]
+                    comp_path = parts[1]
+                else:
+                    view_name = source_name
+                    comp_path = ""
+                source_match = (
+                    "MATCH (s:ViewComponent {view: $view_name, path: $comp_path})"
+                )
+                params = {"view_name": view_name, "comp_path": comp_path}
             else:
                 source_match = "MATCH (s:Script {name: $source})"
+                params = {"source": source_name}
 
             # Try to match query by path or name
             # Query names in Neo4j are project-qualified: "ProveIT/Charts/GetEquipmentRunTimeByID"
             # Query path from code can be: "Charts/GetEquipmentRunTimeByID" or just "GetEquipmentRunTimeByID"
+            params["query_path"] = query_path
+            params["source_project"] = source_project
+
             result = session.run(
                 f"""
                 {source_match}
@@ -1938,11 +1967,7 @@ class OntologyGraph:
                     r.query_path = $query_path
                 RETURN s.name as source, q.name as query
             """,
-                {
-                    "source": source_name,
-                    "query_path": query_path,
-                    "source_project": source_project,
-                },
+                params,
             )
             return result.single() is not None
 
@@ -2145,8 +2170,17 @@ class OntologyGraph:
         Returns:
             List of dicts with 'name' and other relevant properties
         """
-        valid_types = {"AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag",
-                       "Script", "NamedQuery", "GatewayEvent"}
+        valid_types = {
+            "AOI",
+            "UDT",
+            "View",
+            "Equipment",
+            "ViewComponent",
+            "ScadaTag",
+            "Script",
+            "NamedQuery",
+            "GatewayEvent",
+        }
         if item_type not in valid_types:
             raise ValueError(f"item_type must be one of {valid_types}")
 
@@ -2209,8 +2243,17 @@ class OntologyGraph:
         Returns:
             True if item was found and updated
         """
-        valid_types = {"AOI", "UDT", "View", "Equipment", "ViewComponent", "ScadaTag",
-                       "Script", "NamedQuery", "GatewayEvent"}
+        valid_types = {
+            "AOI",
+            "UDT",
+            "View",
+            "Equipment",
+            "ViewComponent",
+            "ScadaTag",
+            "Script",
+            "NamedQuery",
+            "GatewayEvent",
+        }
         valid_statuses = {"pending", "in_progress", "complete", "review"}
 
         if item_type not in valid_types:
@@ -2529,12 +2572,12 @@ class OntologyGraph:
 
     def export_full_database(self) -> Dict:
         """Export the entire database to a serializable dict for backup.
-        
+
         Returns:
             Dict with nodes, relationships, and metadata
         """
         from datetime import datetime
-        
+
         with self.session() as session:
             # Export all nodes with their labels and properties
             nodes_result = session.run(
@@ -2548,12 +2591,14 @@ class OntologyGraph:
             for idx, record in enumerate(nodes_result):
                 export_id = str(idx)
                 node_id_map[record["id"]] = export_id
-                nodes.append({
-                    "id": export_id,
-                    "labels": list(record["labels"]),
-                    "properties": self._serialize_properties(dict(record["props"]))
-                })
-            
+                nodes.append(
+                    {
+                        "id": export_id,
+                        "labels": list(record["labels"]),
+                        "properties": self._serialize_properties(dict(record["props"])),
+                    }
+                )
+
             # Export all relationships
             rels_result = session.run(
                 """
@@ -2567,68 +2612,71 @@ class OntologyGraph:
                 source_id = node_id_map.get(record["source"])
                 target_id = node_id_map.get(record["target"])
                 if source_id is not None and target_id is not None:
-                    relationships.append({
-                        "source": source_id,
-                        "target": target_id,
-                        "type": record["type"],
-                        "properties": self._serialize_properties(dict(record["props"]))
-                    })
-            
+                    relationships.append(
+                        {
+                            "source": source_id,
+                            "target": target_id,
+                            "type": record["type"],
+                            "properties": self._serialize_properties(
+                                dict(record["props"])
+                            ),
+                        }
+                    )
+
             return {
                 "version": "1.0",
                 "type": "neo4j_backup",
                 "metadata": {
                     "exported_at": datetime.now().isoformat(),
                     "node_count": len(nodes),
-                    "relationship_count": len(relationships)
+                    "relationship_count": len(relationships),
                 },
                 "nodes": nodes,
-                "relationships": relationships
+                "relationships": relationships,
             }
-    
+
     def _serialize_properties(self, props: Dict) -> Dict:
         """Convert Neo4j properties to JSON-serializable format."""
         from datetime import datetime as dt
-        
+
         result = {}
         for key, value in props.items():
-            if hasattr(value, 'isoformat'):  # datetime objects
+            if hasattr(value, "isoformat"):  # datetime objects
                 result[key] = value.isoformat()
             elif isinstance(value, (list, tuple)):
                 result[key] = [
-                    v.isoformat() if hasattr(v, 'isoformat') else v 
-                    for v in value
+                    v.isoformat() if hasattr(v, "isoformat") else v for v in value
                 ]
             else:
                 result[key] = value
         return result
-    
+
     def import_full_database(self, data: Dict, clear_first: bool = True) -> Dict:
         """Import a full database backup.
-        
+
         Args:
             data: The backup data from export_full_database
             clear_first: If True, clear the database before importing
-            
+
         Returns:
             Dict with import statistics
         """
         if data.get("type") != "neo4j_backup":
             raise ValueError("Invalid backup format: expected 'neo4j_backup' type")
-        
+
         with self.session() as session:
             if clear_first:
                 session.run("MATCH (n) DETACH DELETE n")
-            
+
             # Create nodes - build a map from export ID to new Neo4j ID
             id_map = {}
             nodes_created = 0
-            
+
             for node in data.get("nodes", []):
                 export_id = node["id"]
                 labels = ":".join(node["labels"])
                 props = node.get("properties", {})
-                
+
                 # Create node with labels and properties
                 result = session.run(
                     f"""
@@ -2636,23 +2684,23 @@ class OntologyGraph:
                     SET n = $props
                     RETURN elementId(n) as id
                     """,
-                    {"props": props}
+                    {"props": props},
                 )
                 record = result.single()
                 if record:
                     id_map[export_id] = record["id"]
                     nodes_created += 1
-            
+
             # Create relationships
             rels_created = 0
             for rel in data.get("relationships", []):
                 source_id = id_map.get(rel["source"])
                 target_id = id_map.get(rel["target"])
-                
+
                 if source_id and target_id:
                     rel_type = rel["type"]
                     props = rel.get("properties", {})
-                    
+
                     session.run(
                         f"""
                         MATCH (a), (b)
@@ -2660,16 +2708,16 @@ class OntologyGraph:
                         CREATE (a)-[r:{rel_type}]->(b)
                         SET r = $props
                         """,
-                        {"source": source_id, "target": target_id, "props": props}
+                        {"source": source_id, "target": target_id, "props": props},
                     )
                     rels_created += 1
-            
+
             # Recreate indexes
             self.create_indexes()
-            
+
             return {
                 "nodes_created": nodes_created,
-                "relationships_created": rels_created
+                "relationships_created": rels_created,
             }
 
     def get_graph_for_visualization(self) -> Dict:
@@ -2983,20 +3031,20 @@ def main():
                 return
             import json
             from pathlib import Path
-            
+
             if not Path(args.file).exists():
                 print(f"[ERROR] File not found: {args.file}")
                 return
-            
+
             with open(args.file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            
+
             if not args.yes:
                 confirm = input("This will REPLACE all data. Type 'yes' to confirm: ")
                 if confirm.lower() != "yes":
                     print("[CANCELLED]")
                     return
-            
+
             stats = graph.import_full_database(data, clear_first=True)
             print(f"[OK] Loaded database from {args.file}")
             print(f"  - Nodes created: {stats['nodes_created']}")
@@ -3033,8 +3081,10 @@ def main():
                 print("\nProjects:")
                 print("-" * 40)
                 for p in projects:
-                    parent_info = f" (inherits from {p['parent']})" if p.get('parent') else ""
-                    inheritable = " [inheritable]" if p.get('inheritable') else ""
+                    parent_info = (
+                        f" (inherits from {p['parent']})" if p.get("parent") else ""
+                    )
+                    inheritable = " [inheritable]" if p.get("inheritable") else ""
                     print(f"  {p['name']}{parent_info}{inheritable}")
 
         elif args.command == "gateway-resources":

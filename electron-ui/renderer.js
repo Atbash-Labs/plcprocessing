@@ -1352,6 +1352,50 @@ document.getElementById('btn-ingest-ignition').addEventListener('click', async (
   updateStats();
 });
 
+// Workbench Ingest - for Axilon Workbench project.json exports
+document.getElementById('btn-ingest-workbench').addEventListener('click', async () => {
+  const folderPath = await window.api.selectDirectory();
+  
+  if (!folderPath) return;
+  
+  // Track the workbench folder for enrichment (use project.json path)
+  const projectJsonPath = folderPath + (folderPath.endsWith('/') || folderPath.endsWith('\\') ? '' : '/') + 'project.json';
+  browseState.lastIgnitionFile = projectJsonPath;
+  
+  // Update the enrichment file display
+  const fileNameSpan = document.getElementById('enrichment-file-name');
+  if (fileNameSpan) {
+    fileNameSpan.textContent = 'project.json (workbench)';
+    fileNameSpan.classList.add('loaded');
+    fileNameSpan.title = projectJsonPath;
+  }
+  
+  // Don't use loading overlay - we want to see streaming output
+  appendOutput(`\n[INGEST WORKBENCH] ${folderPath}\n`, false);
+  appendOutput(`[INFO] Using --skip-ai for initial ingestion (use Browse tab to enrich)\n`);
+  
+  try {
+    const result = await window.api.ingestWorkbench(folderPath);
+    if (result.success) {
+      appendOutput('\n[OK] Workbench ingestion complete!\n');
+      
+      // Load projects and show discovery panel
+      await loadProjects();
+      
+      if (browseState.projects.length > 0) {
+        document.getElementById('project-discovery')?.classList.remove('hidden');
+        appendOutput(`[INFO] Discovered ${browseState.projects.length} projects - see Browse tab\n`);
+      }
+    } else {
+      appendOutput(`\n[ERROR] ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`\n[ERROR] ${error.message}\n`);
+  }
+  
+  updateStats();
+});
+
 // ============================================
 // Streaming Event Listeners
 // ============================================

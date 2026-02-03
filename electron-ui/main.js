@@ -192,6 +192,26 @@ ipcMain.handle('ingest-ignition', async (event, options) => {
   }
 });
 
+// Ingest Workbench backup (project.json format from Axilon Workbench)
+ipcMain.handle('ingest-workbench', async (event, folderPath) => {
+  const streamId = `ingest-workbench-${Date.now()}`;
+  try {
+    // Workbench parser takes the project.json path (or folder containing it)
+    let projectJsonPath = folderPath;
+    if (!folderPath.endsWith('.json')) {
+      projectJsonPath = path.join(folderPath, 'project.json');
+    }
+    
+    const output = await runPythonScript('workbench_ingest.py', [projectJsonPath, '-v'], {
+      streaming: true,
+      streamId
+    });
+    return { success: true, output, streamId, folderPath };
+  } catch (error) {
+    return { success: false, error: error.message, streamId };
+  }
+});
+
 // Run unified analysis (with streaming)
 ipcMain.handle('run-unified', async () => {
   const streamId = `unified-${Date.now()}`;
