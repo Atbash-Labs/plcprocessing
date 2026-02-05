@@ -26,21 +26,18 @@ class UnifiedOntologyMerger:
         api_key: Optional[str] = None,
         model: str = "claude-sonnet-4-5-20250929",
         graph: Optional[OntologyGraph] = None,
-        client: Optional[ClaudeClient] = None
+        client: Optional[ClaudeClient] = None,
     ):
         """Initialize with Anthropic API and Neo4j connection."""
         load_dotenv()
-        
+
         # Use provided client or create one
         if client:
             self._client = client
             self._owns_client = False
         else:
             self._client = ClaudeClient(
-                api_key=api_key,
-                model=model,
-                graph=graph,
-                enable_tools=True
+                api_key=api_key, model=model, graph=graph, enable_tools=True
             )
             self._owns_client = True
 
@@ -62,48 +59,49 @@ class UnifiedOntologyMerger:
         """
         # Get all AOIs (PLC)
         aois = self.graph.get_all_aois()
-        
+
         # Get visualization data (includes UDTs, Equipment, Views)
         viz_data = self.graph.get_graph_for_visualization()
-        
+
         if verbose:
             print(f"[INFO] Found {len(aois)} AOIs in Neo4j")
             print(f"[INFO] Found {len(viz_data['nodes'])} total nodes")
-        
+
         # Build context for LLM
         context = self._build_merge_context_from_neo4j(aois, viz_data)
-        
+
         # Query LLM for unified analysis with tool support
         unified_analysis = self._query_merge_llm(context, verbose)
-        
+
         # Store unified analysis in Neo4j
         self.graph.create_system_overview(
-            overview=unified_analysis.get('system_overview', ''),
-            safety_architecture=unified_analysis.get('safety_architecture'),
-            control_responsibilities=unified_analysis.get('control_responsibilities'),
+            overview=unified_analysis.get("system_overview", ""),
+            safety_architecture=unified_analysis.get("safety_architecture"),
+            control_responsibilities=unified_analysis.get("control_responsibilities"),
         )
-        
+
         # Store PLC-to-SCADA mappings
-        for mapping in unified_analysis.get('plc_to_scada_mappings', []):
+        for mapping in unified_analysis.get("plc_to_scada_mappings", []):
             self.graph.create_plc_scada_mapping(
-                mapping.get('plc_component', ''),
-                mapping.get('scada_component', ''),
-                mapping.get('mapping_type', ''),
-                mapping.get('description', ''),
+                mapping.get("plc_component", ""),
+                mapping.get("scada_component", ""),
+                mapping.get("mapping_type", ""),
+                mapping.get("description", ""),
             )
-        
+
         # Store end-to-end flows
-        for flow in unified_analysis.get('end_to_end_flows', []):
-            flow_name = flow.get('flow_name', flow.get('name', 'Unknown'))
+        for flow in unified_analysis.get("end_to_end_flows", []):
+            flow_name = flow.get("flow_name", flow.get("name", "Unknown"))
             self.graph.create_end_to_end_flow(flow_name, flow)
-        
+
         if verbose:
             print(f"[OK] Stored unified analysis in Neo4j")
-        
+
         return unified_analysis
 
-    def merge_ontologies(self, l5x_ontology_path: str, ignition_ontology_path: str,
-                         verbose: bool = False) -> Dict[str, Any]:
+    def merge_ontologies(
+        self, l5x_ontology_path: str, ignition_ontology_path: str, verbose: bool = False
+    ) -> Dict[str, Any]:
         """
         Merge L5X and Ignition ontologies into unified system ontology.
         Imports both to Neo4j and generates unified analysis.
@@ -112,11 +110,13 @@ class UnifiedOntologyMerger:
         if verbose:
             print(f"[INFO] Importing L5X ontology from {l5x_ontology_path}...")
         import_json_ontology(l5x_ontology_path, self.graph)
-        
+
         if verbose:
-            print(f"[INFO] Importing Ignition ontology from {ignition_ontology_path}...")
+            print(
+                f"[INFO] Importing Ignition ontology from {ignition_ontology_path}..."
+            )
         import_json_ontology(ignition_ontology_path, self.graph)
-        
+
         # Generate unified analysis
         return self.merge_from_neo4j(verbose)
 
@@ -128,19 +128,19 @@ class UnifiedOntologyMerger:
         parts.append("")
 
         # L5X (PLC) summary
-        parts.append("## PLC Layer (Rockwell L5X)")
+        parts.append("## PLC Layer (Rockwell L5X / Siemens TIA)")
         parts.append("")
 
         for aoi in aois[:8]:  # Limit
-            name = aoi.get('name', 'Unknown')
-            analysis = aoi.get('analysis', {})
-            purpose = analysis.get('purpose', 'No description')
+            name = aoi.get("name", "Unknown")
+            analysis = aoi.get("analysis", {})
+            purpose = analysis.get("purpose", "No description")
 
             parts.append(f"### AOI: {name}")
             parts.append(f"Purpose: {purpose[:500]}")
 
             # Key tags
-            tags = analysis.get('tags', {})
+            tags = analysis.get("tags", {})
             if tags:
                 parts.append("Key tags:")
                 for tag_name, tag_desc in list(tags.items())[:10]:
@@ -148,11 +148,13 @@ class UnifiedOntologyMerger:
                     parts.append(f"  - {tag_name}: {desc_str[:100]}")
 
             # Relationships
-            rels = analysis.get('relationships', [])
+            rels = analysis.get("relationships", [])
             if rels:
                 parts.append("Key relationships:")
                 for rel in rels[:5]:
-                    parts.append(f"  - {rel.get('from')} -> {rel.get('to')}: {rel.get('relationship_type')}")
+                    parts.append(
+                        f"  - {rel.get('from')} -> {rel.get('to')}: {rel.get('relationship_type')}"
+                    )
 
             parts.append("")
 
@@ -160,12 +162,14 @@ class UnifiedOntologyMerger:
         parts.append("\n## SCADA Layer")
         parts.append("")
 
-        scada_nodes = [n for n in viz_data['nodes'] if n['type'] in ('udt', 'equipment', 'view')]
-        
+        scada_nodes = [
+            n for n in viz_data["nodes"] if n["type"] in ("udt", "equipment", "view")
+        ]
+
         if scada_nodes:
             parts.append("### SCADA Components")
             for node in scada_nodes[:15]:
-                purpose = node['details'].get('purpose', '')
+                purpose = node["details"].get("purpose", "")
                 parts.append(f"- {node['label']} ({node['type']}): {purpose[:100]}")
             parts.append("")
 
@@ -232,7 +236,7 @@ Output ONLY valid JSON, no markdown formatting. Be comprehensive but concise.
             user_prompt=user_prompt,
             max_tokens=16000,
             use_tools=True,
-            verbose=verbose
+            verbose=verbose,
         )
 
         if verbose and result.get("tool_calls"):
@@ -243,36 +247,40 @@ Output ONLY valid JSON, no markdown formatting. Be comprehensive but concise.
         else:
             return {
                 "error": result.get("error", "Unknown error"),
-                "raw": result.get("raw_text", "")
+                "raw": result.get("raw_text", ""),
             }
 
     def get_system_overview(self) -> Optional[Dict]:
         """Get the stored system overview from Neo4j."""
         with self.graph.session() as session:
-            result = session.run("""
+            result = session.run(
+                """
                 MATCH (s:SystemOverview {id: 'main'})
                 RETURN s.overview as overview, s.safety_architecture as safety,
                        s.control_responsibilities as control
-            """)
+            """
+            )
             record = result.single()
             if record:
                 return {
-                    'overview': record['overview'],
-                    'safety_architecture': record['safety'],
-                    'control_responsibilities': record['control'],
+                    "overview": record["overview"],
+                    "safety_architecture": record["safety"],
+                    "control_responsibilities": record["control"],
                 }
         return None
 
     def get_plc_scada_mappings(self) -> List[Dict]:
         """Get all PLC-to-SCADA mappings from Neo4j."""
         with self.graph.session() as session:
-            result = session.run("""
+            result = session.run(
+                """
                 MATCH (plc:AOI)-[r:MAPS_TO_SCADA]->(scada)
                 RETURN plc.name as plc_component, 
                        coalesce(scada.name, 'unknown') as scada_component,
                        r.mapping_type as mapping_type,
                        r.description as description
-            """)
+            """
+            )
             return [dict(r) for r in result]
 
 
@@ -283,20 +291,33 @@ def main():
     parser = argparse.ArgumentParser(
         description="Merge L5X and Ignition ontologies into unified system ontology (stored in Neo4j)"
     )
-    parser.add_argument('--merge', nargs=2, metavar=('L5X_JSON', 'IGNITION_JSON'),
-                       help='Import and merge two JSON ontology files')
-    parser.add_argument('--analyze', action='store_true',
-                       help='Generate unified analysis from data already in Neo4j')
-    parser.add_argument('--overview', action='store_true',
-                       help='Show stored system overview')
-    parser.add_argument('--mappings', action='store_true',
-                       help='Show PLC-to-SCADA mappings')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
-    parser.add_argument('--model', default='claude-sonnet-4-5-20250929', help='Claude model')
-    parser.add_argument('--no-tools', action='store_true',
-                       help='Disable Neo4j tool calls')
-    parser.add_argument('--export', metavar='FILE',
-                       help='Export unified analysis to JSON file')
+    parser.add_argument(
+        "--merge",
+        nargs=2,
+        metavar=("L5X_JSON", "IGNITION_JSON"),
+        help="Import and merge two JSON ontology files",
+    )
+    parser.add_argument(
+        "--analyze",
+        action="store_true",
+        help="Generate unified analysis from data already in Neo4j",
+    )
+    parser.add_argument(
+        "--overview", action="store_true", help="Show stored system overview"
+    )
+    parser.add_argument(
+        "--mappings", action="store_true", help="Show PLC-to-SCADA mappings"
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument(
+        "--model", default="claude-sonnet-4-5-20250929", help="Claude model"
+    )
+    parser.add_argument(
+        "--no-tools", action="store_true", help="Disable Neo4j tool calls"
+    )
+    parser.add_argument(
+        "--export", metavar="FILE", help="Export unified analysis to JSON file"
+    )
 
     args = parser.parse_args()
 
@@ -306,39 +327,41 @@ def main():
     try:
         if args.merge:
             l5x_path, ignition_path = args.merge
-            unified = merger.merge_ontologies(l5x_path, ignition_path, verbose=args.verbose)
-            
+            unified = merger.merge_ontologies(
+                l5x_path, ignition_path, verbose=args.verbose
+            )
+
             print(f"\n[OK] Created unified ontology")
             print(f"System Overview: {unified.get('system_overview', 'N/A')[:200]}...")
-            
+
             if args.export:
-                with open(args.export, 'w', encoding='utf-8') as f:
+                with open(args.export, "w", encoding="utf-8") as f:
                     json.dump(unified, f, indent=2)
                 print(f"[OK] Exported to {args.export}")
-        
+
         elif args.analyze:
             unified = merger.merge_from_neo4j(verbose=args.verbose)
-            
+
             print(f"\n[OK] Generated unified analysis")
             print(f"System Overview: {unified.get('system_overview', 'N/A')[:200]}...")
-            
+
             if args.export:
-                with open(args.export, 'w', encoding='utf-8') as f:
+                with open(args.export, "w", encoding="utf-8") as f:
                     json.dump(unified, f, indent=2)
                 print(f"[OK] Exported to {args.export}")
-        
+
         elif args.overview:
             overview = merger.get_system_overview()
             if overview:
                 print("\n=== System Overview ===")
-                print(overview.get('overview', 'N/A'))
+                print(overview.get("overview", "N/A"))
                 print("\n=== Safety Architecture ===")
-                print(overview.get('safety_architecture', 'N/A'))
+                print(overview.get("safety_architecture", "N/A"))
                 print("\n=== Control Responsibilities ===")
-                print(overview.get('control_responsibilities', 'N/A'))
+                print(overview.get("control_responsibilities", "N/A"))
             else:
                 print("[INFO] No system overview found. Run --analyze first.")
-        
+
         elif args.mappings:
             mappings = merger.get_plc_scada_mappings()
             if mappings:
@@ -350,10 +373,10 @@ def main():
                     print()
             else:
                 print("[INFO] No mappings found. Run --merge or --analyze first.")
-        
+
         else:
             parser.print_help()
-    
+
     finally:
         merger.close()
 

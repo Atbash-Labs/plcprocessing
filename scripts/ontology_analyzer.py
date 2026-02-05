@@ -4,6 +4,8 @@ LLM-based analyzer for PLC code using Anthropic's Claude API.
 Generates semantic understanding of tags and logic.
 Stores results in Neo4j graph database.
 
+Supports both Rockwell (.sc) and Siemens (.st) PLC file formats.
+
 Uses tool calls to query existing ontology data, enabling Claude to build
 on existing knowledge rather than starting from scratch.
 """
@@ -14,6 +16,7 @@ from typing import Dict, List, Optional, Any
 from pathlib import Path
 
 from sc_parser import SCParser, SCFile, Tag
+from siemens_parser import SiemensSTParser
 from neo4j_ontology import OntologyGraph, get_ontology_graph
 from claude_client import ClaudeClient, get_claude_client
 
@@ -157,24 +160,51 @@ class OntologyAnalyzer:
                 )
             context_parts.append("")
 
-        # Logic rungs (sample key ones)
+        # Logic implementation (rungs for RLL, raw content for ST)
         if sc_file.routines:
             context_parts.append("## Logic Implementation")
             for routine in sc_file.routines:
+                visibility = routine.get("visibility", "")
+                vis_str = f" [{visibility}]" if visibility else ""
                 context_parts.append(
-                    f"### Routine: {routine['name']} ({routine['type']})"
+                    f"### Routine: {routine['name']} ({routine['type']}){vis_str}"
                 )
-                for rung in routine["rungs"][:15]:  # First 15 rungs
-                    if rung.comment:
-                        context_parts.append(f"\nRung {rung.number}: {rung.comment}")
-                    else:
-                        context_parts.append(f"\nRung {rung.number}:")
-                    context_parts.append(f"```\n{rung.logic}\n```")
 
-                if len(routine["rungs"]) > 15:
-                    context_parts.append(
-                        f"\n... and {len(routine['rungs']) - 15} more rungs"
-                    )
+                # Ladder logic rungs
+                if routine.get("rungs"):
+                    for rung in routine["rungs"][:15]:  # First 15 rungs
+                        if rung.comment:
+                            context_parts.append(
+                                f"\nRung {rung.number}: {rung.comment}"
+                            )
+                        else:
+                            context_parts.append(f"\nRung {rung.number}:")
+                        context_parts.append(f"```\n{rung.logic}\n```")
+
+                    if len(routine["rungs"]) > 15:
+                        context_parts.append(
+                            f"\n... and {len(routine['rungs']) - 15} more rungs"
+                        )
+
+                # Structured Text body (Siemens methods / programs)
+                elif routine.get("raw_content"):
+                    # Include method-local variables if present
+                    local_tags = routine.get("local_tags", [])
+                    if local_tags:
+                        context_parts.append("Local variables:")
+                        for tag in local_tags[:10]:
+                            desc = f" // {tag.description}" if tag.description else ""
+                            context_parts.append(f"- {tag.name}: {tag.data_type}{desc}")
+
+                    # Truncate very long method bodies
+                    raw = routine["raw_content"]
+                    if len(raw) > 2000:
+                        raw = (
+                            raw[:2000]
+                            + f"\n... ({len(routine['raw_content'])} chars total)"
+                        )
+                    context_parts.append(f"```st\n{raw}\n```")
+
                 context_parts.append("")
 
         return "\n".join(context_parts)
@@ -184,7 +214,11 @@ class OntologyAnalyzer:
     ) -> Dict[str, Any]:
         """Query Claude API for analysis with tool support."""
 
-        system_prompt = """You are an expert PLC (Programmable Logic Controller) engineer specializing in analyzing industrial control logic. Your task is to analyze PLC code and generate semantic ontologies that explain what tags (variables) mean and how the PLC manipulates them.
+        system_prompt = """You are an expert PLC (Programmable Logic Controller) engineer specializing in analyzing industrial control logic from both Rockwell/Allen-Bradley and Siemens platforms. Your task is to analyze PLC code and generate semantic ontologies that explain what tags (variables) mean and how the PLC manipulates them.
+
+You understand both platforms:
+- Rockwell: Add-On Instructions (AOIs), UDTs, ladder logic (RLL), structured text (ST)
+- Siemens: Function Blocks (CLASS), Types (STRUCT/UDT), Programs (PROGRAM), Configurations, Methods, SCL/ST
 
 You have access to tools that let you query the existing ontology database:
 - get_schema: Discover what node types and relationships exist
@@ -262,14 +296,16 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
         pattern: str = "*.aoi.sc",
         verbose: bool = False,
         skip_ai: bool = False,
+        siemens: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Analyze all SC files in a directory and store in Neo4j.
+        """Analyze all SC or ST files in a directory and store in Neo4j.
 
         Args:
             directory: Directory path
             pattern: File pattern to match
             verbose: Print detailed progress
             skip_ai: If True, skip AI analysis (for incremental mode)
+            siemens: If True, use Siemens .st parser instead of Rockwell .sc parser
         """
 
         dir_path = Path(directory)
@@ -280,27 +316,63 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
             return []
 
         action = "import" if skip_ai else "analyze"
-        print(f"[INFO] Found {len(sc_files)} files to {action}")
+        platform = "Siemens" if siemens else "Rockwell"
+        print(f"[INFO] Found {len(sc_files)} {platform} files to {action}")
 
-        parser = SCParser()
         ontologies = []
 
-        for i, sc_path in enumerate(sc_files, 1):
-            print(f"\n[{i}/{len(sc_files)}] Processing {sc_path.name}...")
+        if siemens:
+            siemens_parser = SiemensSTParser()
+            block_count = 0
+            for i, st_path in enumerate(sc_files, 1):
+                print(f"\n[{i}/{len(sc_files)}] Processing {st_path.name}...")
 
-            try:
-                # Parse SC file
-                sc_file = parser.parse_file(str(sc_path))
+                try:
+                    # Siemens .st files can contain multiple blocks
+                    parsed_blocks = siemens_parser.parse_file(str(st_path))
 
-                # Analyze with LLM and store in Neo4j
-                ontology = self.analyze_sc_file(sc_file, verbose, skip_ai=skip_ai)
-                ontologies.append(ontology)
+                    if not parsed_blocks:
+                        print(f"[WARNING] No parseable blocks in {st_path.name}")
+                        continue
 
-                print(f"[OK] Completed {sc_path.name}")
+                    for sc_file in parsed_blocks:
+                        block_count += 1
+                        ontology = self.analyze_sc_file(
+                            sc_file, verbose, skip_ai=skip_ai
+                        )
+                        ontologies.append(ontology)
+                        print(f"  [OK] {sc_file.type}: {sc_file.name}")
 
-            except Exception as e:
-                print(f"[ERROR] Failed to process {sc_path.name}: {e}")
-                continue
+                    print(
+                        f"[OK] Completed {st_path.name} ({len(parsed_blocks)} blocks)"
+                    )
+
+                except Exception as e:
+                    print(f"[ERROR] Failed to process {st_path.name}: {e}")
+                    continue
+
+            if block_count > 0:
+                print(
+                    f"\n[INFO] Processed {block_count} blocks from {len(sc_files)} files"
+                )
+        else:
+            parser = SCParser()
+            for i, sc_path in enumerate(sc_files, 1):
+                print(f"\n[{i}/{len(sc_files)}] Processing {sc_path.name}...")
+
+                try:
+                    # Parse SC file
+                    sc_file = parser.parse_file(str(sc_path))
+
+                    # Analyze with LLM and store in Neo4j
+                    ontology = self.analyze_sc_file(sc_file, verbose, skip_ai=skip_ai)
+                    ontologies.append(ontology)
+
+                    print(f"[OK] Completed {sc_path.name}")
+
+                except Exception as e:
+                    print(f"[ERROR] Failed to process {sc_path.name}: {e}")
+                    continue
 
         return ontologies
 
@@ -323,14 +395,14 @@ def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Analyze PLC .sc files and generate semantic ontologies using Claude (stored in Neo4j)"
+        description="Analyze PLC .sc/.st files and generate semantic ontologies using Claude (stored in Neo4j)"
     )
-    parser.add_argument("input", nargs="?", help="Path to .sc file or directory")
+    parser.add_argument("input", nargs="?", help="Path to .sc/.st file or directory")
     parser.add_argument(
         "-p",
         "--pattern",
-        default="*.aoi.sc",
-        help="File pattern for directory mode (default: *.aoi.sc)",
+        default=None,
+        help="File pattern for directory mode (default: *.aoi.sc, or *.st with --siemens)",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser.add_argument(
@@ -352,12 +424,21 @@ def main():
         help="Skip AI analysis, only create AOI nodes with pending status (for incremental mode)",
     )
     parser.add_argument(
+        "--siemens",
+        action="store_true",
+        help="Use Siemens ST parser instead of Rockwell SC parser",
+    )
+    parser.add_argument(
         "--status",
         action="store_true",
         help="Show semantic analysis status for AOIs",
     )
 
     args = parser.parse_args()
+
+    # Resolve default pattern based on platform
+    if args.pattern is None:
+        args.pattern = "*.st" if args.siemens else "*.aoi.sc"
 
     # Initialize analyzer
     try:
@@ -416,6 +497,9 @@ def main():
         elif args.input:
             input_path = Path(args.input)
 
+            # Auto-detect Siemens if input is .st file
+            is_siemens = args.siemens or input_path.suffix.lower() == ".st"
+
             # Process directory or single file
             if input_path.is_dir():
                 ontologies = analyzer.analyze_directory(
@@ -423,28 +507,53 @@ def main():
                     pattern=args.pattern,
                     verbose=args.verbose,
                     skip_ai=args.skip_ai,
+                    siemens=is_siemens,
                 )
                 action = "Imported" if args.skip_ai else "Analyzed"
-                print(f"\n[OK] {action} {len(ontologies)} files and stored in Neo4j")
+                platform = "Siemens" if is_siemens else "Rockwell"
+                print(
+                    f"\n[OK] {action} {len(ontologies)} {platform} blocks and stored in Neo4j"
+                )
                 if args.skip_ai:
                     print(
                         "[INFO] Use incremental analyzer to add semantic descriptions"
                     )
 
             elif input_path.is_file():
-                # Parse and analyze single file
-                sc_parser = SCParser()
-                sc_file = sc_parser.parse_file(str(input_path))
-                ontology = analyzer.analyze_sc_file(
-                    sc_file, verbose=args.verbose, skip_ai=args.skip_ai
-                )
+                if is_siemens:
+                    # Siemens .st file — may contain multiple blocks
+                    siemens_parser = SiemensSTParser()
+                    parsed_blocks = siemens_parser.parse_file(str(input_path))
+                    if not parsed_blocks:
+                        print(f"[WARNING] No parseable blocks in {input_path.name}")
+                    else:
+                        for sc_file in parsed_blocks:
+                            ontology = analyzer.analyze_sc_file(
+                                sc_file, verbose=args.verbose, skip_ai=args.skip_ai
+                            )
+                            print(
+                                f"\n=== Ontology: {ontology['name']} ({ontology['type']}) ==="
+                            )
+                            if not args.skip_ai:
+                                print(
+                                    f"Purpose: {ontology['analysis'].get('purpose', 'N/A')}"
+                                )
+                            action = "Created" if args.skip_ai else "Stored"
+                            print(f"[OK] {action} in Neo4j")
+                else:
+                    # Rockwell .sc file
+                    sc_parser_inst = SCParser()
+                    sc_file = sc_parser_inst.parse_file(str(input_path))
+                    ontology = analyzer.analyze_sc_file(
+                        sc_file, verbose=args.verbose, skip_ai=args.skip_ai
+                    )
 
-                # Print summary
-                print(f"\n=== Ontology: {ontology['name']} ===")
-                if not args.skip_ai:
-                    print(f"Purpose: {ontology['analysis'].get('purpose', 'N/A')}")
-                action = "Created" if args.skip_ai else "Stored"
-                print(f"\n[OK] {action} in Neo4j")
+                    # Print summary
+                    print(f"\n=== Ontology: {ontology['name']} ===")
+                    if not args.skip_ai:
+                        print(f"Purpose: {ontology['analysis'].get('purpose', 'N/A')}")
+                    action = "Created" if args.skip_ai else "Stored"
+                    print(f"\n[OK] {action} in Neo4j")
 
             else:
                 print(f"[ERROR] Input path not found: {args.input}")

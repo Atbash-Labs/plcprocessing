@@ -1,6 +1,6 @@
 # PLC DevOps Tools
 
-A complete DevOps toolchain for PLC projects supporting both **CODESYS** and **Rockwell/Allen-Bradley** platforms. Export, diff, merge, and import with full support for additions, modifications, and deletions.
+A complete DevOps toolchain for PLC projects supporting **CODESYS**, **Rockwell/Allen-Bradley**, and **Siemens TIA Portal / AX** platforms. Export, diff, merge, and import with full support for additions, modifications, and deletions.
 
 ## Why These Tools?
 
@@ -32,6 +32,20 @@ A complete DevOps toolchain for PLC projects supporting both **CODESYS** and **R
 
 # Export all L5X files in directory
 .\l5x-export.ps1 -Input ".\PLC" -OutputDir ".\export"
+```
+
+### Siemens TIA Portal / AX Projects
+
+#### Parse Siemens ST Files
+```powershell
+# Parse a single Siemens ST file
+.\siemens-export.ps1 -Input "conveyorControl.st"
+
+# Parse all ST files in a directory
+.\siemens-export.ps1 -Input ".\siemens_project"
+
+# Parse and run ontology analysis
+.\siemens-export.ps1 -Input ".\siemens_project" -Analyze
 ```
 
 ### Generate Diff
@@ -69,6 +83,7 @@ A complete DevOps toolchain for PLC projects supporting both **CODESYS** and **R
 ├── codesys-import.ps1    # Driver: Import text files to CODESYS project
 ├── codesys-merge.ps1     # Driver: Complete merge workflow
 ├── l5x-export.ps1        # Driver: Export Rockwell L5X files to text
+├── siemens-export.ps1    # Driver: Parse Siemens ST files
 ├── scripts/              # Python implementation
 │   ├── codesys_export.py           # Export (runs in CODESYS)
 │   ├── codesys_export_from_xml.py  # Export from PLCOpenXML
@@ -76,7 +91,8 @@ A complete DevOps toolchain for PLC projects supporting both **CODESYS** and **R
 │   ├── codesys_import_external.py  # Import wrapper (headless)
 │   ├── codesys_diff.py             # Generate unified diffs
 │   ├── codesys_apply.py            # Apply diffs to text files
-│   └── l5x_export.py               # Export Rockwell L5X files
+│   ├── l5x_export.py               # Export Rockwell L5X files
+│   └── siemens_parser.py           # Parse Siemens TIA/AX ST files
 ├── PLC/                  # Sample Rockwell L5X files
 ├── legacy/               # Deprecated XML-based tools
 ├── tests/                # Test files and outputs
@@ -101,6 +117,17 @@ A complete DevOps toolchain for PLC projects supporting both **CODESYS** and **R
 |-----------|------|
 | `NAME.aoi.sc` | Add-On Instruction |
 | `NAME.udt.sc` | User Defined Type |
+
+### Siemens TIA Portal / AX Source Files (.st)
+
+| Construct | Maps To |
+|-----------|---------|
+| `CLASS ... END_CLASS` | Function Block (FB) |
+| `TYPE ... STRUCT ... END_TYPE` | User Defined Type (UDT) |
+| `PROGRAM ... END_PROGRAM` | Program |
+| `CONFIGURATION ... END_CONFIGURATION` | Configuration (tasks, I/O mapping) |
+| `METHOD ... END_METHOD` | Routine (within a CLASS) |
+| `NAMESPACE ... END_NAMESPACE` | Grouping / package |
 
 ### Diff Files
 
@@ -222,6 +249,47 @@ OTU(bTemp);
 - **Diffing**: Use standard diff tools to compare versions
 - **Search**: Grep through PLC logic to find specific tags/instructions
 
+## Siemens TIA Portal / AX ST Parsing
+
+The Siemens parser reads `.st` source files (Structured Text exported from TIA Portal or Siemens AX) and extracts them into the same internal data model used by the Rockwell pipeline, so the ontology analyzer works identically for both platforms.
+
+### What Gets Parsed
+
+- **Classes (Function Blocks)**: `CLASS ... END_CLASS` with public/private variables and methods
+- **Types (UDTs)**: `TYPE ... STRUCT ... END_STRUCT END_TYPE` with member definitions
+- **Programs**: `PROGRAM ... END_PROGRAM` with external references and inline logic
+- **Configurations**: `CONFIGURATION ... END_CONFIGURATION` with task assignments and `VAR_GLOBAL` I/O mappings (AT %IX / %QX addresses)
+- **Methods**: Extracted as routines with local variables and ST logic bodies
+- **Namespaces**: Used as grouping metadata
+
+### Variable Mapping
+
+| Siemens Construct | Internal Direction |
+|-------------------|--------------------|
+| `VAR_INPUT` | Input |
+| `VAR_OUTPUT` | Output |
+| `VAR_IN_OUT`, `VAR_EXTERNAL`, `VAR_GLOBAL` | InOut |
+| `VAR PUBLIC` (in CLASS) | Output (externally visible) |
+| `VAR PRIVATE` (in CLASS) | Local |
+| `VAR` (in PROGRAM/METHOD) | Local |
+
+### Example: Parsing a Siemens Project
+
+```powershell
+# Parse and display all blocks
+.\siemens-export.ps1 -Input ".\scripts\siemensprocessing\examplesiemens"
+
+# Run ontology analysis (requires ANTHROPIC_API_KEY)
+python scripts/ontology_analyzer.py ".\scripts\siemensprocessing\examplesiemens" --siemens -v
+
+# Parse a single file directly
+python scripts/siemens_parser.py "conveyorControl.st"
+```
+
+### Multi-Block Files
+
+A single `.st` file can contain multiple blocks (e.g., a TYPE and a CLASS). The parser extracts each as a separate entity for individual analysis, which mirrors how Rockwell exports each AOI/UDT as a separate `.sc` file.
+
 ## Authoritative Import Behavior
 
 The import is **authoritative** - the import directory is the source of truth:
@@ -263,6 +331,21 @@ python scripts/l5x_export.py "Motor_Control.L5X" "output_dir"
 
 # Export all L5X files in directory
 python scripts/l5x_export.py "PLC" "output_dir"
+```
+
+### Siemens TIA Portal / AX
+```bash
+# Parse a single ST file
+python scripts/siemens_parser.py "conveyorControl.st"
+
+# Parse all ST files in a directory
+python scripts/siemens_parser.py "siemens_project/"
+
+# Run ontology analysis on Siemens ST files
+python scripts/ontology_analyzer.py "siemens_project/" --siemens -v
+
+# Analyze a single Siemens file (auto-detected by .st extension)
+python scripts/ontology_analyzer.py "conveyorControl.st" -v
 ```
 
 ## See Also
