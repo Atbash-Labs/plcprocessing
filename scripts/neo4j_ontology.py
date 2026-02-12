@@ -36,9 +36,9 @@ class OntologyGraph:
     Neo4j graph database interface for PLC/SCADA ontologies.
 
     Node Types:
-    - AOI: Add-On Instruction (PLC component)
+    - AOI: Add-On Instruction / PLC block (Rockwell AOI, Siemens OB/FB/FC/DB)
     - Tag: Individual tag with semantic description
-    - UDT: User Defined Type (SCADA)
+    - UDT: User Defined Type (SCADA or PLC struct)
     - Equipment: Equipment instance
     - View: SCADA view/window
     - FaultSymptom: Troubleshooting symptom
@@ -47,6 +47,20 @@ class OntologyGraph:
     - ControlPattern: Identified control pattern
     - DataFlow: Data flow path
     - SafetyElement: Safety-critical element
+
+    Siemens TIA Portal Node Types:
+    - TiaProject: Top-level Siemens TIA Portal project
+    - PLCDevice: PLC hardware device within a TIA project
+    - HMIDevice: HMI panel within a TIA project
+    - HMIConnection: HMI-to-PLC communication link
+    - HMIAlarm: Analog or discrete alarm definition
+    - HMIAlarmClass: Alarm classification / severity
+    - HMIScript: HMI JavaScript automation script
+    - HMITagTable: HMI tag table
+    - HMITextList: Display enumeration / text list
+    - HMIScreen: HMI screen definition
+    - PLCTagTable: PLC global tag table
+    - PLCTag: PLC global tag with address and type
 
     Relationship Types:
     - HAS_TAG: AOI contains tag
@@ -59,6 +73,24 @@ class OntologyGraph:
     - HAS_FLOW: AOI has data flow
     - SAFETY_CRITICAL: AOI has safety element
     - PHRASE_MAPS_TO: Operator phrase maps to technical meaning
+    - INSTANTIATES: AOI/FB declares a variable whose type is another AOI/FB
+    - USES_TYPE: AOI/FB declares a variable whose type is a UDT
+
+    Siemens TIA Relationship Types:
+    - HAS_DEVICE: TiaProject -> PLCDevice/HMIDevice
+    - HAS_BLOCK: PLCDevice -> AOI
+    - HAS_TYPE: PLCDevice -> UDT
+    - HAS_TAG_TABLE: PLCDevice/HMIDevice -> PLCTagTable/HMITagTable
+    - HAS_TAG (PLCTagTable): PLCTagTable -> PLCTag
+    - HAS_CONNECTION: HMIDevice -> HMIConnection
+    - CONNECTS_TO: HMIConnection -> PLCDevice
+    - HAS_ALARM: HMIDevice -> HMIAlarm
+    - HAS_ALARM_CLASS: HMIDevice -> HMIAlarmClass
+    - CLASSIFIED_AS: HMIAlarm -> HMIAlarmClass
+    - HAS_SCRIPT: HMIDevice -> HMIScript
+    - HAS_SCREEN: HMIDevice -> HMIScreen
+    - HAS_TEXT_LIST: HMIDevice -> HMITextList
+    - MONITORS_TAG: HMIAlarm -> PLCTag
     """
 
     def __init__(self, config: Optional[Neo4jConfig] = None):
@@ -142,6 +174,18 @@ class OntologyGraph:
                 "CREATE INDEX view_project IF NOT EXISTS FOR (v:View) ON (v.project)",
                 "CREATE INDEX script_project IF NOT EXISTS FOR (s:Script) ON (s.project)",
                 "CREATE INDEX namedquery_project IF NOT EXISTS FOR (q:NamedQuery) ON (q.project)",
+                # Siemens TIA Portal project indexes
+                "CREATE INDEX tiaproject_name IF NOT EXISTS FOR (tp:TiaProject) ON (tp.name)",
+                "CREATE INDEX plcdevice_name IF NOT EXISTS FOR (pd:PLCDevice) ON (pd.name)",
+                "CREATE INDEX hmidevice_name IF NOT EXISTS FOR (hd:HMIDevice) ON (hd.name)",
+                "CREATE INDEX hmiconnection_name IF NOT EXISTS FOR (hc:HMIConnection) ON (hc.name)",
+                "CREATE INDEX hmialarm_name IF NOT EXISTS FOR (ha:HMIAlarm) ON (ha.name)",
+                "CREATE INDEX hmialarmclass_name IF NOT EXISTS FOR (hac:HMIAlarmClass) ON (hac.name)",
+                "CREATE INDEX hmiscript_name IF NOT EXISTS FOR (hs:HMIScript) ON (hs.name)",
+                "CREATE INDEX hmitagtable_name IF NOT EXISTS FOR (ht:HMITagTable) ON (ht.name)",
+                "CREATE INDEX hmitextlist_name IF NOT EXISTS FOR (htl:HMITextList) ON (htl.name)",
+                "CREATE INDEX plctagtable_name IF NOT EXISTS FOR (pt:PLCTagTable) ON (pt.name)",
+                "CREATE INDEX plctag_name IF NOT EXISTS FOR (ptg:PLCTag) ON (ptg.name)",
             ]
 
             for constraint in constraints:
@@ -539,6 +583,156 @@ class OntologyGraph:
                 "reason": reason,
             },
         )
+
+    # -------------------------------------------------------------------
+    # AOI / FB cross-reference (dependency) relationships
+    # -------------------------------------------------------------------
+
+    def create_aoi_dependency(
+        self,
+        from_aoi: str,
+        to_aoi: str,
+        rel_type: str = "INSTANTIATES",
+        via_tag: str = "",
+        description: str = "",
+    ) -> bool:
+        """
+        Create a dependency relationship between two AOI/FB nodes.
+
+        Args:
+            from_aoi:  Name of the AOI that *uses* the other.
+            to_aoi:    Name of the AOI/UDT that is *used*.
+            rel_type:  'INSTANTIATES' (AOI→AOI/FB) or 'USES_TYPE' (AOI→UDT).
+            via_tag:   The variable name that caused the dependency
+                       (e.g. 'valve1' whose type is 'ValveStatus').
+            description: Optional human-readable note.
+
+        Returns:
+            True if the relationship was created, False if either node is missing.
+        """
+        if rel_type not in ("INSTANTIATES", "USES_TYPE"):
+            rel_type = "INSTANTIATES"
+
+        with self.session() as session:
+            result = session.run(
+                f"""
+                MATCH (a:AOI {{name: $from_aoi}})
+                MATCH (b:AOI {{name: $to_aoi}})
+                MERGE (a)-[r:{rel_type}]->(b)
+                SET r.via_tag = $via_tag,
+                    r.description = $description
+                RETURN a.name AS src, b.name AS tgt
+                """,
+                {
+                    "from_aoi": from_aoi,
+                    "to_aoi": to_aoi,
+                    "via_tag": via_tag,
+                    "description": description,
+                },
+            )
+            return result.single() is not None
+
+    def create_aoi_dependencies_batch(
+        self, dependencies: List[Dict]
+    ) -> int:
+        """
+        Batch-create AOI dependency relationships.
+
+        Each dict in *dependencies* must have:
+            from_aoi, to_aoi, rel_type, via_tag (opt), description (opt)
+
+        Returns:
+            Number of relationships created.
+        """
+        if not dependencies:
+            return 0
+
+        with self.session() as session:
+            result = session.run(
+                """
+                UNWIND $deps AS d
+                MATCH (a:AOI {name: d.from_aoi})
+                MATCH (b:AOI {name: d.to_aoi})
+                WITH a, b, d
+                // Two-branch FOREACH to pick INSTANTIATES vs USES_TYPE
+                FOREACH (_ IN CASE WHEN d.rel_type = 'INSTANTIATES' THEN [1] ELSE [] END |
+                    MERGE (a)-[r:INSTANTIATES]->(b)
+                    SET r.via_tag = d.via_tag, r.description = d.description
+                )
+                FOREACH (_ IN CASE WHEN d.rel_type = 'USES_TYPE' THEN [1] ELSE [] END |
+                    MERGE (a)-[r:USES_TYPE]->(b)
+                    SET r.via_tag = d.via_tag, r.description = d.description
+                )
+                RETURN count(*) AS cnt
+                """,
+                {
+                    "deps": [
+                        {
+                            "from_aoi": d["from_aoi"],
+                            "to_aoi": d["to_aoi"],
+                            "rel_type": d.get("rel_type", "INSTANTIATES"),
+                            "via_tag": d.get("via_tag", ""),
+                            "description": d.get("description", ""),
+                        }
+                        for d in dependencies
+                    ]
+                },
+            )
+            record = result.single()
+            return record["cnt"] if record else 0
+
+    def get_aoi_dependencies(
+        self, name: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Get AOI dependency relationships.
+
+        Args:
+            name: If provided, get dependencies for a specific AOI.
+                  If None, get all dependencies.
+
+        Returns:
+            List of dicts with from_aoi, to_aoi, rel_type, via_tag, description.
+        """
+        with self.session() as session:
+            if name:
+                result = session.run(
+                    """
+                    MATCH (a:AOI {name: $name})-[r:INSTANTIATES|USES_TYPE]->(b:AOI)
+                    RETURN a.name AS from_aoi, b.name AS to_aoi,
+                           type(r) AS rel_type, r.via_tag AS via_tag,
+                           r.description AS description
+                    ORDER BY type(r), b.name
+                    """,
+                    {"name": name},
+                )
+            else:
+                result = session.run(
+                    """
+                    MATCH (a:AOI)-[r:INSTANTIATES|USES_TYPE]->(b:AOI)
+                    RETURN a.name AS from_aoi, b.name AS to_aoi,
+                           type(r) AS rel_type, r.via_tag AS via_tag,
+                           r.description AS description
+                    ORDER BY a.name, type(r), b.name
+                    """
+                )
+
+            return [dict(record) for record in result]
+
+    def get_all_aoi_names(self) -> List[Dict[str, str]]:
+        """
+        Return name and type for every AOI node.
+        Useful for building a lookup table for cross-referencing.
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (a:AOI)
+                RETURN a.name AS name, a.type AS type
+                ORDER BY a.name
+                """
+            )
+            return [dict(r) for r in result]
 
     def get_aoi(self, name: str) -> Optional[Dict]:
         """Get an AOI with all its related data."""
@@ -1149,11 +1343,12 @@ class OntologyGraph:
             )
             resources["tags"] = [dict(r) for r in result]
 
-            # Get UDTs (gateway-wide)
+            # Get UDTs (gateway-wide, exclude Siemens TIA UDTs)
             result = session.run(
                 """
                 MATCH (u:UDT)
-                WHERE u.deleted IS NULL OR u.deleted = false
+                WHERE (u.deleted IS NULL OR u.deleted = false)
+                  AND NOT (:PLCDevice)-[:HAS_TYPE]->(u)
                 RETURN u.name as name, u.purpose as purpose,
                        u.semantic_status as status
                 ORDER BY u.name
@@ -1161,11 +1356,12 @@ class OntologyGraph:
             )
             resources["udts"] = [dict(r) for r in result]
 
-            # Get AOIs (gateway-wide)
+            # Get AOIs (gateway-wide, exclude Siemens TIA AOIs)
             result = session.run(
                 """
                 MATCH (a:AOI)
-                WHERE a.deleted IS NULL OR a.deleted = false
+                WHERE (a.deleted IS NULL OR a.deleted = false)
+                  AND NOT (:PLCDevice)-[:HAS_BLOCK]->(a)
                 RETURN a.name as name, a.type as type, a.purpose as purpose,
                        a.semantic_status as status
                 ORDER BY a.name
@@ -2180,6 +2376,11 @@ class OntologyGraph:
             "Script",
             "NamedQuery",
             "GatewayEvent",
+            # Siemens TIA Portal types
+            "HMIScript",
+            "HMIAlarm",
+            "HMIScreen",
+            "PLCTag",
         }
         if item_type not in valid_types:
             raise ValueError(f"item_type must be one of {valid_types}")
@@ -2209,6 +2410,66 @@ class OntologyGraph:
                            n.data_type as data_type, n.folder_name as folder_name,
                            n.query as query, n.datasource as datasource,
                            n.opc_item_path as opc_item_path, n.expression as expression
+                    LIMIT $limit
+                    """,
+                    {"limit": limit},
+                )
+                return [dict(r) for r in result]
+            elif item_type == "HMIScript":
+                result = session.run(
+                    """
+                    MATCH (n:HMIScript)
+                    WHERE (n.semantic_status = 'pending' OR n.semantic_status IS NULL)
+                    RETURN n.name as name, n.hmi as hmi, n.project as project,
+                           n.script_file as script_file,
+                           n.functions as functions,
+                           n.script_text as script_text
+                    LIMIT $limit
+                    """,
+                    {"limit": limit},
+                )
+                return [dict(r) for r in result]
+            elif item_type == "HMIAlarm":
+                result = session.run(
+                    """
+                    MATCH (n:HMIAlarm)
+                    WHERE (n.semantic_status = 'pending' OR n.semantic_status IS NULL)
+                    RETURN n.name as name, n.hmi as hmi, n.project as project,
+                           n.alarm_type as alarm_type,
+                           n.alarm_class as alarm_class,
+                           n.origin as origin, n.priority as priority,
+                           n.raised_state_tag as raised_state_tag,
+                           n.trigger_bit_address as trigger_bit_address,
+                           n.trigger_mode as trigger_mode,
+                           n.condition as condition,
+                           n.condition_value as condition_value
+                    LIMIT $limit
+                    """,
+                    {"limit": limit},
+                )
+                return [dict(r) for r in result]
+            elif item_type == "HMIScreen":
+                result = session.run(
+                    """
+                    MATCH (n:HMIScreen)
+                    WHERE (n.semantic_status = 'pending' OR n.semantic_status IS NULL)
+                    RETURN n.name as name, n.hmi as hmi, n.project as project,
+                           n.folder as folder
+                    LIMIT $limit
+                    """,
+                    {"limit": limit},
+                )
+                return [dict(r) for r in result]
+            elif item_type == "PLCTag":
+                result = session.run(
+                    """
+                    MATCH (n:PLCTag)
+                    WHERE (n.semantic_status = 'pending' OR n.semantic_status IS NULL)
+                    RETURN n.name as name, n.table as table_name,
+                           n.plc as plc, n.project as project,
+                           n.data_type as data_type,
+                           n.logical_address as logical_address,
+                           n.comment as comment
                     LIMIT $limit
                     """,
                     {"limit": limit},
@@ -2253,6 +2514,11 @@ class OntologyGraph:
             "Script",
             "NamedQuery",
             "GatewayEvent",
+            # Siemens TIA Portal types
+            "HMIScript",
+            "HMIAlarm",
+            "HMIScreen",
+            "PLCTag",
         }
         valid_statuses = {"pending", "in_progress", "complete", "review"}
 
@@ -2311,6 +2577,11 @@ class OntologyGraph:
                 "Equipment",
                 "ViewComponent",
                 "ScadaTag",
+                # Siemens TIA Portal types
+                "HMIScript",
+                "HMIAlarm",
+                "HMIScreen",
+                "PLCTag",
             ]:
                 if include_deleted:
                     counts_result = session.run(
@@ -2720,14 +2991,870 @@ class OntologyGraph:
                 "relationships_created": rels_created,
             }
 
+    # =========================================================================
+    # Siemens TIA Portal Project Operations
+    # =========================================================================
+
+    def create_tia_project(
+        self,
+        name: str,
+        directory: str,
+    ) -> str:
+        """Create a TiaProject node.
+
+        Args:
+            name: Project name (e.g. "ECar_Demo")
+            directory: Source directory path
+
+        Returns:
+            The project name.
+        """
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (tp:TiaProject {name: $name})
+                SET tp.directory = $directory,
+                    tp.platform = 'Siemens',
+                    tp.imported_at = datetime()
+                """,
+                {"name": name, "directory": directory},
+            )
+        return name
+
+    def create_plc_device(
+        self,
+        name: str,
+        project_name: str,
+        dir_name: str = "",
+    ) -> str:
+        """Create a PLCDevice node and link to its TiaProject.
+
+        Args:
+            name: PLC name (e.g. "PLC_1")
+            project_name: Parent TiaProject name
+            dir_name: Directory name (e.g. "PLC_PLC_1")
+
+        Returns:
+            The device name.
+        """
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (pd:PLCDevice {name: $name, project: $project})
+                SET pd.dir_name = $dir_name,
+                    pd.platform = 'Siemens'
+                WITH pd
+                MATCH (tp:TiaProject {name: $project})
+                MERGE (tp)-[:HAS_DEVICE]->(pd)
+                """,
+                {"name": name, "project": project_name, "dir_name": dir_name},
+            )
+        return name
+
+    def create_hmi_device(
+        self,
+        name: str,
+        project_name: str,
+        dir_name: str = "",
+    ) -> str:
+        """Create an HMIDevice node and link to its TiaProject.
+
+        Args:
+            name: HMI name (e.g. "HMI_RT_1")
+            project_name: Parent TiaProject name
+            dir_name: Directory name (e.g. "HMI_HMI_RT_1")
+
+        Returns:
+            The device name.
+        """
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (hd:HMIDevice {name: $name, project: $project})
+                SET hd.dir_name = $dir_name,
+                    hd.platform = 'Siemens'
+                WITH hd
+                MATCH (tp:TiaProject {name: $project})
+                MERGE (tp)-[:HAS_DEVICE]->(hd)
+                """,
+                {"name": name, "project": project_name, "dir_name": dir_name},
+            )
+        return name
+
+    def create_hmi_connection(
+        self,
+        name: str,
+        hmi_name: str,
+        project_name: str,
+        partner: str = "",
+        station: str = "",
+        communication_driver: str = "",
+        node: str = "",
+        address: str = "",
+    ) -> str:
+        """Create an HMIConnection node and link HMI->PLC.
+
+        Args:
+            name: Connection name (e.g. "HMI_Connection_2")
+            hmi_name: Parent HMIDevice name
+            project_name: Parent TiaProject name
+            partner: PLC partner name (e.g. "PLC_1")
+            station: Station string
+            communication_driver: Driver string
+            node: Node/CPU description
+            address: Raw address string
+
+        Returns:
+            Connection name.
+        """
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (hc:HMIConnection {name: $name, hmi: $hmi, project: $project})
+                SET hc.partner = $partner,
+                    hc.station = $station,
+                    hc.communication_driver = $driver,
+                    hc.node = $node,
+                    hc.address = $address
+                WITH hc
+                MATCH (hd:HMIDevice {name: $hmi, project: $project})
+                MERGE (hd)-[:HAS_CONNECTION]->(hc)
+                """,
+                {
+                    "name": name,
+                    "hmi": hmi_name,
+                    "project": project_name,
+                    "partner": partner,
+                    "station": station,
+                    "driver": communication_driver,
+                    "node": node,
+                    "address": address,
+                },
+            )
+
+            # Link to PLC device if it exists
+            if partner:
+                session.run(
+                    """
+                    MATCH (hc:HMIConnection {name: $name, hmi: $hmi, project: $project})
+                    MATCH (pd:PLCDevice {name: $partner, project: $project})
+                    MERGE (hc)-[:CONNECTS_TO]->(pd)
+                    """,
+                    {
+                        "name": name,
+                        "hmi": hmi_name,
+                        "project": project_name,
+                        "partner": partner,
+                    },
+                )
+
+        return name
+
+    def create_hmi_alarm_class(
+        self,
+        name: str,
+        hmi_name: str,
+        project_name: str,
+        priority: str = "0",
+        state_machine: str = "",
+        is_system: bool = False,
+    ) -> str:
+        """Create an HMIAlarmClass node."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (hac:HMIAlarmClass {name: $name, hmi: $hmi, project: $project})
+                SET hac.priority = $priority,
+                    hac.state_machine = $state_machine,
+                    hac.is_system = $is_system
+                WITH hac
+                MATCH (hd:HMIDevice {name: $hmi, project: $project})
+                MERGE (hd)-[:HAS_ALARM_CLASS]->(hac)
+                """,
+                {
+                    "name": name,
+                    "hmi": hmi_name,
+                    "project": project_name,
+                    "priority": priority,
+                    "state_machine": state_machine,
+                    "is_system": is_system,
+                },
+            )
+        return name
+
+    def create_hmi_alarm(
+        self,
+        name: str,
+        hmi_name: str,
+        project_name: str,
+        alarm_type: str = "Discrete",
+        alarm_class: str = "",
+        origin: str = "",
+        priority: str = "0",
+        raised_state_tag: str = "",
+        trigger_bit_address: str = "",
+        trigger_mode: str = "",
+        condition: str = "",
+        condition_value: str = "",
+    ) -> str:
+        """Create an HMIAlarm node and link to HMI device and alarm class."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (ha:HMIAlarm {name: $name, hmi: $hmi, project: $project})
+                SET ha.alarm_type = $alarm_type,
+                    ha.alarm_class = $alarm_class,
+                    ha.origin = $origin,
+                    ha.priority = $priority,
+                    ha.raised_state_tag = $raised_state_tag,
+                    ha.trigger_bit_address = $trigger_bit_address,
+                    ha.trigger_mode = $trigger_mode,
+                    ha.condition = $condition,
+                    ha.condition_value = $condition_value,
+                    ha.semantic_status = COALESCE(ha.semantic_status, 'pending')
+                WITH ha
+                MATCH (hd:HMIDevice {name: $hmi, project: $project})
+                MERGE (hd)-[:HAS_ALARM]->(ha)
+                """,
+                {
+                    "name": name,
+                    "hmi": hmi_name,
+                    "project": project_name,
+                    "alarm_type": alarm_type,
+                    "alarm_class": alarm_class,
+                    "origin": origin,
+                    "priority": priority,
+                    "raised_state_tag": raised_state_tag,
+                    "trigger_bit_address": trigger_bit_address,
+                    "trigger_mode": trigger_mode,
+                    "condition": condition,
+                    "condition_value": condition_value,
+                },
+            )
+
+            # Link to alarm class if it exists
+            if alarm_class:
+                session.run(
+                    """
+                    MATCH (ha:HMIAlarm {name: $name, hmi: $hmi, project: $project})
+                    MATCH (hac:HMIAlarmClass {name: $alarm_class, hmi: $hmi, project: $project})
+                    MERGE (ha)-[:CLASSIFIED_AS]->(hac)
+                    """,
+                    {
+                        "name": name,
+                        "hmi": hmi_name,
+                        "project": project_name,
+                        "alarm_class": alarm_class,
+                    },
+                )
+
+        return name
+
+    def create_hmi_tag_table(
+        self,
+        name: str,
+        hmi_name: str,
+        project_name: str,
+        folder: str = "",
+    ) -> str:
+        """Create an HMITagTable node."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (ht:HMITagTable {name: $name, hmi: $hmi, project: $project})
+                SET ht.folder = $folder
+                WITH ht
+                MATCH (hd:HMIDevice {name: $hmi, project: $project})
+                MERGE (hd)-[:HAS_TAG_TABLE]->(ht)
+                """,
+                {
+                    "name": name,
+                    "hmi": hmi_name,
+                    "project": project_name,
+                    "folder": folder,
+                },
+            )
+        return name
+
+    def create_hmi_script(
+        self,
+        name: str,
+        hmi_name: str,
+        project_name: str,
+        script_file: str = "",
+        functions: Optional[List[str]] = None,
+        script_text: str = "",
+    ) -> str:
+        """Create an HMIScript node."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (hs:HMIScript {name: $name, hmi: $hmi, project: $project})
+                SET hs.script_file = $script_file,
+                    hs.functions = $functions,
+                    hs.script_text = $script_text,
+                    hs.semantic_status = COALESCE(hs.semantic_status, 'pending')
+                WITH hs
+                MATCH (hd:HMIDevice {name: $hmi, project: $project})
+                MERGE (hd)-[:HAS_SCRIPT]->(hs)
+                """,
+                {
+                    "name": name,
+                    "hmi": hmi_name,
+                    "project": project_name,
+                    "script_file": script_file,
+                    "functions": functions or [],
+                    "script_text": script_text[:5000] if script_text else "",
+                },
+            )
+        return name
+
+    def create_hmi_text_list(
+        self,
+        name: str,
+        hmi_name: str,
+        project_name: str,
+    ) -> str:
+        """Create an HMITextList node."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (htl:HMITextList {name: $name, hmi: $hmi, project: $project})
+                WITH htl
+                MATCH (hd:HMIDevice {name: $hmi, project: $project})
+                MERGE (hd)-[:HAS_TEXT_LIST]->(htl)
+                """,
+                {
+                    "name": name,
+                    "hmi": hmi_name,
+                    "project": project_name,
+                },
+            )
+        return name
+
+    def create_hmi_screen(
+        self,
+        name: str,
+        hmi_name: str,
+        project_name: str,
+        folder: str = "",
+    ) -> str:
+        """Create an HMIScreen node."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (hsc:HMIScreen {name: $name, hmi: $hmi, project: $project})
+                SET hsc.folder = $folder,
+                    hsc.semantic_status = COALESCE(hsc.semantic_status, 'pending')
+                WITH hsc
+                MATCH (hd:HMIDevice {name: $hmi, project: $project})
+                MERGE (hd)-[:HAS_SCREEN]->(hsc)
+                """,
+                {
+                    "name": name,
+                    "hmi": hmi_name,
+                    "project": project_name,
+                    "folder": folder,
+                },
+            )
+        return name
+
+    def create_plc_tag_table(
+        self,
+        name: str,
+        plc_name: str,
+        project_name: str,
+    ) -> str:
+        """Create a PLCTagTable node."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (pt:PLCTagTable {name: $name, plc: $plc, project: $project})
+                WITH pt
+                MATCH (pd:PLCDevice {name: $plc, project: $project})
+                MERGE (pd)-[:HAS_TAG_TABLE]->(pt)
+                """,
+                {
+                    "name": name,
+                    "plc": plc_name,
+                    "project": project_name,
+                },
+            )
+        return name
+
+    def create_plc_tag(
+        self,
+        name: str,
+        table_name: str,
+        plc_name: str,
+        project_name: str,
+        data_type: str = "Bool",
+        logical_address: str = "",
+        comment: str = "",
+    ) -> str:
+        """Create a PLCTag node and link to its tag table."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (ptg:PLCTag {name: $name, table: $table, plc: $plc, project: $project})
+                SET ptg.data_type = $data_type,
+                    ptg.logical_address = $logical_address,
+                    ptg.comment = $comment,
+                    ptg.semantic_status = COALESCE(ptg.semantic_status, 'pending')
+                WITH ptg
+                MATCH (pt:PLCTagTable {name: $table, plc: $plc, project: $project})
+                MERGE (pt)-[:HAS_TAG]->(ptg)
+                """,
+                {
+                    "name": name,
+                    "table": table_name,
+                    "plc": plc_name,
+                    "project": project_name,
+                    "data_type": data_type,
+                    "logical_address": logical_address,
+                    "comment": comment,
+                },
+            )
+        return name
+
+    def create_plc_type(
+        self,
+        name: str,
+        plc_name: str,
+        project_name: str,
+        members: Optional[List[Dict]] = None,
+        is_failsafe: bool = False,
+    ) -> str:
+        """Create a PLC UDT/struct type node and link to PLC device.
+
+        Also creates a UDT node for cross-referencing compatibility.
+        """
+        with self.session() as session:
+            # Create or merge the UDT node (for cross-ref compatibility)
+            session.run(
+                """
+                MERGE (u:UDT {name: $name})
+                SET u.platform = 'Siemens',
+                    u.plc = $plc,
+                    u.project = $project,
+                    u.is_failsafe = $is_failsafe,
+                    u.semantic_status = COALESCE(u.semantic_status, 'pending')
+                WITH u
+                MATCH (pd:PLCDevice {name: $plc, project: $project})
+                MERGE (pd)-[:HAS_TYPE]->(u)
+                """,
+                {
+                    "name": name,
+                    "plc": plc_name,
+                    "project": project_name,
+                    "is_failsafe": is_failsafe,
+                },
+            )
+
+            # Create member tags
+            for member in (members or []):
+                member_name = member.get("name", "")
+                if not member_name:
+                    continue
+                session.run(
+                    """
+                    MATCH (u:UDT {name: $type_name})
+                    MERGE (t:Tag {name: $member_name, aoi_name: $type_name})
+                    SET t.data_type = $data_type,
+                        t.description = $description
+                    MERGE (u)-[:HAS_MEMBER]->(t)
+                    """,
+                    {
+                        "type_name": name,
+                        "member_name": member_name,
+                        "data_type": member.get("data_type", "Unknown"),
+                        "description": member.get("description", ""),
+                    },
+                )
+
+        return name
+
+    def link_aoi_to_plc_device(
+        self,
+        aoi_name: str,
+        plc_name: str,
+        project_name: str,
+    ) -> None:
+        """Link an AOI (block) node to a PLCDevice."""
+        with self.session() as session:
+            session.run(
+                """
+                MATCH (a:AOI {name: $aoi_name})
+                MATCH (pd:PLCDevice {name: $plc, project: $project})
+                MERGE (pd)-[:HAS_BLOCK]->(a)
+                """,
+                {
+                    "aoi_name": aoi_name,
+                    "plc": plc_name,
+                    "project": project_name,
+                },
+            )
+
+    def link_alarm_to_plc_tag(
+        self,
+        alarm_name: str,
+        hmi_name: str,
+        project_name: str,
+        tag_reference: str,
+    ) -> None:
+        """Link an HMI alarm to a PLC tag by matching the trigger/raised_state reference.
+
+        Attempts to find the tag by name in PLCTag nodes or AOI Tag nodes.
+        """
+        with self.session() as session:
+            # Try to link to a PLCTag first
+            session.run(
+                """
+                MATCH (ha:HMIAlarm {name: $alarm_name, hmi: $hmi, project: $project})
+                MATCH (ptg:PLCTag {project: $project})
+                WHERE ptg.name = $tag_ref OR ptg.name CONTAINS $tag_ref
+                MERGE (ha)-[:MONITORS_TAG]->(ptg)
+                """,
+                {
+                    "alarm_name": alarm_name,
+                    "hmi": hmi_name,
+                    "project": project_name,
+                    "tag_ref": tag_reference,
+                },
+            )
+
+    def get_tia_project(self, name: str) -> Optional[Dict]:
+        """Get a TIA project with all its devices and summary counts."""
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $name})
+                OPTIONAL MATCH (tp)-[:HAS_DEVICE]->(pd:PLCDevice)
+                OPTIONAL MATCH (tp)-[:HAS_DEVICE]->(hd:HMIDevice)
+                WITH tp,
+                     collect(DISTINCT pd.name) as plcs,
+                     collect(DISTINCT hd.name) as hmis
+                RETURN tp.name as name,
+                       tp.directory as directory,
+                       tp.platform as platform,
+                       plcs, hmis
+                """,
+                {"name": name},
+            )
+            record = result.single()
+            return dict(record) if record else None
+
+    def get_tia_project_full(self, name: str) -> Dict:
+        """Get full TIA project topology with all devices, connections, and counts."""
+        with self.session() as session:
+            project = {"name": name, "plc_devices": [], "hmi_devices": []}
+
+            # PLC devices with block/type counts
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $name})-[:HAS_DEVICE]->(pd:PLCDevice)
+                OPTIONAL MATCH (pd)-[:HAS_BLOCK]->(a:AOI)
+                OPTIONAL MATCH (pd)-[:HAS_TYPE]->(u:UDT)
+                OPTIONAL MATCH (pd)-[:HAS_TAG_TABLE]->(pt:PLCTagTable)
+                WITH pd,
+                     count(DISTINCT a) as block_count,
+                     count(DISTINCT u) as type_count,
+                     count(DISTINCT pt) as tag_table_count
+                RETURN pd.name as name, pd.dir_name as dir_name,
+                       block_count, type_count, tag_table_count
+                ORDER BY pd.name
+                """,
+                {"name": name},
+            )
+            for r in result:
+                project["plc_devices"].append(dict(r))
+
+            # HMI devices with connection and alarm counts
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $name})-[:HAS_DEVICE]->(hd:HMIDevice)
+                OPTIONAL MATCH (hd)-[:HAS_CONNECTION]->(hc:HMIConnection)
+                OPTIONAL MATCH (hd)-[:HAS_ALARM]->(ha:HMIAlarm)
+                OPTIONAL MATCH (hd)-[:HAS_SCRIPT]->(hs:HMIScript)
+                OPTIONAL MATCH (hd)-[:HAS_TAG_TABLE]->(ht:HMITagTable)
+                OPTIONAL MATCH (hd)-[:HAS_SCREEN]->(hsc:HMIScreen)
+                WITH hd,
+                     count(DISTINCT hc) as connection_count,
+                     count(DISTINCT ha) as alarm_count,
+                     count(DISTINCT hs) as script_count,
+                     count(DISTINCT ht) as tag_table_count,
+                     count(DISTINCT hsc) as screen_count
+                RETURN hd.name as name, hd.dir_name as dir_name,
+                       connection_count, alarm_count, script_count,
+                       tag_table_count, screen_count
+                ORDER BY hd.name
+                """,
+                {"name": name},
+            )
+            for r in result:
+                project["hmi_devices"].append(dict(r))
+
+            # Connections (interlinks)
+            result = session.run(
+                """
+                MATCH (hd:HMIDevice {project: $name})-[:HAS_CONNECTION]->(hc:HMIConnection)
+                OPTIONAL MATCH (hc)-[:CONNECTS_TO]->(pd:PLCDevice)
+                RETURN hd.name as hmi, hc.name as connection,
+                       hc.partner as partner, hc.communication_driver as driver,
+                       pd.name as linked_plc
+                ORDER BY hd.name
+                """,
+                {"name": name},
+            )
+            project["connections"] = [dict(r) for r in result]
+
+            return project
+
+    def clear_tia_project(self, name: str) -> Dict[str, int]:
+        """Clear all nodes belonging to a TIA project.
+
+        Args:
+            name: TiaProject name
+
+        Returns:
+            Dict with counts of deleted nodes by type
+        """
+        with self.session() as session:
+            counts = {}
+
+            # Delete HMI artifacts
+            for label in [
+                "HMIAlarm", "HMIAlarmClass", "HMIScript",
+                "HMITagTable", "HMITextList", "HMIScreen", "HMIConnection",
+            ]:
+                result = session.run(
+                    f"MATCH (n:{label} {{project: $name}}) DETACH DELETE n RETURN count(n) as count",
+                    {"name": name},
+                )
+                counts[label] = result.single()["count"]
+
+            # Delete PLC tags and tag tables
+            result = session.run(
+                "MATCH (n:PLCTag {project: $name}) DETACH DELETE n RETURN count(n) as count",
+                {"name": name},
+            )
+            counts["PLCTag"] = result.single()["count"]
+
+            result = session.run(
+                "MATCH (n:PLCTagTable {project: $name}) DETACH DELETE n RETURN count(n) as count",
+                {"name": name},
+            )
+            counts["PLCTagTable"] = result.single()["count"]
+
+            # Delete devices
+            result = session.run(
+                "MATCH (n:HMIDevice {project: $name}) DETACH DELETE n RETURN count(n) as count",
+                {"name": name},
+            )
+            counts["HMIDevice"] = result.single()["count"]
+
+            result = session.run(
+                "MATCH (n:PLCDevice {project: $name}) DETACH DELETE n RETURN count(n) as count",
+                {"name": name},
+            )
+            counts["PLCDevice"] = result.single()["count"]
+
+            # Delete project node
+            result = session.run(
+                "MATCH (n:TiaProject {name: $name}) DETACH DELETE n RETURN count(n) as count",
+                {"name": name},
+            )
+            counts["TiaProject"] = result.single()["count"]
+
+            return counts
+
+    # ------------------------------------------------------------------
+    # TIA Portal Browse / Enrichment queries
+    # ------------------------------------------------------------------
+
+    def get_tia_projects(self) -> List[Dict]:
+        """Get all TIA Portal projects for the Browse tab.
+
+        Returns:
+            List of project dicts with name, directory, plc/hmi counts.
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (tp:TiaProject)
+                OPTIONAL MATCH (tp)-[:HAS_DEVICE]->(pd:PLCDevice)
+                OPTIONAL MATCH (tp)-[:HAS_DEVICE]->(hd:HMIDevice)
+                WITH tp,
+                     count(DISTINCT pd) as plc_count,
+                     count(DISTINCT hd) as hmi_count
+                RETURN tp.name as name,
+                       tp.directory as directory,
+                       tp.platform as platform,
+                       plc_count,
+                       hmi_count
+                ORDER BY tp.name
+                """
+            )
+            return [dict(r) for r in result]
+
+    def get_tia_project_resources(self, project_name: str) -> Dict[str, List[Dict]]:
+        """Get all resources belonging to a TIA project for the Browse tab.
+
+        Args:
+            project_name: TiaProject name
+
+        Returns:
+            Dict with plc_blocks, plc_tags, plc_types, hmi_scripts,
+            hmi_alarms, hmi_screens, hmi_connections, hmi_tag_tables,
+            hmi_text_lists lists.
+        """
+        with self.session() as session:
+            resources: Dict[str, List[Dict]] = {
+                "plc_blocks": [],
+                "plc_tags": [],
+                "plc_types": [],
+                "hmi_scripts": [],
+                "hmi_alarms": [],
+                "hmi_screens": [],
+                "hmi_connections": [],
+                "hmi_tag_tables": [],
+                "hmi_text_lists": [],
+            }
+
+            # PLC blocks (AOIs linked to PLCDevice)
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $project})-[:HAS_DEVICE]->(pd:PLCDevice)
+                MATCH (pd)-[:HAS_BLOCK]->(a:AOI)
+                RETURN a.name as name, a.type as type, a.purpose as purpose,
+                       a.semantic_status as status, pd.name as device
+                ORDER BY pd.name, a.name
+                """,
+                {"project": project_name},
+            )
+            resources["plc_blocks"] = [dict(r) for r in result]
+
+            # PLC tags
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $project})-[:HAS_DEVICE]->(pd:PLCDevice)
+                MATCH (pd)-[:HAS_TAG_TABLE]->(pt:PLCTagTable)-[:HAS_TAG]->(ptg:PLCTag)
+                RETURN ptg.name as name, ptg.data_type as data_type,
+                       ptg.logical_address as logical_address,
+                       ptg.comment as comment,
+                       ptg.semantic_status as status,
+                       pt.name as table_name, pd.name as device
+                ORDER BY pd.name, pt.name, ptg.name
+                LIMIT 500
+                """,
+                {"project": project_name},
+            )
+            resources["plc_tags"] = [dict(r) for r in result]
+
+            # PLC types (UDTs)
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $project})-[:HAS_DEVICE]->(pd:PLCDevice)
+                MATCH (pd)-[:HAS_TYPE]->(u:UDT)
+                RETURN u.name as name, u.purpose as purpose,
+                       u.semantic_status as status, pd.name as device
+                ORDER BY pd.name, u.name
+                """,
+                {"project": project_name},
+            )
+            resources["plc_types"] = [dict(r) for r in result]
+
+            # HMI scripts
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $project})-[:HAS_DEVICE]->(hd:HMIDevice)
+                MATCH (hd)-[:HAS_SCRIPT]->(hs:HMIScript)
+                RETURN hs.name as name, hs.script_file as script_file,
+                       hs.functions as functions,
+                       hs.semantic_status as status, hd.name as device
+                ORDER BY hd.name, hs.name
+                """,
+                {"project": project_name},
+            )
+            resources["hmi_scripts"] = [dict(r) for r in result]
+
+            # HMI alarms
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $project})-[:HAS_DEVICE]->(hd:HMIDevice)
+                MATCH (hd)-[:HAS_ALARM]->(ha:HMIAlarm)
+                RETURN ha.name as name, ha.alarm_type as alarm_type,
+                       ha.alarm_class as alarm_class,
+                       ha.semantic_status as status, hd.name as device
+                ORDER BY hd.name, ha.name
+                LIMIT 500
+                """,
+                {"project": project_name},
+            )
+            resources["hmi_alarms"] = [dict(r) for r in result]
+
+            # HMI screens
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $project})-[:HAS_DEVICE]->(hd:HMIDevice)
+                MATCH (hd)-[:HAS_SCREEN]->(hsc:HMIScreen)
+                RETURN hsc.name as name, hsc.folder as folder,
+                       hsc.semantic_status as status, hd.name as device
+                ORDER BY hd.name, hsc.folder, hsc.name
+                """,
+                {"project": project_name},
+            )
+            resources["hmi_screens"] = [dict(r) for r in result]
+
+            # HMI connections
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $project})-[:HAS_DEVICE]->(hd:HMIDevice)
+                MATCH (hd)-[:HAS_CONNECTION]->(hc:HMIConnection)
+                RETURN hc.name as name, hc.partner as partner,
+                       hc.communication_driver as driver, hd.name as device
+                ORDER BY hd.name, hc.name
+                """,
+                {"project": project_name},
+            )
+            resources["hmi_connections"] = [dict(r) for r in result]
+
+            # HMI tag tables
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $project})-[:HAS_DEVICE]->(hd:HMIDevice)
+                MATCH (hd)-[:HAS_TAG_TABLE]->(ht:HMITagTable)
+                RETURN ht.name as name, ht.folder as folder, hd.name as device
+                ORDER BY hd.name, ht.name
+                """,
+                {"project": project_name},
+            )
+            resources["hmi_tag_tables"] = [dict(r) for r in result]
+
+            # HMI text lists
+            result = session.run(
+                """
+                MATCH (tp:TiaProject {name: $project})-[:HAS_DEVICE]->(hd:HMIDevice)
+                MATCH (hd)-[:HAS_TEXT_LIST]->(htl:HMITextList)
+                RETURN htl.name as name, hd.name as device
+                ORDER BY hd.name, htl.name
+                """,
+                {"project": project_name},
+            )
+            resources["hmi_text_lists"] = [dict(r) for r in result]
+
+            return resources
+
     def get_graph_for_visualization(self) -> Dict:
         """Get nodes and edges for visualization."""
         with self.session() as session:
-            # Get all nodes
+            # Get all nodes (including Siemens TIA project nodes)
             nodes_result = session.run(
                 """
                 MATCH (n)
                 WHERE n:AOI OR n:UDT OR n:Equipment OR n:View OR n:EndToEndFlow
+                   OR n:TiaProject OR n:PLCDevice OR n:HMIDevice
+                   OR n:HMIConnection OR n:HMIAlarm OR n:HMIScript
                 RETURN elementId(n) as id, labels(n)[0] as type, 
                        coalesce(n.name, n.key, 'unknown') as label,
                        properties(n) as props
@@ -2747,8 +3874,12 @@ class OntologyGraph:
             edges_result = session.run(
                 """
                 MATCH (a)-[r]->(b)
-                WHERE (a:AOI OR a:UDT OR a:Equipment OR a:View)
-                  AND (b:AOI OR b:UDT OR b:Equipment OR b:View)
+                WHERE (a:AOI OR a:UDT OR a:Equipment OR a:View
+                       OR a:TiaProject OR a:PLCDevice OR a:HMIDevice
+                       OR a:HMIConnection OR a:HMIAlarm OR a:HMIScript)
+                  AND (b:AOI OR b:UDT OR b:Equipment OR b:View
+                       OR b:TiaProject OR b:PLCDevice OR b:HMIDevice
+                       OR b:HMIConnection OR b:HMIAlarm OR b:HMIScript)
                 RETURN elementId(a) as source, elementId(b) as target, type(r) as type,
                        properties(r) as props
             """
@@ -2927,6 +4058,8 @@ def main():
             "projects",
             "gateway-resources",
             "project-resources",
+            "tia-projects",
+            "tia-project-resources",
         ],
         help="Command to execute",
     )
@@ -3114,6 +4247,39 @@ def main():
                 print(f"  Scripts: {len(resources.get('scripts', []))}")
                 print(f"  Named Queries: {len(resources.get('queries', []))}")
                 print(f"  Gateway Events: {len(resources.get('events', []))}")
+
+        elif args.command == "tia-projects":
+            # Get all TIA Portal projects
+            projects = graph.get_tia_projects()
+            if args.json:
+                print(json_module.dumps(projects))
+            else:
+                print("\nTIA Portal Projects:")
+                print("-" * 40)
+                for p in projects:
+                    print(
+                        f"  {p['name']} ({p.get('plc_count', 0)} PLCs, "
+                        f"{p.get('hmi_count', 0)} HMIs)"
+                    )
+
+        elif args.command == "tia-project-resources":
+            # Get TIA project-specific resources
+            if not args.project:
+                print("[ERROR] --project required for tia-project-resources command")
+                return
+            resources = graph.get_tia_project_resources(args.project)
+            if args.json:
+                print(json_module.dumps(resources))
+            else:
+                print(f"\nTIA Resources for Project: {args.project}")
+                print("-" * 40)
+                print(f"  PLC Blocks:      {len(resources.get('plc_blocks', []))}")
+                print(f"  PLC Tags:        {len(resources.get('plc_tags', []))}")
+                print(f"  PLC Types:       {len(resources.get('plc_types', []))}")
+                print(f"  HMI Scripts:     {len(resources.get('hmi_scripts', []))}")
+                print(f"  HMI Alarms:      {len(resources.get('hmi_alarms', []))}")
+                print(f"  HMI Screens:     {len(resources.get('hmi_screens', []))}")
+                print(f"  HMI Connections: {len(resources.get('hmi_connections', []))}")
 
 
 if __name__ == "__main__":

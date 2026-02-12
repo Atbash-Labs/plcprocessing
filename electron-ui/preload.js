@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('api', {
   
   // Ingestion
   ingestPLC: (filePath) => ipcRenderer.invoke('ingest-plc', filePath),
+  ingestSiemens: (filePath) => ipcRenderer.invoke('ingest-siemens', filePath),
+  ingestTiaXml: (filePath) => ipcRenderer.invoke('ingest-tia-xml', filePath),
+  ingestTiaProject: (folderPath) => ipcRenderer.invoke('ingest-tia-project', folderPath),
   ingestIgnition: (filePath) => ipcRenderer.invoke('ingest-ignition', filePath),
   ingestWorkbench: (folderPath) => ipcRenderer.invoke('ingest-workbench', folderPath),
   
@@ -35,6 +38,11 @@ contextBridge.exposeInMainWorld('api', {
   getEnrichmentStatus: (options) => ipcRenderer.invoke('get-enrichment-status', options),
   enrichBatch: (options) => ipcRenderer.invoke('enrich-batch', options),
   
+  // TIA Portal Browse API
+  getTiaProjects: () => ipcRenderer.invoke('get-tia-projects'),
+  getTiaProjectResources: (projectName) => ipcRenderer.invoke('get-tia-project-resources', projectName),
+  enrichTiaBatch: (options) => ipcRenderer.invoke('enrich-tia-batch', options),
+  
   // Graph API
   graphLoad: (options) => ipcRenderer.invoke('graph:load', options),
   graphNeighbors: (options) => ipcRenderer.invoke('graph:neighbors', options),
@@ -51,6 +59,12 @@ contextBridge.exposeInMainWorld('api', {
   graphApplyBatch: (changes) => ipcRenderer.invoke('graph:apply-batch', changes),
   graphAiPropose: (description) => ipcRenderer.invoke('graph:ai-propose', description),
   graphAiExplain: (nodeNames) => ipcRenderer.invoke('graph:ai-explain', nodeNames),
+  
+  // DEXPI P&ID Conversion API
+  dexpiConvert: (options) => ipcRenderer.invoke('dexpi:convert', options),
+  dexpiExport: () => ipcRenderer.invoke('dexpi:export'),
+  dexpiLegend: () => ipcRenderer.invoke('dexpi:legend'),
+  dexpiCheck: () => ipcRenderer.invoke('dexpi:check'),
   
   // Event listeners for streaming (returns cleanup function)
   onStreamOutput: (callback) => {

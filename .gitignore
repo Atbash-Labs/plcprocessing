@@ -34,6 +34,7 @@ arduinotest*.xml
 *_import/
 *_modified_*/
 *_applied_*/
+*siemensprocessing/
 
 # IDE
 .vscode/
@@ -64,4 +65,11 @@ RAPIDINFO
 rapidexport
 samirexport
 ontology_graph.html
+
+# Build artifacts
+build/
+dist/
+.build-venv/
+electron-ui/node_modules/
+*.spec.bak
 

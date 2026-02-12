@@ -105,11 +105,11 @@ if (loadIgnitionFileBtn) {
 // Ingest Tab Handlers
 // ============================================
 
-// PLC Ingest
+// PLC Ingest (Rockwell)
 document.getElementById('btn-ingest-plc').addEventListener('click', async () => {
   const filePath = await window.api.selectFile({
     filters: [
-      { name: 'PLC Files', extensions: ['sc', 'L5X'] },
+      { name: 'Rockwell PLC Files', extensions: ['sc', 'L5X'] },
       { name: 'All Files', extensions: ['*'] }
     ]
   });
@@ -117,13 +117,13 @@ document.getElementById('btn-ingest-plc').addEventListener('click', async () => 
   if (!filePath) return;
   
   // Don't use loading overlay - we want to see streaming output
-  appendOutput(`\n[INGEST] ${filePath}\n`, false);
+  appendOutput(`\n[INGEST ROCKWELL] ${filePath}\n`, false);
   
   try {
     const result = await window.api.ingestPLC(filePath);
     if (result.success) {
       // Don't re-append result.output since it's already streamed
-      appendOutput('\n[OK] PLC ingestion complete!\n');
+      appendOutput('\n[OK] Rockwell PLC ingestion complete!\n');
     } else {
       appendOutput(`\n[ERROR] ${result.error}\n`);
     }
@@ -132,6 +132,115 @@ document.getElementById('btn-ingest-plc').addEventListener('click', async () => 
   }
   
   updateStats();
+  await loadProjects();
+  await loadGatewayResources();
+});
+
+// PLC Ingest (Siemens)
+document.getElementById('btn-ingest-siemens').addEventListener('click', async () => {
+  const filePath = await window.api.selectFile({
+    filters: [
+      { name: 'Siemens ST Files', extensions: ['st'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  
+  if (!filePath) return;
+  
+  // Don't use loading overlay - we want to see streaming output
+  appendOutput(`\n[INGEST SIEMENS] ${filePath}\n`, false);
+  
+  try {
+    const result = await window.api.ingestSiemens(filePath);
+    if (result.success) {
+      appendOutput('\n[OK] Siemens PLC ingestion complete!\n');
+    } else {
+      appendOutput(`\n[ERROR] ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`\n[ERROR] ${error.message}\n`);
+  }
+  
+  updateStats();
+  await loadProjects();
+  await loadGatewayResources();
+});
+
+// Siemens TIA Portal full project ingest
+document.getElementById('btn-ingest-tia-project').addEventListener('click', async () => {
+  const folderPath = await window.api.selectDirectory();
+  if (!folderPath) return;
+  
+  appendOutput(`\n[INGEST TIA PROJECT] ${folderPath}\n`, false);
+  appendOutput(`[INFO] Scanning PLCs, HMIs, tag tables, alarms, scripts, screens, types...\n`);
+  
+  try {
+    const result = await window.api.ingestTiaProject(folderPath);
+    if (result.success) {
+      appendOutput('\n[OK] Siemens TIA Portal project ingestion complete!\n');
+    } else {
+      appendOutput(`\n[ERROR] ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`\n[ERROR] ${error.message}\n`);
+  }
+  
+  updateStats();
+  await loadProjects();
+  await loadGatewayResources();
+});
+
+// PLC Ingest (TIA Portal XML) - single file
+document.getElementById('btn-ingest-tia-xml-file').addEventListener('click', async () => {
+  const filePath = await window.api.selectFile({
+    filters: [
+      { name: 'TIA Portal XML', extensions: ['xml'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  
+  if (!filePath) return;
+  
+  appendOutput(`\n[INGEST TIA XML] ${filePath}\n`, false);
+  
+  try {
+    const result = await window.api.ingestTiaXml(filePath);
+    if (result.success) {
+      appendOutput('\n[OK] TIA Portal XML ingestion complete!\n');
+    } else {
+      appendOutput(`\n[ERROR] ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`\n[ERROR] ${error.message}\n`);
+  }
+  
+  updateStats();
+  await loadProjects();
+  await loadGatewayResources();
+});
+
+// PLC Ingest (TIA Portal XML) - recursive directory
+document.getElementById('btn-ingest-tia-xml-dir').addEventListener('click', async () => {
+  const dirPath = await window.api.selectDirectory();
+  if (!dirPath) return;
+  
+  appendOutput(`\n[INGEST TIA XML DIR] ${dirPath}\n`, false);
+  appendOutput(`[INFO] Scanning recursively for .xml files...\n`);
+  
+  try {
+    const result = await window.api.ingestTiaXml(dirPath);
+    if (result.success) {
+      appendOutput('\n[OK] TIA Portal XML directory ingestion complete!\n');
+    } else {
+      appendOutput(`\n[ERROR] ${result.error}\n`);
+    }
+  } catch (error) {
+    appendOutput(`\n[ERROR] ${error.message}\n`);
+  }
+  
+  updateStats();
+  await loadProjects();
+  await loadGatewayResources();
 });
 
 // Ignition Ingest - handler defined later in Browse section
@@ -153,6 +262,8 @@ document.getElementById('btn-run-unified').addEventListener('click', async () =>
   }
   
   updateStats();
+  await loadProjects();
+  await loadGatewayResources();
 });
 
 // Troubleshooting Enrichment
@@ -243,8 +354,8 @@ function formatResponse(text) {
     .replace(/\n/g, '<br>');
   
   // Also detect node-like patterns (CamelCase_Names, prefixed names)
-  // Match patterns like: View:Dashboard, AOI:MotorStart, PLX-SLS-001
-  formatted = formatted.replace(/\b(AOI|View|UDT|Tag|Equipment|SIF|Script|Query|Component)[:]\s*([A-Za-z0-9_\-\/]+)/gi, (match, type, name) => {
+  // Match patterns like: View:Dashboard, AOI:MotorStart, PLX-SLS-001, HMIAlarm:MyAlarm
+  formatted = formatted.replace(/\b(AOI|View|UDT|Tag|Equipment|SIF|Script|Query|Component|TiaProject|PLCDevice|HMIDevice|HMIConnection|HMIAlarm|HMIAlarmClass|HMIScript|HMIScreen|HMITagTable|HMITextList|PLCTagTable|PLCTag)[:]\s*([A-Za-z0-9_\-\/]+)/gi, (match, type, name) => {
     return `${type}: ${createGraphRef(name, type)}`;
   });
   
@@ -672,6 +783,9 @@ document.getElementById('btn-clear-db').addEventListener('click', async () => {
   
   hideLoading();
   updateStats();
+  // Refresh browse tab data after clearing
+  await loadProjects();
+  await loadGatewayResources();
 });
 
 // Initialize Schema
@@ -787,6 +901,11 @@ function initBrowseSubTabs() {
     
     if (subtabId === 'gateway') {
       document.getElementById('subtab-gateway').classList.add('active');
+    } else if (subtabId.startsWith('tia:')) {
+      // TIA project sub-tab
+      const tiaProjectName = subtabId.replace('tia:', '');
+      const tiaContent = document.querySelector(`#tab-browse .sub-tab-content[data-tia-project="${tiaProjectName}"]`);
+      if (tiaContent) tiaContent.classList.add('active');
     } else {
       const projectContent = document.querySelector(`#tab-browse .sub-tab-content[data-project="${subtabId}"]`);
       if (projectContent) projectContent.classList.add('active');
@@ -1253,6 +1372,243 @@ async function enrichBatch(itemType, projectName = null) {
 document.getElementById('btn-enrich-tags')?.addEventListener('click', () => enrichBatch('ScadaTag'));
 document.getElementById('btn-enrich-udts')?.addEventListener('click', () => enrichBatch('UDT'));
 document.getElementById('btn-enrich-aois')?.addEventListener('click', () => enrichBatch('AOI'));
+
+// ============================================
+// TIA Portal Browse (Siemens projects)
+// ============================================
+
+let tiaState = {
+  projects: [],
+};
+
+// Load TIA Portal projects
+async function loadTiaProjects() {
+  try {
+    const result = await window.api.getTiaProjects();
+    if (result.success) {
+      tiaState.projects = result.projects || [];
+      renderTiaProjectTabs();
+    }
+  } catch (error) {
+    console.error('Failed to load TIA projects:', error);
+  }
+}
+
+// Render TIA project sub-tabs alongside Ignition projects
+function renderTiaProjectTabs() {
+  const container = document.getElementById('browse-sub-tabs');
+  
+  // Remove old TIA tabs (keep gateway + Ignition project tabs)
+  container.querySelectorAll('.sub-tab[data-tia]').forEach(el => el.remove());
+  
+  // Add TIA project tabs
+  for (const project of tiaState.projects) {
+    const tab = document.createElement('button');
+    tab.className = 'sub-tab';
+    tab.dataset.subtab = `tia:${project.name}`;
+    tab.dataset.tia = 'true';
+    tab.innerHTML = `<span style="color: #0288D1;">▪</span> ${project.name}`;
+    tab.title = `Siemens TIA: ${project.plc_count || 0} PLCs, ${project.hmi_count || 0} HMIs`;
+    container.appendChild(tab);
+  }
+  
+  // Create content sections for each TIA project
+  renderTiaProjectContents();
+}
+
+// Render TIA project content sections
+function renderTiaProjectContents() {
+  const template = document.getElementById('tia-project-subtab-template');
+  const browseTab = document.getElementById('tab-browse');
+  
+  // Remove old TIA project contents
+  browseTab.querySelectorAll('.sub-tab-content[data-tia-project]').forEach(el => {
+    if (el.dataset.tiaProject) el.remove();
+  });
+  
+  for (const project of tiaState.projects) {
+    const content = template.content.cloneNode(true);
+    const container = content.querySelector('.sub-tab-content');
+    
+    container.dataset.tiaProject = project.name;
+    container.querySelector('.project-name').textContent = `TIA Project: ${project.name}`;
+    
+    // Add enrich button handlers for Siemens types
+    const enrichPlcBlocksBtn = container.querySelector('.btn-enrich-plc-blocks');
+    const enrichPlcTagsBtn = container.querySelector('.btn-enrich-plc-tags');
+    const enrichHmiScriptsBtn = container.querySelector('.btn-enrich-hmi-scripts');
+    const enrichHmiAlarmsBtn = container.querySelector('.btn-enrich-hmi-alarms');
+    const enrichHmiScreensBtn = container.querySelector('.btn-enrich-hmi-screens');
+    
+    enrichPlcBlocksBtn?.addEventListener('click', () => enrichTiaBatch('AOI'));
+    enrichPlcTagsBtn?.addEventListener('click', () => enrichTiaBatch('PLCTag'));
+    enrichHmiScriptsBtn?.addEventListener('click', () => enrichTiaBatch('HMIScript'));
+    enrichHmiAlarmsBtn?.addEventListener('click', () => enrichTiaBatch('HMIAlarm'));
+    enrichHmiScreensBtn?.addEventListener('click', () => enrichTiaBatch('HMIScreen'));
+    
+    browseTab.appendChild(container);
+    
+    // Load resources for this TIA project
+    loadTiaProjectResources(project.name);
+  }
+}
+
+// Load TIA project resources
+async function loadTiaProjectResources(projectName) {
+  try {
+    const result = await window.api.getTiaProjectResources(projectName);
+    if (!result.success) {
+      console.warn(`TIA resources for ${projectName}: API returned error:`, result.error);
+      return;
+    }
+    
+    const resources = result.resources;
+    const container = document.querySelector(`#tab-browse .sub-tab-content[data-tia-project="${projectName}"]`);
+    if (!container) return;
+    
+    // Update counts
+    container.querySelector('.section-plc-blocks .section-count').textContent = `(${resources.plc_blocks?.length || 0})`;
+    container.querySelector('.section-plc-tags .section-count').textContent = `(${resources.plc_tags?.length || 0})`;
+    container.querySelector('.section-plc-types .section-count').textContent = `(${resources.plc_types?.length || 0})`;
+    container.querySelector('.section-hmi-scripts .section-count').textContent = `(${resources.hmi_scripts?.length || 0})`;
+    container.querySelector('.section-hmi-alarms .section-count').textContent = `(${resources.hmi_alarms?.length || 0})`;
+    container.querySelector('.section-hmi-screens .section-count').textContent = `(${resources.hmi_screens?.length || 0})`;
+    container.querySelector('.section-hmi-connections .section-count').textContent = `(${resources.hmi_connections?.length || 0})`;
+    
+    // Render resource lists
+    renderResourceList(container.querySelector('.plc-blocks-list'), resources.plc_blocks || [], 'name');
+    renderTiaTagList(container.querySelector('.plc-tags-list'), resources.plc_tags || []);
+    renderResourceList(container.querySelector('.plc-types-list'), resources.plc_types || [], 'name');
+    renderTiaScriptList(container.querySelector('.hmi-scripts-list'), resources.hmi_scripts || []);
+    renderTiaAlarmList(container.querySelector('.hmi-alarms-list'), resources.hmi_alarms || []);
+    renderResourceList(container.querySelector('.hmi-screens-list'), resources.hmi_screens || [], 'name');
+    renderTiaConnectionList(container.querySelector('.hmi-connections-list'), resources.hmi_connections || []);
+    
+  } catch (error) {
+    console.error(`Failed to load TIA resources for ${projectName}:`, error);
+  }
+}
+
+// Render TIA PLC tag list with data type and address
+function renderTiaTagList(container, tags) {
+  if (!container) return;
+  container.innerHTML = '';
+  
+  for (const tag of tags.slice(0, 100)) {
+    const el = document.createElement('div');
+    el.className = 'resource-item';
+    if (tag.status === 'complete') el.classList.add('complete');
+    else el.classList.add('pending');
+    
+    const addr = tag.logical_address ? ` @ ${tag.logical_address}` : '';
+    el.textContent = `${tag.name} (${tag.data_type}${addr})`;
+    el.title = `Table: ${tag.table_name || '?'} | Device: ${tag.device || '?'}${tag.comment ? '\n' + tag.comment : ''}`;
+    container.appendChild(el);
+  }
+  
+  if (tags.length > 100) {
+    const more = document.createElement('div');
+    more.className = 'resource-item';
+    more.style.fontStyle = 'italic';
+    more.textContent = `... and ${tags.length - 100} more`;
+    container.appendChild(more);
+  }
+}
+
+// Render TIA HMI script list with function count
+function renderTiaScriptList(container, scripts) {
+  if (!container) return;
+  container.innerHTML = '';
+  
+  for (const script of scripts) {
+    const el = document.createElement('div');
+    el.className = 'resource-item';
+    if (script.status === 'complete') el.classList.add('complete');
+    else el.classList.add('pending');
+    
+    const funcCount = script.functions?.length || 0;
+    el.textContent = `${script.name} (${funcCount} functions)`;
+    el.title = `Functions: ${(script.functions || []).slice(0, 10).join(', ')}`;
+    container.appendChild(el);
+  }
+}
+
+// Render TIA HMI alarm list with type
+function renderTiaAlarmList(container, alarms) {
+  if (!container) return;
+  container.innerHTML = '';
+  
+  for (const alarm of alarms.slice(0, 100)) {
+    const el = document.createElement('div');
+    el.className = 'resource-item';
+    if (alarm.status === 'complete') el.classList.add('complete');
+    else el.classList.add('pending');
+    
+    const typeIcon = alarm.alarm_type === 'Analog' ? '📊' : '🔘';
+    el.textContent = `${typeIcon} ${alarm.name} [${alarm.alarm_class || 'No class'}]`;
+    el.title = `Type: ${alarm.alarm_type} | Device: ${alarm.device || '?'}`;
+    container.appendChild(el);
+  }
+  
+  if (alarms.length > 100) {
+    const more = document.createElement('div');
+    more.className = 'resource-item';
+    more.style.fontStyle = 'italic';
+    more.textContent = `... and ${alarms.length - 100} more`;
+    container.appendChild(more);
+  }
+}
+
+// Render TIA HMI connection list with partner info
+function renderTiaConnectionList(container, connections) {
+  if (!container) return;
+  container.innerHTML = '';
+  
+  for (const conn of connections) {
+    const el = document.createElement('div');
+    el.className = 'resource-item';
+    el.textContent = `${conn.name} → ${conn.partner || '?'} (${conn.driver || 'Unknown'})`;
+    el.title = `Device: ${conn.device || '?'}`;
+    container.appendChild(el);
+  }
+}
+
+// Enrich TIA items (no backup file needed)
+async function enrichTiaBatch(itemType) {
+  const batchSizeInput = document.getElementById('enrichment-batch-size');
+  const batchSize = parseInt(batchSizeInput?.value || '5', 10);
+  
+  const btn = event.target;
+  const originalText = btn.textContent;
+  btn.textContent = 'Enriching...';
+  btn.disabled = true;
+  
+  appendEnrichmentLog(`\n[START] Enriching ${batchSize} ${itemType} items (Siemens TIA)...\n`);
+  
+  try {
+    const result = await window.api.enrichTiaBatch({
+      itemType: itemType,
+      batchSize: batchSize,
+    });
+    
+    if (result.success) {
+      // Refresh TIA resources after enrichment
+      setTimeout(() => {
+        for (const project of tiaState.projects) {
+          loadTiaProjectResources(project.name);
+        }
+      }, 1000);
+    } else {
+      appendEnrichmentLog(`[ERROR] ${result.error}\n`);
+    }
+  } catch (error) {
+    appendEnrichmentLog(`[ERROR] ${error.message}\n`);
+    console.error('TIA enrichment failed:', error);
+  } finally {
+    btn.textContent = originalText;
+    btn.disabled = false;
+  }
+}
 
 // Go to Browse tab button
 document.getElementById('btn-goto-browse')?.addEventListener('click', () => {
@@ -2348,6 +2704,543 @@ document.addEventListener('keydown', (e) => {
 window.openGraphModal = openGraphModal;
 
 // ============================================
+// DEXPI P&ID Tab
+// ============================================
+
+let dexpiGraphRenderer = null;
+let dexpiState = {
+  loaded: false,
+  data: null,
+};
+
+// DEXPI-specific Cytoscape styling (overrides for P&ID look)
+function createDexpiGraphRenderer(container) {
+  const renderer = new GraphRenderer(container, {
+    editable: false,
+    layout: 'hierarchical',
+    onNodeSelect: onDexpiNodeSelect,
+    onEdgeSelect: onDexpiEdgeSelect,
+  });
+
+  // Override styles for DEXPI-specific P&ID look
+  if (renderer.cy) {
+    renderer.cy.style()
+      .selector('node')
+      .style({
+        'label': 'data(label)',
+        'text-valign': 'bottom',
+        'text-halign': 'center',
+        'text-margin-y': 8,
+        'font-size': 10,
+        'font-family': 'Inter, sans-serif',
+        'color': '#b0b0c0',
+        'text-outline-width': 2,
+        'text-outline-color': '#0a0a0f',
+        'background-color': 'data(color)',
+        'shape': 'data(shape)',
+        'width': 38,
+        'height': 38,
+        'border-width': 2,
+        'border-color': '#2a2a3a',
+        'transition-property': 'width, height, border-width, border-color',
+        'transition-duration': '0.15s',
+      })
+      .selector('node:selected')
+      .style({
+        'border-width': 3,
+        'border-color': '#00d4ff',
+        'width': 46,
+        'height': 46,
+        'color': '#ffffff',
+        'font-size': 11,
+        'font-weight': 600,
+      })
+      .selector('node.hovered')
+      .style({
+        'width': 46,
+        'height': 46,
+        'border-width': 3,
+        'border-color': '#00d4ff',
+        'color': '#ffffff',
+        'font-size': 12,
+        'font-weight': 600,
+        'z-index': 999,
+      })
+      .selector('node.neighbor-highlighted')
+      .style({
+        'border-width': 2,
+        'border-color': '#5a5a6a',
+        'color': '#c0c0d0',
+        'font-size': 11,
+      })
+      .selector('node.faded')
+      .style({
+        'opacity': 0.2,
+        'label': '',
+      })
+      .selector('edge')
+      .style({
+        'width': 1.5,
+        'line-color': 'data(edgeColor)',
+        'target-arrow-color': 'data(edgeColor)',
+        'target-arrow-shape': 'triangle',
+        'curve-style': 'bezier',
+        'line-style': 'data(lineStyle)',
+        'opacity': 0.5,
+        'label': '',
+      })
+      .selector('edge.highlighted')
+      .style({
+        'width': 2.5,
+        'label': 'data(label)',
+        'font-size': 9,
+        'color': '#a0a0b0',
+        'text-rotation': 'autorotate',
+        'text-margin-y': -10,
+        'text-outline-width': 2,
+        'text-outline-color': '#0a0a0f',
+        'opacity': 1,
+      })
+      .selector('edge.faded')
+      .style({
+        'opacity': 0.08,
+      })
+      .selector('edge:selected')
+      .style({
+        'width': 3,
+        'line-color': '#00d4ff',
+        'target-arrow-color': '#00d4ff',
+        'label': 'data(label)',
+        'font-size': 9,
+        'color': '#00d4ff',
+        'text-rotation': 'autorotate',
+        'text-margin-y': -10,
+        'text-outline-width': 2,
+        'text-outline-color': '#0a0a0f',
+        'opacity': 1,
+      })
+      .selector('.dimmed')
+      .style({
+        'opacity': 0.15,
+      })
+      .update();
+  }
+
+  return renderer;
+}
+
+// Load DEXPI data into the graph renderer
+function loadDexpiData(data) {
+  if (!dexpiGraphRenderer) return;
+
+  const elements = [];
+
+  // Add nodes with DEXPI-specific data fields
+  if (data.nodes) {
+    for (const node of data.nodes) {
+      elements.push({
+        data: {
+          id: node.id,
+          label: truncateLabel(node.label, 25),
+          fullLabel: node.label,
+          type: node.type,
+          dexpiCategory: node.dexpiCategory,
+          dexpiLabel: node.dexpiLabel,
+          color: node.color || '#616161',
+          shape: node.shape || 'round-rectangle',
+          icon: node.icon || '?',
+          group: 'dexpi',
+          properties: node.properties || {},
+        },
+      });
+    }
+  }
+
+  // Add edges with DEXPI-specific styling
+  if (data.edges) {
+    for (const edge of data.edges) {
+      elements.push({
+        data: {
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          type: edge.type,
+          dexpiType: edge.dexpiType,
+          label: edge.label || edge.type,
+          edgeColor: edge.color || '#9E9E9E',
+          lineStyle: edge.lineStyle || 'solid',
+          properties: edge.properties || {},
+        },
+      });
+    }
+  }
+
+  dexpiGraphRenderer.cy.elements().remove();
+  dexpiGraphRenderer.cy.add(elements);
+  dexpiGraphRenderer.runLayout();
+}
+
+function truncateLabel(label, maxLen) {
+  if (!label) return '';
+  if (label.length <= maxLen) return label;
+  return label.substring(0, maxLen - 3) + '...';
+}
+
+// Initialize DEXPI tab
+function initDexpiTab() {
+  if (dexpiState.loaded) return;
+
+  const container = document.getElementById('dexpi-graph-container');
+  if (!container) return;
+
+  // Check pydexpi availability
+  window.api.dexpiCheck().then(result => {
+    const statusEl = document.getElementById('dexpi-pydexpi-status');
+    if (statusEl) {
+      if (result.pydexpiAvailable) {
+        statusEl.textContent = `pydexpi v${result.pydexpiVersion} available`;
+        statusEl.style.color = 'var(--color-success)';
+      } else {
+        statusEl.textContent = 'pydexpi not installed (export limited)';
+        statusEl.style.color = 'var(--color-warning)';
+      }
+    }
+  });
+
+  dexpiState.loaded = true;
+}
+
+// Convert and load DEXPI graph
+async function convertToDexpi() {
+  const loading = document.getElementById('dexpi-graph-loading');
+  if (loading) {
+    loading.innerHTML = '<div class="loading-spinner"></div><p>Converting to DEXPI P&ID view...</p>';
+    loading.classList.add('active');
+  }
+
+  const limit = parseInt(document.getElementById('dexpi-limit')?.value || '500', 10);
+  const includeScada = document.getElementById('dexpi-include-scada')?.checked || false;
+  const includeTroubleshooting = document.getElementById('dexpi-include-troubleshooting')?.checked || false;
+
+  try {
+    const result = await window.api.dexpiConvert({
+      limit,
+      includeScada,
+      includeTroubleshooting,
+    });
+
+    if (result.success) {
+      dexpiState.data = result;
+
+      // Create renderer if needed
+      const container = document.getElementById('dexpi-graph-container');
+      if (dexpiGraphRenderer) {
+        dexpiGraphRenderer.destroy();
+        dexpiGraphRenderer = null;
+      }
+      dexpiGraphRenderer = createDexpiGraphRenderer(container);
+
+      // Load data
+      loadDexpiData(result);
+
+      if (loading) loading.classList.remove('active');
+
+      // Update stats and legend
+      updateDexpiStats(result);
+      updateDexpiLegend(result);
+    } else {
+      if (loading) {
+        loading.innerHTML = `<p style="color: var(--color-danger);">Error: ${result.error}</p>`;
+      }
+    }
+  } catch (error) {
+    if (loading) {
+      loading.innerHTML = `<p style="color: var(--color-danger);">Error: ${error.message}</p>`;
+    }
+  }
+}
+
+// Update DEXPI statistics panel
+function updateDexpiStats(result) {
+  const statsEl = document.getElementById('dexpi-stats');
+  if (!statsEl) return;
+
+  const stats = result.stats || {};
+  let html = `
+    <div class="dexpi-stats-summary">
+      <div class="stat-row"><span>Total Nodes</span><span class="stat-value">${result.nodeCount || 0}</span></div>
+      <div class="stat-row"><span>Total Edges</span><span class="stat-value">${result.edgeCount || 0}</span></div>
+    </div>
+    <div class="dexpi-stats-breakdown">
+  `;
+
+  const categoryColors = {
+    equipment: '#1565C0',
+    instrument: '#2E7D32',
+    actuator: '#E65100',
+    piping: '#546E7A',
+    safety: '#C62828',
+    process_control: '#00838F',
+    nozzle: '#6A1B9A',
+    scada_hmi: '#7B1FA2',
+    data_interface: '#F57F17',
+    unclassified: '#616161',
+  };
+
+  const categoryLabels = {
+    equipment: 'Equipment',
+    instrument: 'Instrumentation',
+    actuator: 'Actuators',
+    piping: 'Piping',
+    safety: 'Safety',
+    process_control: 'Process Control',
+    nozzle: 'Nozzles',
+    scada_hmi: 'SCADA / HMI',
+    data_interface: 'Data Interface',
+    unclassified: 'Unclassified',
+  };
+
+  for (const [cat, count] of Object.entries(stats)) {
+    if (count === 0) continue;
+    const color = categoryColors[cat] || '#616161';
+    const label = categoryLabels[cat] || cat;
+    html += `
+      <div class="stat-row">
+        <span><span class="legend-color-inline" style="background: ${color};"></span>${label}</span>
+        <span class="stat-value">${count}</span>
+      </div>
+    `;
+  }
+
+  html += '</div>';
+  statsEl.innerHTML = html;
+}
+
+// Dynamically populate DEXPI legend from conversion result
+function updateDexpiLegend(result) {
+  const legendBody = document.getElementById('dexpi-legend-body');
+  if (!legendBody) return;
+
+  const legend = result.legend || [];
+  if (legend.length === 0) {
+    legendBody.innerHTML = '<p class="text-muted text-xs">No data yet</p>';
+    return;
+  }
+
+  // Separate node and edge legend entries
+  const nodeEntries = legend.filter(e => e.type === 'node');
+  const edgeEntries = legend.filter(e => e.type === 'edge');
+
+  // Group node entries by logical sections
+  const shapeToClass = {
+    'ellipse': 'shape-ellipse',
+    'diamond': 'shape-diamond',
+    'round-rectangle': 'shape-round-rectangle',
+  };
+
+  let html = '';
+
+  // Node categories (only show those with count > 0 or all if none have counts)
+  const hasAnyCounts = nodeEntries.some(e => e.count > 0);
+  const visibleNodes = hasAnyCounts ? nodeEntries.filter(e => e.count > 0) : nodeEntries;
+
+  if (visibleNodes.length > 0) {
+    html += '<div class="legend-group"><div class="legend-group-title">Node Types</div>';
+    for (const entry of visibleNodes) {
+      const shapeClass = shapeToClass[entry.shape] || 'shape-round-rectangle';
+      const countStr = entry.count > 0 ? ` (${entry.count})` : '';
+      html += `
+        <div class="legend-item">
+          <span class="legend-shape ${shapeClass}" style="background: ${entry.color};"></span>
+          <span class="legend-label">${entry.label}${countStr}</span>
+        </div>`;
+    }
+    html += '</div>';
+  }
+
+  // Edge types
+  if (edgeEntries.length > 0) {
+    html += '<div class="legend-group"><div class="legend-group-title">Connections</div>';
+    for (const entry of edgeEntries) {
+      const lineStyle = entry.style || 'solid';
+      html += `
+        <div class="legend-item">
+          <span class="legend-line" style="border-top: 2px ${lineStyle} ${entry.color};"></span>
+          <span class="legend-label">${entry.label}</span>
+        </div>`;
+    }
+    html += '</div>';
+  }
+
+  legendBody.innerHTML = html;
+}
+
+// Handle DEXPI node selection
+function onDexpiNodeSelect(nodeData) {
+  const detailsEl = document.getElementById('dexpi-node-details');
+  if (!detailsEl) return;
+
+  const fullLabel = nodeData.fullLabel || nodeData.label;
+  const dexpiLabel = nodeData.dexpiLabel || 'Unknown';
+  const dexpiCategory = nodeData.dexpiCategory || 'unclassified';
+  const color = nodeData.color || '#616161';
+
+  let html = `
+    <div class="dexpi-item-header">
+      <span class="dexpi-item-badge" style="background: ${color};">${nodeData.icon || '?'}</span>
+      <div>
+        <div class="node-name">${fullLabel}</div>
+        <div class="node-type" style="color: ${color};">${dexpiLabel}</div>
+      </div>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">DEXPI Category</span>
+      <span class="detail-value">${dexpiCategory}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Internal Type</span>
+      <span class="detail-value">${nodeData.type}</span>
+    </div>
+  `;
+
+  const props = nodeData.properties || {};
+  const importantProps = ['purpose', 'description', 'inferred_purpose', 'vendor', 'revision'];
+
+  for (const key of importantProps) {
+    if (props[key]) {
+      let displayValue = props[key];
+      if (typeof displayValue === 'string' && displayValue.length > 80) {
+        displayValue = displayValue.substring(0, 80) + '...';
+      }
+      html += `
+        <div class="detail-row">
+          <span class="detail-label">${key.replace(/_/g, ' ')}</span>
+          <span class="detail-value">${displayValue}</span>
+        </div>
+      `;
+    }
+  }
+
+  // Show remaining properties
+  for (const [key, value] of Object.entries(props)) {
+    if (importantProps.includes(key) || key === 'name' || value === null || value === undefined) continue;
+    if (typeof value === 'object') continue;
+
+    let displayValue = String(value);
+    if (displayValue.length > 50) {
+      displayValue = displayValue.substring(0, 50) + '...';
+    }
+
+    html += `
+      <div class="detail-row">
+        <span class="detail-label">${key.replace(/_/g, ' ')}</span>
+        <span class="detail-value">${displayValue}</span>
+      </div>
+    `;
+  }
+
+  detailsEl.innerHTML = html;
+}
+
+// Handle DEXPI edge selection
+function onDexpiEdgeSelect(edgeData) {
+  const detailsEl = document.getElementById('dexpi-node-details');
+  if (!detailsEl) return;
+
+  const dexpiType = edgeData.dexpiType || 'unknown';
+  const edgeColor = edgeData.edgeColor || '#9E9E9E';
+
+  detailsEl.innerHTML = `
+    <div class="node-name">Connection</div>
+    <div class="node-type" style="color: ${edgeColor};">${edgeData.label || edgeData.type}</div>
+    <div class="detail-row">
+      <span class="detail-label">DEXPI Type</span>
+      <span class="detail-value">${dexpiType}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Internal Type</span>
+      <span class="detail-value">${edgeData.type}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">From</span>
+      <span class="detail-value">${edgeData.source}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">To</span>
+      <span class="detail-value">${edgeData.target}</span>
+    </div>
+  `;
+}
+
+// DEXPI toolbar handlers
+document.getElementById('btn-dexpi-convert')?.addEventListener('click', convertToDexpi);
+
+document.getElementById('btn-dexpi-export')?.addEventListener('click', async () => {
+  try {
+    const result = await window.api.dexpiExport();
+    if (result.success && result.outputFile) {
+      alert(`DEXPI JSON exported!\n\nFile: ${result.outputFile}`);
+    } else if (result.error !== 'Export cancelled') {
+      alert(`Error: ${result.error}`);
+    }
+  } catch (error) {
+    alert(`Error: ${error.message}`);
+  }
+});
+
+document.getElementById('dexpi-search')?.addEventListener('input', (e) => {
+  if (dexpiGraphRenderer) {
+    dexpiGraphRenderer.search(e.target.value);
+  }
+});
+
+document.getElementById('dexpi-filter')?.addEventListener('change', (e) => {
+  if (!dexpiGraphRenderer) return;
+
+  const filterValue = e.target.value;
+  if (filterValue === 'all') {
+    dexpiGraphRenderer.cy.elements().removeClass('dimmed');
+  } else {
+    dexpiGraphRenderer.cy.nodes().forEach(node => {
+      if (node.data('dexpiCategory') === filterValue) {
+        node.removeClass('dimmed');
+        node.connectedEdges().removeClass('dimmed');
+      } else {
+        node.addClass('dimmed');
+      }
+    });
+  }
+});
+
+document.getElementById('btn-dexpi-layout-force')?.addEventListener('click', () => {
+  if (dexpiGraphRenderer) {
+    dexpiGraphRenderer.switchLayout('force');
+    document.getElementById('btn-dexpi-layout-force').classList.add('active');
+    document.getElementById('btn-dexpi-layout-hierarchical').classList.remove('active');
+  }
+});
+
+document.getElementById('btn-dexpi-layout-hierarchical')?.addEventListener('click', () => {
+  if (dexpiGraphRenderer) {
+    dexpiGraphRenderer.switchLayout('hierarchical');
+    document.getElementById('btn-dexpi-layout-hierarchical').classList.add('active');
+    document.getElementById('btn-dexpi-layout-force').classList.remove('active');
+  }
+});
+
+document.getElementById('btn-dexpi-zoom-in')?.addEventListener('click', () => {
+  if (dexpiGraphRenderer) dexpiGraphRenderer.zoomIn();
+});
+
+document.getElementById('btn-dexpi-zoom-out')?.addEventListener('click', () => {
+  if (dexpiGraphRenderer) dexpiGraphRenderer.zoomOut();
+});
+
+document.getElementById('btn-dexpi-fit')?.addEventListener('click', () => {
+  if (dexpiGraphRenderer) dexpiGraphRenderer.fit();
+});
+
+// ============================================
 // Initial Load
 // ============================================
 
@@ -2361,6 +3254,16 @@ navButtons.forEach(btn => {
       // Slight delay to ensure DOM is ready
       setTimeout(initGraphTab, 100);
     }
+    if (btn.dataset.tab === 'browse') {
+      // Refresh browse data when switching to tab
+      loadProjects();
+      loadGatewayResources();
+      loadTiaProjects();
+    }
+    if (btn.dataset.tab === 'dexpi') {
+      // Initialize DEXPI tab on first visit
+      setTimeout(initDexpiTab, 100);
+    }
   });
 });
 
@@ -2369,5 +3272,6 @@ setTimeout(() => {
   updateStats();
   loadProjects();
   loadGatewayResources();
+  loadTiaProjects();
 }, 500);
 

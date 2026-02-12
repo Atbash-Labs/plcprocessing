@@ -58,9 +58,16 @@ class IncrementalAnalyzer:
         "NamedQuery",
         "GatewayEvent",
         "ViewComponent",
+        # Siemens TIA Portal types (no backup file needed -- context from Neo4j)
+        "PLCTag",
+        "HMIScript",
+        "HMIAlarm",
+        "HMIScreen",
     ]
     GATEWAY_TYPES = {"AOI", "UDT", "Equipment", "ScadaTag"}
     PROJECT_TYPES = {"View", "Script", "NamedQuery", "GatewayEvent", "ViewComponent"}
+    # Siemens types read all context from Neo4j (no backup file needed)
+    TIA_TYPES = {"AOI", "PLCTag", "HMIScript", "HMIAlarm", "HMIScreen"}
 
     def __init__(
         self,
@@ -782,6 +789,52 @@ class IncrementalAnalyzer:
                         "delay": ge.delay,
                     }
 
+        # ---- Siemens TIA Portal types (context from Neo4j, no backup file) ----
+        elif item_type == "PLCTag":
+            for item in items:
+                name = item.get("name")
+                context["raw_definitions"][name] = {
+                    "data_type": item.get("data_type", ""),
+                    "logical_address": item.get("logical_address", ""),
+                    "comment": item.get("comment", ""),
+                    "table_name": item.get("table_name", ""),
+                    "plc": item.get("plc", ""),
+                }
+
+        elif item_type == "HMIScript":
+            for item in items:
+                name = item.get("name")
+                script_text = item.get("script_text", "")
+                context["raw_definitions"][name] = {
+                    "script_file": item.get("script_file", ""),
+                    "functions": item.get("functions", []),
+                    "script_text": script_text[:4000] if script_text else "",
+                    "hmi": item.get("hmi", ""),
+                }
+
+        elif item_type == "HMIAlarm":
+            for item in items:
+                name = item.get("name")
+                context["raw_definitions"][name] = {
+                    "alarm_type": item.get("alarm_type", ""),
+                    "alarm_class": item.get("alarm_class", ""),
+                    "origin": item.get("origin", ""),
+                    "priority": item.get("priority", ""),
+                    "raised_state_tag": item.get("raised_state_tag", ""),
+                    "trigger_bit_address": item.get("trigger_bit_address", ""),
+                    "trigger_mode": item.get("trigger_mode", ""),
+                    "condition": item.get("condition", ""),
+                    "condition_value": item.get("condition_value", ""),
+                }
+
+        elif item_type == "HMIScreen":
+            for item in items:
+                name = item.get("name")
+                context["raw_definitions"][name] = {
+                    "folder": item.get("folder", ""),
+                    "hmi": item.get("hmi", ""),
+                }
+
         return context
 
     def _get_system_prompt(self, item_type: str) -> str:
@@ -850,6 +903,37 @@ Tag types include:
 Describe what data this tag provides, what it's used for, and how it fits into the system.
 For query tags, explain what data the query retrieves and how it's used.
 For OPC tags, explain what equipment/signal this monitors or controls.
+""",
+            # ---- Siemens TIA Portal types ----
+            "PLCTag": """
+You are analyzing Siemens PLC global tags (I/O addresses, memory words, flags).
+Each tag has a name, data type, logical address (e.g. %IW10, %MW333, %Q0.0), and optional comment.
+Describe what process signal or variable this tag represents.
+Consider the naming convention, data type, and address range to determine its role:
+- %I = Digital inputs, %Q = Digital outputs
+- %IW/%QW = Word-sized analog I/O
+- %MW = Memory word, %MD = Memory double-word
+- %DB = Data block addresses
+""",
+            "HMIScript": """
+You are analyzing Siemens HMI JavaScript scripts from a TIA Portal Comfort/Unified panel.
+These scripts implement operator interactions, animations, data formatting, and screen logic.
+You will receive the full JavaScript source code.
+Describe what the script module does — what HMI behaviors it implements and what equipment it interacts with.
+Look at exported function names and code logic to understand the module's role.
+""",
+            "HMIAlarm": """
+You are analyzing Siemens HMI alarm definitions (analog or discrete) from a TIA Portal project.
+- Discrete alarms: triggered by a single bit (trigger_bit_address) going high/low
+- Analog alarms: triggered when a value crosses a threshold (condition + condition_value)
+Each alarm is linked to an alarm class and may reference PLC tags.
+Describe what process condition this alarm monitors and what operator response it requires.
+""",
+            "HMIScreen": """
+You are analyzing Siemens HMI screen definitions from a TIA Portal Comfort/Unified panel.
+Screens are operator interface pages that display process data, trends, and controls.
+Based on the screen name and folder location, describe what part of the process this screen
+displays and what operator tasks it supports.
 """,
         }
 
@@ -951,6 +1035,11 @@ def main():
             "Script",
             "NamedQuery",
             "GatewayEvent",
+            # Siemens TIA Portal types
+            "PLCTag",
+            "HMIScript",
+            "HMIAlarm",
+            "HMIScreen",
         ],
         help="Specific item type to analyze/reset",
     )
@@ -1097,6 +1186,11 @@ def main():
                     "Script",
                     "NamedQuery",
                     "GatewayEvent",
+                    # Siemens TIA Portal types
+                    "PLCTag",
+                    "HMIScript",
+                    "HMIAlarm",
+                    "HMIScreen",
                 ]
 
             for item_type in types_to_reset:
@@ -1116,49 +1210,61 @@ def main():
             graph.close()
         return
 
-    # Analyze command requires input file
+    # Analyze command requires input file (unless using Siemens TIA types)
     if args.command == "analyze":
-        if not args.input:
-            print("[ERROR] --input required for analyze command")
+        is_tia_only = args.type and args.type in IncrementalAnalyzer.TIA_TYPES
+
+        if not args.input and not is_tia_only:
+            print("[ERROR] --input required for analyze command (not needed for Siemens TIA types)")
             return
 
-        # Parse backup - auto-detect format (workbench vs baseline)
-        input_path = Path(args.input)
+        if is_tia_only and not args.input:
+            # Siemens TIA types read context from Neo4j -- no backup file needed
+            from ignition_parser import IgnitionBackup
 
-        # Check if input is a directory (workbench backup folder)
-        if input_path.is_dir():
-            project_json = input_path / "project.json"
-            if project_json.exists():
-                print(f"[INFO] Detected workbench backup folder: {input_path}")
-                wb_parser = WorkbenchParser()
-                backup = wb_parser.parse_file(str(project_json))
-            else:
-                print(f"[ERROR] No project.json found in {input_path}")
-                return
-        else:
-            # Check if it's a workbench project.json
-            try:
-                import json
+            backup = IgnitionBackup(file_path="", version="")
+            print(f"[INFO] Siemens TIA enrichment mode (context from Neo4j)")
+        elif args.input:
+            # Parse backup - auto-detect format (workbench vs baseline)
+            input_path = Path(args.input)
 
-                with open(args.input, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if WorkbenchParser.is_workbench_format(data):
-                    print(f"[INFO] Detected workbench format: {args.input}")
+            # Check if input is a directory (workbench backup folder)
+            if input_path.is_dir():
+                project_json = input_path / "project.json"
+                if project_json.exists():
+                    print(f"[INFO] Detected workbench backup folder: {input_path}")
                     wb_parser = WorkbenchParser()
-                    backup = wb_parser.parse_file(args.input)
+                    backup = wb_parser.parse_file(str(project_json))
                 else:
-                    # Standard baseline format
-                    ignition_parser = IgnitionParser()
-                    backup = ignition_parser.parse_file(args.input)
-            except Exception as e:
-                print(f"[ERROR] Failed to parse input file: {e}")
-                return
+                    print(f"[ERROR] No project.json found in {input_path}")
+                    return
+            else:
+                # Check if it's a workbench project.json
+                try:
+                    import json
 
-        proj_info = f" (project filter: {args.project})" if args.project else ""
-        print(
-            f"[INFO] Loaded: {len(backup.udt_definitions)} UDTs, "
-            f"{len(backup.udt_instances)} instances, {len(backup.windows)} views{proj_info}"
-        )
+                    with open(args.input, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if WorkbenchParser.is_workbench_format(data):
+                        print(f"[INFO] Detected workbench format: {args.input}")
+                        wb_parser = WorkbenchParser()
+                        backup = wb_parser.parse_file(args.input)
+                    else:
+                        # Standard baseline format
+                        ignition_parser = IgnitionParser()
+                        backup = ignition_parser.parse_file(args.input)
+                except Exception as e:
+                    print(f"[ERROR] Failed to parse input file: {e}")
+                    return
+
+            proj_info = f" (project filter: {args.project})" if args.project else ""
+            print(
+                f"[INFO] Loaded: {len(backup.udt_definitions)} UDTs, "
+                f"{len(backup.udt_instances)} instances, {len(backup.windows)} views{proj_info}"
+            )
+        else:
+            print("[ERROR] --input required for this item type")
+            return
 
         with IncrementalAnalyzer(
             backup, batch_size=args.batch, project_filter=args.project

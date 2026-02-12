@@ -812,7 +812,15 @@ class GraphRenderer {
       'Script': 'scada', 'NamedQuery': 'scada', 'Project': 'scada',
       'FaultSymptom': 'troubleshooting', 'FaultCause': 'troubleshooting',
       'Material': 'mes', 'Batch': 'mes', 'Operation': 'mes',
-      'CCP': 'mes', 'ProductionOrder': 'mes'
+      'CCP': 'mes', 'ProductionOrder': 'mes',
+      // Siemens TIA Portal project types
+      'TiaProject': 'siemens',
+      'PLCDevice': 'siemens', 'HMIDevice': 'siemens',
+      'HMIConnection': 'siemens',
+      'HMIAlarm': 'siemens-hmi', 'HMIAlarmClass': 'siemens-hmi',
+      'HMIScript': 'siemens-hmi', 'HMITagTable': 'siemens-hmi',
+      'HMITextList': 'siemens-hmi', 'HMIScreen': 'siemens-hmi',
+      'PLCTagTable': 'plc', 'PLCTag': 'plc',
     };
     return typeMap[type] || 'other';
   }
@@ -826,6 +834,8 @@ class GraphRenderer {
       'scada': '#7B1FA2',
       'troubleshooting': '#FF5722',
       'mes': '#00897B',
+      'siemens': '#0288D1',
+      'siemens-hmi': '#0097A7',
       'other': '#9E9E9E'
     };
     const group = this._getGroupForType(type);

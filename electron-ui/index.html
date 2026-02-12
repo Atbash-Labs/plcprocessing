@@ -54,6 +54,17 @@
           </svg>
           <span class="nav-label">Graph</span>
         </button>
+        <button class="nav-btn" data-tab="dexpi" title="DEXPI P&ID View">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M2 20h20"/>
+            <path d="M5 20V8l3-4h8l3 4v12"/>
+            <circle cx="12" cy="13" r="3"/>
+            <line x1="12" y1="10" x2="12" y2="7"/>
+            <line x1="9" y1="13" x2="6" y2="13"/>
+            <line x1="15" y1="13" x2="18" y2="13"/>
+          </svg>
+          <span class="nav-label">DEXPI</span>
+        </button>
         <button class="nav-btn" data-tab="gallery" title="UI Gallery">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="3" y="3" width="7" height="7"/>
@@ -102,9 +113,51 @@
                 <path d="M9 9h6M9 12h6M9 15h4"/>
               </svg>
             </div>
-            <h3>PLC Files</h3>
+            <h3>Rockwell PLC</h3>
             <p>Import Rockwell L5X exports (.sc files or directories)</p>
             <button class="btn btn-primary" id="btn-ingest-plc">Select File</button>
+          </div>
+          
+          <div class="card">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="4" y="4" width="16" height="16" rx="2"/>
+                <path d="M8 8h8M8 12h8M8 16h5"/>
+                <path d="M17 14l3 3-3 3" stroke-width="1.5"/>
+              </svg>
+            </div>
+            <h3>Siemens PLC</h3>
+            <p>Import Siemens TIA Portal / AX structured text (.st files or directories)</p>
+            <button class="btn btn-primary" id="btn-ingest-siemens">Select File</button>
+          </div>
+          
+          <div class="card">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <path d="M8 13h3M8 17h5M8 9h1"/>
+              </svg>
+            </div>
+            <h3>TIA Portal XML</h3>
+            <p>Import Siemens TIA Portal Openness XML exports (LAD/FBD blocks)</p>
+            <div style="display: flex; gap: 0.5rem;">
+              <button class="btn btn-primary" id="btn-ingest-tia-xml-file">Select File</button>
+              <button class="btn btn-secondary" id="btn-ingest-tia-xml-dir">Select Folder</button>
+            </div>
+          </div>
+          
+          <div class="card">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="2" y="2" width="20" height="20" rx="2"/>
+                <path d="M7 7h10v4H7zM7 13h10v4H7z"/>
+                <line x1="12" y1="11" x2="12" y2="13"/>
+              </svg>
+            </div>
+            <h3>Siemens TIA Project</h3>
+            <p>Import full TIA Portal project (PLCs + HMIs + interlinks)</p>
+            <button class="btn btn-primary" id="btn-ingest-tia-project">Select Folder</button>
           </div>
           
           <div class="card">
@@ -252,6 +305,102 @@
           </div>
         </div>
         
+        <!-- TIA Project Sub-tab Content Template (cloned for each TIA project) -->
+        <template id="tia-project-subtab-template">
+          <div class="sub-tab-content" data-tia-project="">
+            <div class="project-header">
+              <h3 class="project-name"></h3>
+              <span class="project-inheritance">Siemens TIA Portal</span>
+            </div>
+            
+            <div class="resource-section section-plc-blocks">
+              <div class="section-header">
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6M9 12h6M9 15h4"/></svg></span>
+                <span class="section-title">PLC Blocks (AOIs)</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                  <button class="btn btn-sm btn-secondary btn-enrich-plc-blocks">Enrich</button>
+                </div>
+              </div>
+              <div class="resource-list plc-blocks-list"></div>
+            </div>
+            
+            <div class="resource-section section-plc-tags">
+              <div class="section-header">
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg></span>
+                <span class="section-title">PLC Tags</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                  <button class="btn btn-sm btn-secondary btn-enrich-plc-tags">Enrich</button>
+                </div>
+              </div>
+              <div class="resource-list plc-tags-list"></div>
+            </div>
+            
+            <div class="resource-section section-plc-types">
+              <div class="section-header">
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+                <span class="section-title">PLC Types / UDTs</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                </div>
+              </div>
+              <div class="resource-list plc-types-list"></div>
+            </div>
+            
+            <div class="resource-section section-hmi-scripts">
+              <div class="section-header">
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span>
+                <span class="section-title">HMI Scripts</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                  <button class="btn btn-sm btn-secondary btn-enrich-hmi-scripts">Enrich</button>
+                </div>
+              </div>
+              <div class="resource-list hmi-scripts-list"></div>
+            </div>
+            
+            <div class="resource-section section-hmi-alarms">
+              <div class="section-header">
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>
+                <span class="section-title">HMI Alarms</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                  <button class="btn btn-sm btn-secondary btn-enrich-hmi-alarms">Enrich</button>
+                </div>
+              </div>
+              <div class="resource-list hmi-alarms-list"></div>
+            </div>
+            
+            <div class="resource-section section-hmi-screens">
+              <div class="section-header">
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>
+                <span class="section-title">HMI Screens</span>
+                <span class="section-count">(loading...)</span>
+                <div class="enrichment-controls">
+                  <span class="enrichment-status"></span>
+                  <button class="btn btn-sm btn-secondary btn-enrich-hmi-screens">Enrich</button>
+                </div>
+              </div>
+              <div class="resource-list hmi-screens-list"></div>
+            </div>
+            
+            <div class="resource-section section-hmi-connections">
+              <div class="section-header">
+                <span class="section-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
+                <span class="section-title">HMI Connections</span>
+                <span class="section-count">(loading...)</span>
+              </div>
+              <div class="resource-list hmi-connections-list"></div>
+            </div>
+          </div>
+        </template>
+
         <!-- Project Sub-tab Content Template (cloned for each project) -->
         <template id="project-subtab-template">
           <div class="sub-tab-content" data-project="">
@@ -462,6 +611,8 @@
                   <option value="all">All Types</option>
                   <option value="plc">PLC Layer</option>
                   <option value="scada">SCADA Layer</option>
+                  <option value="siemens">Siemens TIA</option>
+                  <option value="siemens-hmi">Siemens HMI</option>
                   <option value="mes">MES Layer</option>
                   <option value="troubleshooting">Troubleshooting</option>
                   <option value="flows">Flows</option>
@@ -539,6 +690,17 @@
                     <div class="legend-item">
                       <span class="legend-color" style="background: var(--color-node-fault);"></span>
                       <span class="legend-label">Fault / Symptom</span>
+                    </div>
+                  </div>
+                  <div class="legend-group">
+                    <div class="legend-group-title">Siemens TIA</div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: #0288D1;"></span>
+                      <span class="legend-label">Project / Device</span>
+                    </div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: #0097A7;"></span>
+                      <span class="legend-label">HMI (Alarm / Screen / Script)</span>
                     </div>
                   </div>
                   <div class="legend-group">
@@ -641,6 +803,20 @@
                       <option value="LOCATED_AT">LOCATED_AT</option>
                       <option value="MANAGED_BY">MANAGED_BY</option>
                     </optgroup>
+                    <optgroup label="Siemens TIA">
+                      <option value="HAS_DEVICE">HAS_DEVICE</option>
+                      <option value="HAS_BLOCK">HAS_BLOCK</option>
+                      <option value="HAS_TYPE">HAS_TYPE</option>
+                      <option value="HAS_TAG_TABLE">HAS_TAG_TABLE</option>
+                      <option value="HAS_CONNECTION">HAS_CONNECTION</option>
+                      <option value="CONNECTS_TO">CONNECTS_TO</option>
+                      <option value="HAS_ALARM">HAS_ALARM</option>
+                      <option value="CLASSIFIED_AS">CLASSIFIED_AS</option>
+                      <option value="HAS_SCRIPT">HAS_SCRIPT</option>
+                      <option value="HAS_SCREEN">HAS_SCREEN</option>
+                      <option value="HAS_TEXT_LIST">HAS_TEXT_LIST</option>
+                      <option value="MONITORS_TAG">MONITORS_TAG</option>
+                    </optgroup>
                   </select>
                 </div>
                 <div class="form-group">
@@ -663,11 +839,25 @@
                     <optgroup label="PLC">
                       <option value="AOI">AOI</option>
                       <option value="Tag">Tag</option>
+                      <option value="PLCTagTable">PLCTagTable</option>
+                      <option value="PLCTag">PLCTag</option>
                     </optgroup>
                     <optgroup label="SCADA">
                       <option value="UDT">UDT</option>
                       <option value="Equipment">Equipment</option>
                       <option value="View">View</option>
+                    </optgroup>
+                    <optgroup label="Siemens TIA">
+                      <option value="TiaProject">TiaProject</option>
+                      <option value="PLCDevice">PLCDevice</option>
+                      <option value="HMIDevice">HMIDevice</option>
+                      <option value="HMIConnection">HMIConnection</option>
+                      <option value="HMIAlarm">HMIAlarm</option>
+                      <option value="HMIAlarmClass">HMIAlarmClass</option>
+                      <option value="HMIScript">HMIScript</option>
+                      <option value="HMIScreen">HMIScreen</option>
+                      <option value="HMITagTable">HMITagTable</option>
+                      <option value="HMITextList">HMITextList</option>
                     </optgroup>
                     <optgroup label="MES">
                       <option value="Material">Material</option>
@@ -681,6 +871,129 @@
                   <input type="text" id="new-node-name" placeholder="Enter name...">
                 </div>
                 <button class="btn btn-secondary" id="btn-add-node">Add Node</button>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- DEXPI P&ID Tab -->
+      <section class="tab-content" id="tab-dexpi">
+        <header class="tab-header">
+          <h2>DEXPI P&ID View</h2>
+          <p>View your ontology mapped to the DEXPI standard (Data Exchange in the Process Industry)</p>
+        </header>
+        
+        <div class="graph-layout">
+          <!-- Left Sidebar: DEXPI Options -->
+          <aside class="graph-sidebar graph-sidebar-left" id="dexpi-options-panel">
+            <div class="sidebar-section">
+              <h4>DEXPI Conversion</h4>
+              <p class="text-xs text-muted" style="margin-bottom: 12px;">
+                Classify ontology nodes into DEXPI P&ID categories
+              </p>
+              <div class="form-group">
+                <label>Max Nodes</label>
+                <input type="number" id="dexpi-limit" class="input input-sm" value="500" min="10" max="5000">
+              </div>
+              <div class="form-group" style="margin-top: 8px;">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="dexpi-include-scada"> Include SCADA / HMI nodes
+                </label>
+              </div>
+              <div class="form-group" style="margin-top: 4px;">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="dexpi-include-troubleshooting"> Include Troubleshooting
+                </label>
+              </div>
+              <div class="form-actions" style="margin-top: 12px;">
+                <button class="btn btn-primary" id="btn-dexpi-convert">Convert to DEXPI</button>
+              </div>
+            </div>
+
+            <div class="sidebar-section">
+              <h4>Export</h4>
+              <button class="btn btn-sm btn-secondary" id="btn-dexpi-export" style="width: 100%;">
+                Export DEXPI JSON
+              </button>
+              <div class="dexpi-status" id="dexpi-status" style="margin-top: 8px;">
+                <span class="text-xs text-muted" id="dexpi-pydexpi-status"></span>
+              </div>
+            </div>
+
+            <div class="sidebar-section">
+              <h4>Statistics</h4>
+              <div class="dexpi-stats" id="dexpi-stats">
+                <p class="text-xs text-muted">Convert ontology to see stats</p>
+              </div>
+            </div>
+          </aside>
+          
+          <!-- Center: DEXPI Graph Canvas -->
+          <div class="graph-main">
+            <div class="toolbar">
+              <div class="toolbar-group">
+                <input type="text" id="dexpi-search" class="input input-sm" style="width: 180px;" placeholder="Search P&ID items...">
+                <select id="dexpi-filter" class="input input-sm" style="width: 150px;">
+                  <option value="all">All DEXPI Types</option>
+                  <option value="equipment">Equipment</option>
+                  <option value="instrument">Instrumentation</option>
+                  <option value="actuator">Actuators</option>
+                  <option value="piping">Piping</option>
+                  <option value="safety">Safety Systems</option>
+                  <option value="process_control">Process Control</option>
+                  <option value="nozzle">Nozzles</option>
+                  <option value="scada_hmi">SCADA / HMI</option>
+                  <option value="data_interface">Data Interface</option>
+                </select>
+              </div>
+              <div class="toolbar-separator"></div>
+              <div class="toolbar-group">
+                <div class="segmented-control">
+                  <button class="segmented-control-item" id="btn-dexpi-layout-force">Force</button>
+                  <button class="segmented-control-item active" id="btn-dexpi-layout-hierarchical">Hierarchical</button>
+                </div>
+              </div>
+              <div class="toolbar-separator"></div>
+              <div class="toolbar-group">
+                <button class="btn btn-sm btn-ghost btn-icon" id="btn-dexpi-zoom-in" title="Zoom in">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                </button>
+                <button class="btn btn-sm btn-ghost btn-icon" id="btn-dexpi-zoom-out" title="Zoom out">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                </button>
+                <button class="btn btn-sm btn-ghost btn-icon" id="btn-dexpi-fit" title="Fit to view">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+                </button>
+              </div>
+            </div>
+            
+            <div class="graph-container" id="dexpi-graph-container">
+              <!-- Cytoscape.js renders here -->
+              <div class="graph-loading" id="dexpi-graph-loading">
+                <div class="loading-spinner"></div>
+                <p>Click "Convert to DEXPI" to generate the P&ID view</p>
+              </div>
+              
+              <!-- DEXPI Legend (dynamically populated from conversion data) -->
+              <div class="graph-legend dexpi-legend" id="dexpi-legend">
+                <div class="legend-header">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+                  DEXPI Legend
+                </div>
+                <div class="legend-body" id="dexpi-legend-body">
+                  <p class="text-muted text-xs">Convert to populate legend</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Right Sidebar: DEXPI Inspector -->
+          <aside class="graph-sidebar graph-sidebar-right" id="dexpi-details-panel">
+            <div class="sidebar-section">
+              <h4>P&ID Inspector</h4>
+              <div class="node-details" id="dexpi-node-details">
+                <p class="no-selection text-muted text-sm">Select an item to view DEXPI details</p>
               </div>
             </div>
           </aside>
@@ -974,6 +1287,14 @@ Execution time: 12ms</code>
               <div class="legend-item">
                 <span class="legend-color" style="background: var(--color-node-fault);"></span>
                 <span class="legend-label">Troubleshooting</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-color" style="background: #0288D1;"></span>
+                <span class="legend-label">Siemens TIA</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-color" style="background: #0097A7;"></span>
+                <span class="legend-label">Siemens HMI</span>
               </div>
             </div>
           </div>

@@ -1,16 +1,78 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { spawn } = require('child_process');
 
 let mainWindow;
 
-// Path to scripts directory (relative to project root)
-const scriptsDir = path.join(__dirname, '..', 'scripts');
+// ---------------------------------------------------------------------------
+// Python backend configuration  (works in both dev and packaged modes)
+// ---------------------------------------------------------------------------
+function getPythonConfig() {
+  if (app.isPackaged) {
+    // Packaged mode – use the PyInstaller-bundled dispatcher executable
+    const backendDir = path.join(process.resourcesPath, 'python-backend');
+    return {
+      packaged: true,
+      backendDir,
+      dispatcherExe: path.join(backendDir, 'dispatcher.exe'),
+      scriptsDir: path.join(backendDir, 'scripts'),
+      // Working directory for spawned processes – use the directory that
+      // contains the .exe so the user can place a .env file next to it.
+      cwd: path.dirname(process.execPath)
+    };
+  }
+  // Development mode – use system Python
+  return {
+    packaged: false,
+    backendDir: null,
+    dispatcherExe: null,
+    scriptsDir: path.join(__dirname, '..', 'scripts'),
+    pythonCmd: process.platform === 'win32' ? 'python' : 'python3',
+    cwd: path.join(__dirname, '..')
+  };
+}
 
-// Cross-platform Python command (Windows uses 'python', macOS/Linux use 'python3')
-const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+// Initialised once app is ready (see createWindow); declared here for module scope.
+let pyConfig;
+
+/**
+ * Spawn a Python script.
+ *
+ * In **dev mode** this calls ``python -u scripts/<name> ...``
+ * In **packaged mode** this calls ``dispatcher.exe <name> ...``
+ *
+ * Returns the child_process.ChildProcess handle.
+ */
+function spawnPythonProcess(scriptName, args = []) {
+  const env = {
+    ...process.env,
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUNBUFFERED: '1'
+  };
+
+  if (pyConfig.packaged) {
+    // Tell the dispatcher where the user's .env lives
+    const dotenvPath = path.join(pyConfig.cwd, '.env');
+    if (fs.existsSync(dotenvPath)) {
+      env.DOTENV_PATH = dotenvPath;
+    }
+    return spawn(pyConfig.dispatcherExe, [scriptName, ...args], {
+      cwd: pyConfig.cwd,
+      env
+    });
+  }
+  // Dev mode – invoke system Python directly
+  const scriptPath = path.join(pyConfig.scriptsDir, scriptName);
+  return spawn(pyConfig.pythonCmd, ['-u', scriptPath, ...args], {
+    cwd: pyConfig.cwd,
+    env
+  });
+}
 
 function createWindow() {
+  pyConfig = getPythonConfig();
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -52,12 +114,7 @@ function runPythonScript(scriptName, args = [], options = {}) {
   const { streaming = false, streamId = null } = options;
   
   return new Promise((resolve, reject) => {
-    const scriptPath = path.join(scriptsDir, scriptName);
-    // Use -u for unbuffered output to enable real-time streaming
-    const pythonProcess = spawn(pythonCmd, ['-u', scriptPath, ...args], {
-      cwd: path.join(__dirname, '..'),
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
-    });
+    const pythonProcess = spawnPythonProcess(scriptName, args);
 
     let stdout = '';
     let stderr = '';
@@ -135,9 +192,11 @@ ipcMain.handle('select-file', async (event, options) => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
     filters: options.filters || [
-      { name: 'All Supported', extensions: ['json', 'sc', 'L5X'] },
+      { name: 'All Supported', extensions: ['json', 'sc', 'L5X', 'st', 'xml'] },
       { name: 'Ignition Backup', extensions: ['json'] },
-      { name: 'PLC Files', extensions: ['sc', 'L5X'] }
+      { name: 'Rockwell PLC', extensions: ['sc', 'L5X'] },
+      { name: 'Siemens PLC', extensions: ['st'] },
+      { name: 'TIA Portal XML', extensions: ['xml'] }
     ]
   });
   return result.filePaths[0] || null;
@@ -151,11 +210,53 @@ ipcMain.handle('select-directory', async () => {
   return result.filePaths[0] || null;
 });
 
-// Ingest PLC files (with streaming)
+// Ingest PLC files - Rockwell (with streaming)
 ipcMain.handle('ingest-plc', async (event, filePath) => {
   const streamId = `ingest-plc-${Date.now()}`;
   try {
     const output = await runPythonScript('ontology_analyzer.py', [filePath, '-v'], {
+      streaming: true,
+      streamId
+    });
+    return { success: true, output, streamId };
+  } catch (error) {
+    return { success: false, error: error.message, streamId };
+  }
+});
+
+// Ingest Siemens ST files (with streaming)
+ipcMain.handle('ingest-siemens', async (event, filePath) => {
+  const streamId = `ingest-siemens-${Date.now()}`;
+  try {
+    const output = await runPythonScript('ontology_analyzer.py', [filePath, '--siemens', '-v'], {
+      streaming: true,
+      streamId
+    });
+    return { success: true, output, streamId };
+  } catch (error) {
+    return { success: false, error: error.message, streamId };
+  }
+});
+
+// Ingest Siemens TIA Portal XML exports (with streaming)
+ipcMain.handle('ingest-tia-xml', async (event, filePath) => {
+  const streamId = `ingest-tia-xml-${Date.now()}`;
+  try {
+    const output = await runPythonScript('ontology_analyzer.py', [filePath, '--tia-xml', '-v', '--skip-ai'], {
+      streaming: true,
+      streamId
+    });
+    return { success: true, output, streamId };
+  } catch (error) {
+    return { success: false, error: error.message, streamId };
+  }
+});
+
+// Ingest entire Siemens TIA Portal project (with streaming)
+ipcMain.handle('ingest-tia-project', async (event, folderPath) => {
+  const streamId = `ingest-tia-project-${Date.now()}`;
+  try {
+    const output = await runPythonScript('ontology_analyzer.py', [folderPath, '--tia-project', '-v', '--skip-ai'], {
       streaming: true,
       streamId
     });
@@ -244,13 +345,8 @@ ipcMain.handle('run-enrichment', async () => {
 ipcMain.handle('clear-database', async () => {
   try {
     // Use neo4j_ontology.py with 'yes' piped to stdin
-    const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
-    
     return new Promise((resolve, reject) => {
-      const proc = spawn(pythonCmd, ['-u', scriptPath, 'clear'], {
-        cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
-      });
+      const proc = spawnPythonProcess('neo4j_ontology.py', ['clear']);
       
       // Send 'yes' to confirm
       proc.stdin.write('yes\n');
@@ -300,8 +396,6 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
   const streamId = `troubleshoot-${Date.now()}`;
   
   try {
-    const scriptPath = path.join(scriptsDir, 'troubleshoot.py');
-    
     // Prepare JSON payload with question and history
     const payload = JSON.stringify({
       question: question,
@@ -309,11 +403,7 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
     });
     
     return new Promise((resolve, reject) => {
-      // Use -u for unbuffered output to enable real-time streaming
-      const proc = spawn(pythonCmd, ['-u', scriptPath, '--history', '-v'], {
-        cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
-      });
+      const proc = spawnPythonProcess('troubleshoot.py', ['--history', '-v']);
       
       // Send JSON to stdin
       proc.stdin.write(payload);
@@ -415,7 +505,10 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
 // Generate visualization
 ipcMain.handle('generate-viz', async () => {
   try {
-    const outputPath = path.join(__dirname, '..', 'ontology_graph.html');
+    // In packaged mode write to a temp-friendly location next to the exe
+    const outputPath = app.isPackaged
+      ? path.join(path.dirname(process.execPath), 'ontology_graph.html')
+      : path.join(__dirname, '..', 'ontology_graph.html');
     await runPythonScript('ontology_viewer.py', ['-o', outputPath]);
     return { success: true, path: outputPath };
   } catch (error) {
@@ -467,13 +560,8 @@ ipcMain.handle('load-database', async () => {
     const filePath = result.filePaths[0];
     
     // Run load with --yes to skip confirmation (we'll confirm in UI)
-    const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
-    
     return new Promise((resolve) => {
-      const proc = spawn(pythonCmd, ['-u', scriptPath, 'load', '-f', filePath, '--yes'], {
-        cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
-      });
+      const proc = spawnPythonProcess('neo4j_ontology.py', ['load', '-f', filePath, '--yes']);
       
       let stdout = '';
       let stderr = '';
@@ -505,13 +593,8 @@ ipcMain.handle('load-database', async () => {
 // Get all projects with inheritance info
 ipcMain.handle('get-projects', async () => {
   try {
-    const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
-    
     return new Promise((resolve) => {
-      const proc = spawn(pythonCmd, ['-u', scriptPath, 'projects', '--json'], {
-        cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
-      });
+      const proc = spawnPythonProcess('neo4j_ontology.py', ['projects', '--json']);
       
       let stdout = '';
       let stderr = '';
@@ -540,13 +623,8 @@ ipcMain.handle('get-projects', async () => {
 // Get gateway-wide resources (Tags, UDTs, AOIs)
 ipcMain.handle('get-gateway-resources', async () => {
   try {
-    const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
-    
     return new Promise((resolve) => {
-      const proc = spawn(pythonCmd, ['-u', scriptPath, 'gateway-resources', '--json'], {
-        cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
-      });
+      const proc = spawnPythonProcess('neo4j_ontology.py', ['gateway-resources', '--json']);
       
       let stdout = '';
       let stderr = '';
@@ -575,13 +653,8 @@ ipcMain.handle('get-gateway-resources', async () => {
 // Get project-specific resources (Views, Scripts, Queries, Events)
 ipcMain.handle('get-project-resources', async (event, projectName) => {
   try {
-    const scriptPath = path.join(scriptsDir, 'neo4j_ontology.py');
-    
     return new Promise((resolve) => {
-      const proc = spawn(pythonCmd, ['-u', scriptPath, 'project-resources', '--project', projectName, '--json'], {
-        cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
-      });
+      const proc = spawnPythonProcess('neo4j_ontology.py', ['project-resources', '--project', projectName, '--json']);
       
       let stdout = '';
       let stderr = '';
@@ -604,6 +677,88 @@ ipcMain.handle('get-project-resources', async (event, projectName) => {
     });
   } catch (error) {
     return { success: false, error: error.message };
+  }
+});
+
+// Get all TIA Portal projects
+ipcMain.handle('get-tia-projects', async () => {
+  try {
+    return new Promise((resolve) => {
+      const proc = spawnPythonProcess('neo4j_ontology.py', ['tia-projects', '--json']);
+      
+      let stdout = '';
+      let stderr = '';
+      
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      
+      proc.on('close', (code) => {
+        if (code === 0) {
+          try {
+            const projects = JSON.parse(stdout.trim() || '[]');
+            resolve({ success: true, projects });
+          } catch (e) {
+            resolve({ success: true, projects: [] });
+          }
+        } else {
+          resolve({ success: false, error: stderr || 'Failed to get TIA projects', projects: [] });
+        }
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message, projects: [] };
+  }
+});
+
+// Get TIA project-specific resources (PLC blocks, tags, types, HMI scripts, alarms, screens, etc.)
+ipcMain.handle('get-tia-project-resources', async (event, projectName) => {
+  try {
+    return new Promise((resolve) => {
+      const proc = spawnPythonProcess('neo4j_ontology.py', ['tia-project-resources', '--project', projectName, '--json']);
+      
+      let stdout = '';
+      let stderr = '';
+      
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+      
+      proc.on('close', (code) => {
+        if (code === 0) {
+          try {
+            const resources = JSON.parse(stdout.trim() || '{}');
+            resolve({ success: true, resources });
+          } catch (e) {
+            resolve({ success: true, resources: {} });
+          }
+        } else {
+          resolve({ success: false, error: stderr || 'Failed to get TIA project resources' });
+        }
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Enrich Siemens TIA items (no backup file needed -- context from Neo4j)
+ipcMain.handle('enrich-tia-batch', async (event, options = {}) => {
+  const { itemType, batchSize = 10 } = options;
+  const streamId = `enrich-tia-${itemType}-${Date.now()}`;
+  
+  try {
+    if (!itemType) {
+      return { success: false, error: 'Item type required for TIA enrichment' };
+    }
+    
+    const args = ['analyze', '-t', itemType, '-b', String(batchSize), '-v'];
+    
+    const output = await runPythonScript('incremental_analyzer.py', args, {
+      streaming: true,
+      streamId
+    });
+    return { success: true, output, streamId };
+  } catch (error) {
+    return { success: false, error: error.message, streamId };
   }
 });
 
@@ -805,13 +960,8 @@ ipcMain.handle('graph:delete-edge', async (event, sourceType, sourceName, target
 // Apply batch changes
 ipcMain.handle('graph:apply-batch', async (event, changes) => {
   try {
-    const scriptPath = path.join(scriptsDir, 'graph_api.py');
-    
     return new Promise((resolve, reject) => {
-      const proc = spawn('python', ['-u', scriptPath, 'batch'], {
-        cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
-      });
+      const proc = spawnPythonProcess('graph_api.py', ['batch']);
       
       // Send changes as JSON to stdin
       proc.stdin.write(JSON.stringify(changes));
@@ -849,13 +999,8 @@ ipcMain.handle('graph:ai-propose', async (event, description) => {
   const streamId = `ai-propose-${Date.now()}`;
   
   try {
-    const scriptPath = path.join(scriptsDir, 'claude_client.py');
-    
     return new Promise((resolve, reject) => {
-      const proc = spawn('python', ['-u', scriptPath, '--propose-relationship'], {
-        cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
-      });
+      const proc = spawnPythonProcess('claude_client.py', ['--propose-relationship']);
       
       // Send description as JSON
       const payload = JSON.stringify({ description });
@@ -920,6 +1065,79 @@ ipcMain.handle('graph:ai-propose', async (event, description) => {
 ipcMain.handle('graph:ai-explain', async (event, nodeNames) => {
   try {
     const output = await runPythonScript('claude_client.py', ['--explain-nodes', ...nodeNames]);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ============================================
+// DEXPI P&ID Conversion IPC Handlers
+// ============================================
+
+// Convert ontology to DEXPI-classified graph
+ipcMain.handle('dexpi:convert', async (event, options = {}) => {
+  try {
+    const args = ['convert'];
+    if (options.types && options.types.length > 0) {
+      args.push('--types', ...options.types);
+    }
+    if (options.limit) {
+      args.push('--limit', String(options.limit));
+    }
+    if (options.includeScada) {
+      args.push('--include-scada');
+    }
+    if (options.includeTroubleshooting) {
+      args.push('--include-troubleshooting');
+    }
+    
+    const output = await runPythonScript('dexpi_converter.py', args);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Export ontology as DEXPI JSON
+ipcMain.handle('dexpi:export', async (event) => {
+  try {
+    // Show save dialog
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export DEXPI JSON',
+      defaultPath: `dexpi_export_${new Date().toISOString().split('T')[0]}.json`,
+      filters: [
+        { name: 'JSON Files', extensions: ['json'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+    
+    if (result.canceled || !result.filePath) {
+      return { success: false, error: 'Export cancelled' };
+    }
+    
+    const output = await runPythonScript('dexpi_converter.py', ['export', '-o', result.filePath]);
+    const parsed = JSON.parse(output);
+    return { ...parsed, outputFile: result.filePath };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Get DEXPI legend/schema
+ipcMain.handle('dexpi:legend', async () => {
+  try {
+    const output = await runPythonScript('dexpi_converter.py', ['legend']);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Check pydexpi availability
+ipcMain.handle('dexpi:check', async () => {
+  try {
+    const output = await runPythonScript('dexpi_converter.py', ['check']);
     return JSON.parse(output);
   } catch (error) {
     return { success: false, error: error.message };

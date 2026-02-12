@@ -17,6 +17,8 @@ from pathlib import Path
 
 from sc_parser import SCParser, SCFile, Tag
 from siemens_parser import SiemensSTParser
+from tia_xml_parser import TiaXmlParser
+from siemens_project_parser import SiemensProjectParser, TiaProject
 from neo4j_ontology import OntologyGraph, get_ontology_graph
 from claude_client import ClaudeClient, get_claude_client
 
@@ -297,8 +299,9 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
         verbose: bool = False,
         skip_ai: bool = False,
         siemens: bool = False,
+        tia_xml: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Analyze all SC or ST files in a directory and store in Neo4j.
+        """Analyze all SC, ST, or TIA XML files in a directory and store in Neo4j.
 
         Args:
             directory: Directory path
@@ -306,6 +309,7 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
             verbose: Print detailed progress
             skip_ai: If True, skip AI analysis (for incremental mode)
             siemens: If True, use Siemens .st parser instead of Rockwell .sc parser
+            tia_xml: If True, use TIA Portal XML parser
         """
 
         dir_path = Path(directory)
@@ -316,12 +320,53 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
             return []
 
         action = "import" if skip_ai else "analyze"
-        platform = "Siemens" if siemens else "Rockwell"
+        if tia_xml:
+            platform = "Siemens TIA XML"
+        elif siemens:
+            platform = "Siemens"
+        else:
+            platform = "Rockwell"
         print(f"[INFO] Found {len(sc_files)} {platform} files to {action}")
 
         ontologies = []
+        parsed_files: List[SCFile] = []  # Collect for cross-referencing
 
-        if siemens:
+        if tia_xml:
+            tia_parser = TiaXmlParser()
+            block_count = 0
+            for i, xml_path in enumerate(sc_files, 1):
+                print(f"\n[{i}/{len(sc_files)}] Processing {xml_path.name}...")
+
+                try:
+                    parsed_blocks = tia_parser.parse_file(str(xml_path))
+
+                    if not parsed_blocks:
+                        print(f"[WARNING] No parseable blocks in {xml_path.name}")
+                        continue
+
+                    for sc_file in parsed_blocks:
+                        block_count += 1
+                        parsed_files.append(sc_file)
+                        ontology = self.analyze_sc_file(
+                            sc_file, verbose, skip_ai=skip_ai
+                        )
+                        ontologies.append(ontology)
+                        print(f"  [OK] {sc_file.type}: {sc_file.name}")
+
+                    print(
+                        f"[OK] Completed {xml_path.name} ({len(parsed_blocks)} blocks)"
+                    )
+
+                except Exception as e:
+                    print(f"[ERROR] Failed to process {xml_path.name}: {e}")
+                    continue
+
+            if block_count > 0:
+                print(
+                    f"\n[INFO] Processed {block_count} blocks from {len(sc_files)} files"
+                )
+
+        elif siemens:
             siemens_parser = SiemensSTParser()
             block_count = 0
             for i, st_path in enumerate(sc_files, 1):
@@ -337,6 +382,7 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
 
                     for sc_file in parsed_blocks:
                         block_count += 1
+                        parsed_files.append(sc_file)
                         ontology = self.analyze_sc_file(
                             sc_file, verbose, skip_ai=skip_ai
                         )
@@ -363,6 +409,7 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
                 try:
                     # Parse SC file
                     sc_file = parser.parse_file(str(sc_path))
+                    parsed_files.append(sc_file)
 
                     # Analyze with LLM and store in Neo4j
                     ontology = self.analyze_sc_file(sc_file, verbose, skip_ai=skip_ai)
@@ -374,7 +421,578 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
                     print(f"[ERROR] Failed to process {sc_path.name}: {e}")
                     continue
 
+        # --- Cross-reference pass ---
+        if parsed_files:
+            xref_count = self.extract_cross_references(parsed_files, verbose=verbose)
+            if xref_count:
+                print(f"\n[INFO] Created {xref_count} cross-reference relationships")
+
         return ontologies
+
+    # ------------------------------------------------------------------
+    # Cross-reference extraction
+    # ------------------------------------------------------------------
+
+    # IEC 61131-3 primitive types (not user-defined, skip during matching)
+    _PRIMITIVE_TYPES = frozenset(
+        {
+            "BOOL",
+            "BYTE",
+            "WORD",
+            "DWORD",
+            "LWORD",
+            "SINT",
+            "INT",
+            "DINT",
+            "LINT",
+            "USINT",
+            "UINT",
+            "UDINT",
+            "ULINT",
+            "REAL",
+            "LREAL",
+            "TIME",
+            "DATE",
+            "TIME_OF_DAY",
+            "TOD",
+            "DATE_AND_TIME",
+            "DT",
+            "STRING",
+            "WSTRING",
+            "CHAR",
+            "WCHAR",
+            "TIMER",
+            "COUNTER",
+            "CONTROL",
+            # Rockwell-specific
+            "BIT",
+            "ROUTINE",
+            "ALARM_DIGITAL",
+            "ALARM_ANALOG",
+            "MESSAGE",
+            "MOTION_GROUP",
+            "MOTION_INSTRUCTION",
+            "COORDINATE_SYSTEM",
+            "AXIS",
+            "MODULE",
+        }
+    )
+
+    def extract_cross_references(
+        self,
+        sc_files: List[SCFile],
+        verbose: bool = False,
+    ) -> int:
+        """
+        Analyse a batch of parsed SCFile objects and create dependency
+        relationships in Neo4j for every case where one AOI/FB's variable
+        declarations reference another AOI/FB or UDT by type.
+
+        Also checks against AOI names already in Neo4j, so cross-references
+        to previously-ingested components are captured.
+
+        Args:
+            sc_files:  List of parsed SCFile objects (from sc_parser or siemens_parser).
+            verbose:   Print progress.
+
+        Returns:
+            Number of dependency relationships created.
+        """
+        import re
+
+        if verbose:
+            print("\n[INFO] Extracting cross-references between AOIs / FBs / UDTs...")
+
+        # 1. Build lookup: name → type  (AOI, UDT, FB, PROGRAM, CONFIGURATION)
+        #    from the files we just parsed
+        local_lookup: Dict[str, str] = {}
+        for sf in sc_files:
+            local_lookup[sf.name] = sf.type  # e.g. "HIPPSController" → "FB"
+
+        # 2. Also pull existing AOI names from Neo4j
+        try:
+            existing = self.graph.get_all_aoi_names()  # [{name, type}, ...]
+            for entry in existing:
+                if entry["name"] not in local_lookup:
+                    local_lookup[entry["name"]] = entry.get("type", "AOI")
+        except Exception:
+            pass  # Neo4j may not be reachable; degrade gracefully
+
+        if verbose:
+            print(
+                f"[INFO] Known components: {len(local_lookup)} "
+                f"({sum(1 for t in local_lookup.values() if t in ('AOI', 'FB'))} AOI/FB, "
+                f"{sum(1 for t in local_lookup.values() if t == 'UDT')} UDT, "
+                f"{sum(1 for t in local_lookup.values() if t not in ('AOI', 'FB', 'UDT'))} other)"
+            )
+
+        # 3. Walk every tag in every parsed file
+        dependencies: List[Dict[str, str]] = []
+        seen: set = set()  # (from, to, via_tag) dedup
+
+        for sf in sc_files:
+            all_tags = sf.input_tags + sf.output_tags + sf.inout_tags + sf.local_tags
+            for tag in all_tags:
+                dtype = tag.data_type.strip()
+
+                # Strip STRING length specifiers like STRING[20]
+                bare = re.sub(r"\[.*\]$", "", dtype).strip()
+
+                # Skip primitives and self-references
+                if bare.upper() in self._PRIMITIVE_TYPES:
+                    continue
+                if bare == sf.name:
+                    continue
+
+                if bare in local_lookup:
+                    target_type = local_lookup[bare]
+                    # Classify the relationship
+                    if target_type == "UDT":
+                        rel_type = "USES_TYPE"
+                    else:
+                        rel_type = "INSTANTIATES"
+
+                    key = (sf.name, bare, tag.name)
+                    if key not in seen:
+                        seen.add(key)
+                        dependencies.append(
+                            {
+                                "from_aoi": sf.name,
+                                "to_aoi": bare,
+                                "rel_type": rel_type,
+                                "via_tag": tag.name,
+                                "description": (
+                                    f"{sf.name}.{tag.name} is of type {bare}"
+                                ),
+                            }
+                        )
+
+            # 4. Scan routine logic text for AOI call patterns (Rockwell ladder)
+            #    Pattern: AOI_Name(instance_var, ...)
+            for routine in sf.routines:
+                logic_text = ""
+                if routine.get("rungs"):
+                    logic_text = " ".join(r.logic for r in routine["rungs"] if r.logic)
+                elif routine.get("raw_content"):
+                    logic_text = routine["raw_content"]
+
+                if not logic_text:
+                    continue
+
+                for candidate_name, candidate_type in local_lookup.items():
+                    if candidate_name == sf.name:
+                        continue
+                    # Rockwell: AOI_Name(instance, ...)
+                    # Siemens:  instance.MethodName(...)
+                    # Look for AOI name followed by '(' — indicates a call
+                    pattern = r"\b" + re.escape(candidate_name) + r"\s*\("
+                    if re.search(pattern, logic_text):
+                        key = (sf.name, candidate_name, "__logic__")
+                        if key not in seen:
+                            seen.add(key)
+                            rel = (
+                                "USES_TYPE"
+                                if candidate_type == "UDT"
+                                else "INSTANTIATES"
+                            )
+                            dependencies.append(
+                                {
+                                    "from_aoi": sf.name,
+                                    "to_aoi": candidate_name,
+                                    "rel_type": rel,
+                                    "via_tag": "",
+                                    "description": (
+                                        f"{sf.name} calls {candidate_name} in "
+                                        f"routine '{routine.get('name', '?')}'"
+                                    ),
+                                }
+                            )
+
+        if not dependencies:
+            if verbose:
+                print("[INFO] No cross-references found")
+            return 0
+
+        # 5. Store in Neo4j
+        if verbose:
+            inst = sum(1 for d in dependencies if d["rel_type"] == "INSTANTIATES")
+            uses = sum(1 for d in dependencies if d["rel_type"] == "USES_TYPE")
+            print(
+                f"[INFO] Found {len(dependencies)} dependencies "
+                f"({inst} INSTANTIATES, {uses} USES_TYPE)"
+            )
+            for dep in dependencies:
+                arrow = (
+                    "--INSTANTIATES-->"
+                    if dep["rel_type"] == "INSTANTIATES"
+                    else "--USES_TYPE-->"
+                )
+                via = f" (via {dep['via_tag']})" if dep["via_tag"] else ""
+                print(f"  {dep['from_aoi']} {arrow} {dep['to_aoi']}{via}")
+
+        count = self.graph.create_aoi_dependencies_batch(dependencies)
+        return count
+
+    def cross_reference_directory(
+        self,
+        directory: str,
+        pattern: str = "*.aoi.sc",
+        siemens: bool = False,
+        tia_xml: bool = False,
+        verbose: bool = False,
+    ) -> int:
+        """
+        Re-parse files in a directory and extract cross-references only
+        (no AI analysis, no AOI node creation — just dependency edges).
+
+        Useful for re-running cross-referencing on already-ingested data.
+        """
+        dir_path = Path(directory)
+        files = list(dir_path.rglob(pattern))
+
+        if not files:
+            print(f"[WARNING] No files matching '{pattern}' in {directory}")
+            return 0
+
+        parsed: List[SCFile] = []
+
+        if tia_xml:
+            tia_parser = TiaXmlParser()
+            for f in files:
+                try:
+                    blocks = tia_parser.parse_file(str(f))
+                    parsed.extend(blocks)
+                except Exception as e:
+                    if verbose:
+                        print(f"[WARNING] Could not parse {f.name}: {e}")
+        elif siemens:
+            siemens_parser = SiemensSTParser()
+            for f in files:
+                try:
+                    blocks = siemens_parser.parse_file(str(f))
+                    parsed.extend(blocks)
+                except Exception as e:
+                    if verbose:
+                        print(f"[WARNING] Could not parse {f.name}: {e}")
+        else:
+            parser = SCParser()
+            for f in files:
+                try:
+                    parsed.append(parser.parse_file(str(f)))
+                except Exception as e:
+                    if verbose:
+                        print(f"[WARNING] Could not parse {f.name}: {e}")
+
+        if not parsed:
+            print("[WARNING] No parseable files found")
+            return 0
+
+        if tia_xml:
+            platform = "Siemens TIA XML"
+        elif siemens:
+            platform = "Siemens"
+        else:
+            platform = "Rockwell"
+        print(f"[INFO] Parsed {len(parsed)} {platform} blocks from {len(files)} files")
+        return self.extract_cross_references(parsed, verbose=verbose)
+
+    # ------------------------------------------------------------------
+    # TIA Portal full-project ingestion
+    # ------------------------------------------------------------------
+
+    def ingest_tia_project(
+        self,
+        project_dir: str,
+        verbose: bool = False,
+        skip_ai: bool = False,
+    ) -> Dict[str, Any]:
+        """Ingest an entire Siemens TIA Portal project into the ontology.
+
+        Parses the full project structure (PLCs + HMIs) and stores everything
+        in Neo4j, including interlinks between devices.
+
+        Args:
+            project_dir: Path to the TIA Portal export directory
+            verbose: Print detailed progress
+            skip_ai: If True, skip AI analysis for PLC blocks
+
+        Returns:
+            Summary dict with counts of ingested items
+        """
+        print(f"[INFO] Parsing TIA Portal project: {project_dir}")
+        parser = SiemensProjectParser()
+        project = parser.parse_project(project_dir)
+
+        summary: Dict[str, int] = {
+            "plc_devices": 0,
+            "hmi_devices": 0,
+            "blocks": 0,
+            "plc_tag_tables": 0,
+            "plc_tags": 0,
+            "plc_types": 0,
+            "hmi_connections": 0,
+            "hmi_tag_tables": 0,
+            "hmi_alarms": 0,
+            "hmi_alarm_classes": 0,
+            "hmi_scripts": 0,
+            "hmi_screens": 0,
+            "hmi_text_lists": 0,
+            "cross_references": 0,
+        }
+
+        # --- 1. Create top-level TiaProject node ---
+        print(f"\n[INFO] Creating TiaProject: {project.name}")
+        self.graph.create_tia_project(
+            name=project.name,
+            directory=project.directory,
+        )
+
+        # --- 2. Process PLC devices ---
+        for plc in project.plc_devices:
+            print(f"\n[INFO] Processing PLC: {plc.name} ({plc.dir_name})")
+            self.graph.create_plc_device(
+                name=plc.name,
+                project_name=project.name,
+                dir_name=plc.dir_name,
+            )
+            summary["plc_devices"] += 1
+
+            # 2a. Ingest PLC blocks (OB/FB/FC/DB) via existing pipeline
+            if plc.blocks:
+                print(f"  [INFO] Ingesting {len(plc.blocks)} PLC blocks...")
+                all_parsed: List[SCFile] = []
+                for sc_file in plc.blocks:
+                    try:
+                        ontology = self.analyze_sc_file(
+                            sc_file, verbose=verbose, skip_ai=skip_ai
+                        )
+                        # Link AOI to PLC device
+                        self.graph.link_aoi_to_plc_device(
+                            aoi_name=sc_file.name,
+                            plc_name=plc.name,
+                            project_name=project.name,
+                        )
+                        all_parsed.append(sc_file)
+                        summary["blocks"] += 1
+                        if verbose:
+                            print(f"    [OK] {sc_file.type}: {sc_file.name}")
+                    except Exception as e:
+                        print(f"    [ERROR] Block {sc_file.name}: {e}")
+
+                # Cross-references between blocks
+                if all_parsed:
+                    xref = self.extract_cross_references(all_parsed, verbose=verbose)
+                    summary["cross_references"] += xref
+
+            # 2b. Ingest PLC tag tables
+            if plc.tag_tables:
+                print(f"  [INFO] Ingesting {len(plc.tag_tables)} PLC tag tables...")
+                for tt in plc.tag_tables:
+                    self.graph.create_plc_tag_table(
+                        name=tt.name,
+                        plc_name=plc.name,
+                        project_name=project.name,
+                    )
+                    summary["plc_tag_tables"] += 1
+
+                    for tag in tt.tags:
+                        self.graph.create_plc_tag(
+                            name=tag.name,
+                            table_name=tt.name,
+                            plc_name=plc.name,
+                            project_name=project.name,
+                            data_type=tag.data_type,
+                            logical_address=tag.logical_address,
+                            comment=tag.comment,
+                        )
+                        summary["plc_tags"] += 1
+
+                    if verbose:
+                        print(f"    [OK] TagTable '{tt.name}': {len(tt.tags)} tags")
+
+            # 2c. Ingest PLC types (UDTs)
+            if plc.types:
+                print(f"  [INFO] Ingesting {len(plc.types)} PLC types/UDTs...")
+                for plc_type in plc.types:
+                    members = [
+                        {
+                            "name": m.name,
+                            "data_type": m.data_type,
+                            "description": m.description or "",
+                        }
+                        for m in plc_type.members
+                    ]
+                    self.graph.create_plc_type(
+                        name=plc_type.name,
+                        plc_name=plc.name,
+                        project_name=project.name,
+                        members=members,
+                        is_failsafe=plc_type.is_failsafe,
+                    )
+                    summary["plc_types"] += 1
+                    if verbose:
+                        print(f"    [OK] Type '{plc_type.name}': {len(plc_type.members)} members")
+
+            # 2d. Block metadata (JSON files for ProDiag etc.)
+            if plc.block_metadata and verbose:
+                print(f"  [INFO] Found {len(plc.block_metadata)} block metadata files")
+                for meta in plc.block_metadata:
+                    block_name = meta.get("Name", "?")
+                    block_type = meta.get("Type", "?")
+                    lang = meta.get("ProgrammingLanguage", "?")
+                    print(f"    Meta: {block_name} ({block_type}) [{lang}]")
+
+        # --- 3. Process HMI devices ---
+        for hmi in project.hmi_devices:
+            print(f"\n[INFO] Processing HMI: {hmi.name} ({hmi.dir_name})")
+            self.graph.create_hmi_device(
+                name=hmi.name,
+                project_name=project.name,
+                dir_name=hmi.dir_name,
+            )
+            summary["hmi_devices"] += 1
+
+            # 3a. HMI connections (interlinks to PLCs)
+            if hmi.connections:
+                print(f"  [INFO] Ingesting {len(hmi.connections)} connections...")
+                for conn in hmi.connections:
+                    self.graph.create_hmi_connection(
+                        name=conn.name,
+                        hmi_name=hmi.name,
+                        project_name=project.name,
+                        partner=conn.partner,
+                        station=conn.station,
+                        communication_driver=conn.communication_driver,
+                        node=conn.node,
+                        address=conn.address,
+                    )
+                    summary["hmi_connections"] += 1
+                    if verbose:
+                        print(f"    [OK] {conn.name} -> {conn.partner}")
+
+            # 3b. HMI alarm classes
+            if hmi.alarm_classes:
+                print(f"  [INFO] Ingesting {len(hmi.alarm_classes)} alarm classes...")
+                for ac in hmi.alarm_classes:
+                    self.graph.create_hmi_alarm_class(
+                        name=ac.name,
+                        hmi_name=hmi.name,
+                        project_name=project.name,
+                        priority=ac.priority,
+                        state_machine=ac.state_machine,
+                        is_system=ac.is_system,
+                    )
+                    summary["hmi_alarm_classes"] += 1
+
+            # 3c. HMI alarms (analog + discrete)
+            if hmi.alarms:
+                print(f"  [INFO] Ingesting {len(hmi.alarms)} alarms...")
+                for alarm in hmi.alarms:
+                    self.graph.create_hmi_alarm(
+                        name=alarm.name,
+                        hmi_name=hmi.name,
+                        project_name=project.name,
+                        alarm_type=alarm.alarm_type,
+                        alarm_class=alarm.alarm_class,
+                        origin=alarm.origin,
+                        priority=alarm.priority,
+                        raised_state_tag=alarm.raised_state_tag,
+                        trigger_bit_address=alarm.trigger_bit_address,
+                        trigger_mode=alarm.trigger_mode,
+                        condition=alarm.condition,
+                        condition_value=alarm.condition_value,
+                    )
+                    summary["hmi_alarms"] += 1
+
+                    # Link alarm to PLC tags if we can resolve the reference
+                    tag_ref = alarm.raised_state_tag or alarm.trigger_bit_address
+                    if tag_ref:
+                        self.graph.link_alarm_to_plc_tag(
+                            alarm_name=alarm.name,
+                            hmi_name=hmi.name,
+                            project_name=project.name,
+                            tag_reference=tag_ref,
+                        )
+
+                analog = sum(1 for a in hmi.alarms if a.alarm_type == "Analog")
+                discrete = sum(1 for a in hmi.alarms if a.alarm_type == "Discrete")
+                if verbose:
+                    print(f"    [OK] {analog} analog, {discrete} discrete alarms")
+
+            # 3d. HMI tag tables
+            if hmi.tag_tables:
+                print(f"  [INFO] Ingesting {len(hmi.tag_tables)} HMI tag tables...")
+                for tt in hmi.tag_tables:
+                    self.graph.create_hmi_tag_table(
+                        name=tt.name,
+                        hmi_name=hmi.name,
+                        project_name=project.name,
+                        folder=tt.folder,
+                    )
+                    summary["hmi_tag_tables"] += 1
+
+            # 3e. HMI scripts
+            if hmi.scripts:
+                print(f"  [INFO] Ingesting {len(hmi.scripts)} HMI scripts...")
+                for script in hmi.scripts:
+                    self.graph.create_hmi_script(
+                        name=script.name,
+                        hmi_name=hmi.name,
+                        project_name=project.name,
+                        script_file=script.script_file,
+                        functions=script.functions,
+                        script_text=script.script_text,
+                    )
+                    summary["hmi_scripts"] += 1
+                    if verbose:
+                        funcs = ", ".join(script.functions[:5])
+                        more = f" +{len(script.functions) - 5}" if len(script.functions) > 5 else ""
+                        print(f"    [OK] {script.name}: {funcs}{more}")
+
+            # 3f. HMI screens
+            if hmi.screens:
+                print(f"  [INFO] Ingesting {len(hmi.screens)} HMI screens...")
+                for screen in hmi.screens:
+                    self.graph.create_hmi_screen(
+                        name=screen.name,
+                        hmi_name=hmi.name,
+                        project_name=project.name,
+                        folder=screen.folder,
+                    )
+                    summary["hmi_screens"] += 1
+
+            # 3g. HMI text lists
+            if hmi.text_lists:
+                print(f"  [INFO] Ingesting {len(hmi.text_lists)} HMI text lists...")
+                for tl in hmi.text_lists:
+                    self.graph.create_hmi_text_list(
+                        name=tl.name,
+                        hmi_name=hmi.name,
+                        project_name=project.name,
+                    )
+                    summary["hmi_text_lists"] += 1
+
+        # --- 4. Print summary ---
+        print(f"\n{'=' * 60}")
+        print(f"  TIA Project Ingestion Complete: {project.name}")
+        print(f"{'=' * 60}")
+        print(f"  PLC Devices:      {summary['plc_devices']}")
+        print(f"    Blocks (AOIs):  {summary['blocks']}")
+        print(f"    PLC Tag Tables: {summary['plc_tag_tables']}")
+        print(f"    PLC Tags:       {summary['plc_tags']}")
+        print(f"    Types/UDTs:     {summary['plc_types']}")
+        print(f"    Cross-refs:     {summary['cross_references']}")
+        print(f"  HMI Devices:      {summary['hmi_devices']}")
+        print(f"    Connections:    {summary['hmi_connections']}")
+        print(f"    Alarm Classes:  {summary['hmi_alarm_classes']}")
+        print(f"    Alarms:         {summary['hmi_alarms']}")
+        print(f"    HMI Tag Tables: {summary['hmi_tag_tables']}")
+        print(f"    Scripts:        {summary['hmi_scripts']}")
+        print(f"    Screens:        {summary['hmi_screens']}")
+        print(f"    Text Lists:     {summary['hmi_text_lists']}")
+        print()
+
+        return summary
 
     def get_all_ontologies(self) -> List[Dict[str, Any]]:
         """Retrieve all AOI ontologies from Neo4j."""
@@ -433,12 +1051,32 @@ def main():
         action="store_true",
         help="Show semantic analysis status for AOIs",
     )
+    parser.add_argument(
+        "--tia-xml",
+        action="store_true",
+        help="Use Siemens TIA Portal XML parser (for Openness XML exports)",
+    )
+    parser.add_argument(
+        "--cross-ref",
+        action="store_true",
+        help="Extract cross-references (INSTANTIATES / USES_TYPE) between AOIs/FBs/UDTs from parsed files",
+    )
+    parser.add_argument(
+        "--tia-project",
+        action="store_true",
+        help="Parse entire Siemens TIA Portal project structure (PLCs + HMIs + interlinks)",
+    )
 
     args = parser.parse_args()
 
     # Resolve default pattern based on platform
     if args.pattern is None:
-        args.pattern = "*.st" if args.siemens else "*.aoi.sc"
+        if args.tia_xml:
+            args.pattern = "*.xml"
+        elif args.siemens:
+            args.pattern = "*.st"
+        else:
+            args.pattern = "*.aoi.sc"
 
     # Initialize analyzer
     try:
@@ -494,10 +1132,40 @@ def main():
                 json.dump(aois, f, indent=2)
             print(f"[OK] Exported {len(aois)} AOIs to {args.export}")
 
+        elif args.tia_project and args.input:
+            # Full TIA Portal project ingestion
+            input_path = Path(args.input)
+            if not input_path.is_dir():
+                print("[ERROR] --tia-project requires a project directory as input")
+                sys.exit(1)
+            summary = analyzer.ingest_tia_project(
+                str(input_path),
+                verbose=args.verbose,
+                skip_ai=args.skip_ai,
+            )
+            total = sum(summary.values())
+            print(f"[OK] Ingested {total} items into Neo4j")
+
+        elif args.cross_ref and args.input:
+            # Standalone cross-reference extraction (re-parse, no AI)
+            input_path = Path(args.input)
+            if not input_path.is_dir():
+                print("[ERROR] --cross-ref requires a directory as input")
+                sys.exit(1)
+            is_siemens = args.siemens
+            count = analyzer.cross_reference_directory(
+                str(input_path),
+                pattern=args.pattern,
+                siemens=is_siemens,
+                verbose=args.verbose,
+            )
+            print(f"\n[OK] Created {count} cross-reference relationships")
+
         elif args.input:
             input_path = Path(args.input)
 
-            # Auto-detect Siemens if input is .st file
+            # Auto-detect format from flags / file extension
+            is_tia_xml = args.tia_xml or input_path.suffix.lower() == ".xml"
             is_siemens = args.siemens or input_path.suffix.lower() == ".st"
 
             # Process directory or single file
@@ -508,9 +1176,15 @@ def main():
                     verbose=args.verbose,
                     skip_ai=args.skip_ai,
                     siemens=is_siemens,
+                    tia_xml=is_tia_xml,
                 )
                 action = "Imported" if args.skip_ai else "Analyzed"
-                platform = "Siemens" if is_siemens else "Rockwell"
+                if is_tia_xml:
+                    platform = "Siemens TIA XML"
+                elif is_siemens:
+                    platform = "Siemens"
+                else:
+                    platform = "Rockwell"
                 print(
                     f"\n[OK] {action} {len(ontologies)} {platform} blocks and stored in Neo4j"
                 )
@@ -520,7 +1194,28 @@ def main():
                     )
 
             elif input_path.is_file():
-                if is_siemens:
+                if is_tia_xml:
+                    # TIA Portal XML file
+                    tia_parser = TiaXmlParser()
+                    parsed_blocks = tia_parser.parse_file(str(input_path))
+                    if not parsed_blocks:
+                        print(f"[WARNING] No parseable blocks in {input_path.name}")
+                    else:
+                        for sc_file in parsed_blocks:
+                            ontology = analyzer.analyze_sc_file(
+                                sc_file, verbose=args.verbose, skip_ai=args.skip_ai
+                            )
+                            print(
+                                f"\n=== Ontology: {ontology['name']} ({ontology['type']}) ==="
+                            )
+                            if not args.skip_ai:
+                                print(
+                                    f"Purpose: {ontology['analysis'].get('purpose', 'N/A')}"
+                                )
+                            action = "Created" if args.skip_ai else "Stored"
+                            print(f"[OK] {action} in Neo4j")
+
+                elif is_siemens:
                     # Siemens .st file — may contain multiple blocks
                     siemens_parser = SiemensSTParser()
                     parsed_blocks = siemens_parser.parse_file(str(input_path))
