@@ -1,0 +1,304 @@
+(* ===================================================================== *)
+(* Sample Rockwell L5K Project File — Water Treatment Plant Controller    *)
+(* Format: Legacy ASCII Project File (L5K)                               *)
+(* Controller: CompactLogix 5380                                         *)
+(* ===================================================================== *)
+
+IE_VER := 2.20;
+
+CONTROLLER WaterTreatment (ProcessorType := "1769-L33ER",
+                           MajorRev := 33,
+                           MinorRev := 11,
+                           TimeSlice := 20,
+                           ShareUnusedTimeSlice := 1,
+                           CommPath := "AB_ETH-1\\10.10.1.1\\Backplane\\0",
+                           Description := "Water Treatment Plant - Main Controller")
+
+    DATATYPE HMI_PumpControl (Family := NoFamily,
+                              Class := User,
+                              Description := "HMI interface structure for pump control")
+        MEMBER Status : DINT (Description := "Pump status word");
+        MEMBER Command : DINT (Description := "Pump command word");
+        MEMBER Speed_SP : REAL (Description := "Speed setpoint 0-100%");
+        MEMBER Speed_PV : REAL (Description := "Actual speed feedback 0-100%");
+        MEMBER RunHours : REAL (Description := "Accumulated run hours");
+        MEMBER FaultCode : INT (Description := "Active fault code");
+        MEMBER AutoMode : BOOL (Description := "Auto mode active");
+        MEMBER ManualMode : BOOL (Description := "Manual mode active");
+        MEMBER RunCmd : BOOL (Description := "Run command from HMI");
+        MEMBER StopCmd : BOOL (Description := "Stop command from HMI");
+        MEMBER ResetCmd : BOOL (Description := "Fault reset command");
+        MEMBER Running : BOOL (Description := "Pump running feedback");
+        MEMBER Faulted : BOOL (Description := "Pump in fault state");
+        MEMBER Ready : BOOL (Description := "Pump ready to start");
+    END_DATATYPE
+
+    DATATYPE PID_Config (Family := NoFamily,
+                         Class := User,
+                         Description := "PID loop configuration")
+        MEMBER Kp : REAL (Description := "Proportional gain");
+        MEMBER Ki : REAL (Description := "Integral gain");
+        MEMBER Kd : REAL (Description := "Derivative gain");
+        MEMBER SP_High : REAL (Description := "Setpoint high limit");
+        MEMBER SP_Low : REAL (Description := "Setpoint low limit");
+        MEMBER CV_High : REAL (Description := "Control output high limit");
+        MEMBER CV_Low : REAL (Description := "Control output low limit");
+        MEMBER DeadBand : REAL (Description := "Process variable deadband");
+        MEMBER SampleTime : REAL (Description := "PID sample time in seconds");
+    END_DATATYPE
+
+    DATATYPE AnalogInput (Family := NoFamily,
+                          Class := User,
+                          Description := "Scaled analog input")
+        MEMBER RawValue : INT (Description := "Raw ADC value 0-32767");
+        MEMBER ScaledValue : REAL (Description := "Engineering units value");
+        MEMBER HighAlarm : BOOL (Description := "High alarm active");
+        MEMBER LowAlarm : BOOL (Description := "Low alarm active");
+        MEMBER HighHighAlarm : BOOL (Description := "High-high alarm active");
+        MEMBER LowLowAlarm : BOOL (Description := "Low-low alarm active");
+        MEMBER SensorFault : BOOL (Description := "Sensor fault detected");
+        MEMBER EU_High : REAL (Description := "Engineering units high range");
+        MEMBER EU_Low : REAL (Description := "Engineering units low range");
+        MEMBER AlarmHH : REAL (Description := "High-high alarm setpoint");
+        MEMBER AlarmH : REAL (Description := "High alarm setpoint");
+        MEMBER AlarmL : REAL (Description := "Low alarm setpoint");
+        MEMBER AlarmLL : REAL (Description := "Low-low alarm setpoint");
+    END_DATATYPE
+
+    ADD_ON_INSTRUCTION_DEFINITION PumpControl (Revision := 3.1,
+                                                Vendor := "WaterTech",
+                                                Description := "VFD pump control with fault handling and auto/manual modes")
+        TAG EnableIn : BOOL (Usage := Input);
+        TAG EnableOut : BOOL (Usage := Output);
+        TAG i_AutoMode : BOOL (Usage := Input, Description := "Auto mode select from HMI");
+        TAG i_ManualMode : BOOL (Usage := Input, Description := "Manual mode select from HMI");
+        TAG i_RunCmd : BOOL (Usage := Input, Description := "Run command from HMI or auto logic");
+        TAG i_StopCmd : BOOL (Usage := Input, Description := "Stop command from HMI");
+        TAG i_ResetCmd : BOOL (Usage := Input, Description := "Fault reset command");
+        TAG i_SpeedSP : REAL (Usage := Input, Description := "Speed setpoint 0-100%");
+        TAG i_RunFeedback : BOOL (Usage := Input, Description := "Motor running feedback from drive");
+        TAG i_FaultFeedback : BOOL (Usage := Input, Description := "Drive fault signal");
+        TAG i_ReadyFeedback : BOOL (Usage := Input, Description := "Drive ready signal");
+        TAG i_SpeedFeedback : REAL (Usage := Input, Description := "Actual speed from drive 0-100%");
+        TAG i_EStop : BOOL (Usage := Input, Description := "Emergency stop signal");
+        TAG o_RunOutput : BOOL (Usage := Output, Description := "Run command to VFD");
+        TAG o_SpeedRef : REAL (Usage := Output, Description := "Speed reference to VFD 0-100%");
+        TAG o_Running : BOOL (Usage := Output, Description := "Pump running status");
+        TAG o_Faulted : BOOL (Usage := Output, Description := "Pump fault status");
+        TAG o_Ready : BOOL (Usage := Output, Description := "Pump ready status");
+        TAG o_FaultCode : INT (Usage := Output, Description := "Active fault code");
+        TAG io_HMI : HMI_PumpControl (Usage := InOut, Description := "HMI interface data");
+        LOCAL_TAG TON_StartDelay : TIMER;
+        LOCAL_TAG TON_FaultDelay : TIMER;
+        LOCAL_TAG TON_RunConfirm : TIMER;
+        LOCAL_TAG RunRequest : BOOL;
+        LOCAL_TAG FaultLatch : BOOL;
+        LOCAL_TAG StartConfirmed : BOOL;
+
+        ROUTINE Logic (Type := RLL)
+            RC := "Determine run request based on mode";
+            N: [XIC(i_AutoMode) ,XIC(i_RunCmd) ]OTE(RunRequest);
+            RC := "Manual mode run request";
+            N: [XIC(i_ManualMode) ,XIC(i_RunCmd) ,XIO(i_FaultFeedback) ]OTE(RunRequest);
+            RC := "E-Stop override - stop everything";
+            N: XIC(i_EStop) OTU(RunRequest);
+            RC := "Start delay timer - prevent rapid cycling";
+            N: XIC(RunRequest) XIO(FaultLatch) XIC(i_ReadyFeedback) TON(TON_StartDelay,?,5000,?);
+            RC := "Run output to drive";
+            N: XIC(TON_StartDelay.DN) OTE(o_RunOutput);
+            RC := "Run confirmation timer - detect failed start";
+            N: XIC(o_RunOutput) XIO(i_RunFeedback) TON(TON_RunConfirm,?,10000,?);
+            RC := "Failed to start fault";
+            N: XIC(TON_RunConfirm.DN) OTL(FaultLatch);
+            RC := "Drive fault detection";
+            N: XIC(i_FaultFeedback) TON(TON_FaultDelay,?,500,?);
+            N: XIC(TON_FaultDelay.DN) OTL(FaultLatch);
+            RC := "Fault reset";
+            N: XIC(i_ResetCmd) XIO(i_FaultFeedback) OTU(FaultLatch);
+            RC := "Speed reference output";
+            N: XIC(o_RunOutput) MOV(i_SpeedSP,o_SpeedRef);
+            N: XIO(o_RunOutput) MOV(0,o_SpeedRef);
+            RC := "Status outputs";
+            N: XIC(i_RunFeedback) OTE(o_Running);
+            N: XIC(FaultLatch) OTE(o_Faulted);
+            N: XIC(i_ReadyFeedback) XIO(FaultLatch) OTE(o_Ready);
+        END_ROUTINE
+    END_ADD_ON_INSTRUCTION_DEFINITION
+
+    ADD_ON_INSTRUCTION_DEFINITION AnalogScale (Revision := 1.2,
+                                                Vendor := "WaterTech",
+                                                Description := "Analog input scaling with alarm detection")
+        TAG EnableIn : BOOL (Usage := Input);
+        TAG EnableOut : BOOL (Usage := Output);
+        TAG i_RawValue : INT (Usage := Input, Description := "Raw ADC input 0-32767");
+        TAG i_EU_High : REAL (Usage := Input, Description := "Engineering units at full scale");
+        TAG i_EU_Low : REAL (Usage := Input, Description := "Engineering units at zero scale");
+        TAG i_AlarmHH : REAL (Usage := Input, Description := "High-high alarm setpoint");
+        TAG i_AlarmH : REAL (Usage := Input, Description := "High alarm setpoint");
+        TAG i_AlarmL : REAL (Usage := Input, Description := "Low alarm setpoint");
+        TAG i_AlarmLL : REAL (Usage := Input, Description := "Low-low alarm setpoint");
+        TAG o_ScaledValue : REAL (Usage := Output, Description := "Scaled engineering value");
+        TAG o_HighAlarm : BOOL (Usage := Output, Description := "High alarm active");
+        TAG o_LowAlarm : BOOL (Usage := Output, Description := "Low alarm active");
+        TAG o_HighHighAlarm : BOOL (Usage := Output, Description := "High-high alarm active");
+        TAG o_LowLowAlarm : BOOL (Usage := Output, Description := "Low-low alarm active");
+        TAG o_SensorFault : BOOL (Usage := Output, Description := "Sensor out of range");
+        LOCAL_TAG ScaledTemp : REAL;
+        LOCAL_TAG RawReal : REAL;
+
+        ROUTINE Logic (Type := ST)
+            (* Scale raw value to engineering units *)
+            RawReal := INT_TO_REAL(i_RawValue);
+            ScaledTemp := i_EU_Low + ((RawReal / 32767.0) * (i_EU_High - i_EU_Low));
+            o_ScaledValue := ScaledTemp;
+
+            (* Sensor fault detection — out of range *)
+            o_SensorFault := (i_RawValue < 1000) OR (i_RawValue > 31000);
+
+            (* Alarm evaluation *)
+            IF NOT o_SensorFault THEN
+                o_HighHighAlarm := ScaledTemp >= i_AlarmHH;
+                o_HighAlarm := ScaledTemp >= i_AlarmH;
+                o_LowAlarm := ScaledTemp <= i_AlarmL;
+                o_LowLowAlarm := ScaledTemp <= i_AlarmLL;
+            ELSE
+                o_HighHighAlarm := FALSE;
+                o_HighAlarm := FALSE;
+                o_LowAlarm := FALSE;
+                o_LowLowAlarm := FALSE;
+            END_IF;
+        END_ROUTINE
+    END_ADD_ON_INSTRUCTION_DEFINITION
+
+    TAG Pump1 : HMI_PumpControl (Description := "Intake pump 1 HMI data");
+    TAG Pump2 : HMI_PumpControl (Description := "Intake pump 2 HMI data");
+    TAG ChlorineDosingPump : HMI_PumpControl (Description := "Chlorine dosing pump");
+    TAG LT100 : AnalogInput (Description := "Raw water tank level transmitter");
+    TAG LT200 : AnalogInput (Description := "Treated water tank level transmitter");
+    TAG FT100 : AnalogInput (Description := "Inlet flow transmitter");
+    TAG PT100 : AnalogInput (Description := "Filter inlet pressure");
+    TAG PT200 : AnalogInput (Description := "Filter outlet pressure");
+    TAG AT100 : AnalogInput (Description := "pH analyzer");
+    TAG AT200 : AnalogInput (Description := "Chlorine residual analyzer");
+    TAG TT100 : AnalogInput (Description := "Water temperature transmitter");
+    TAG SystemMode : INT (Description := "0=Off, 1=Manual, 2=Auto, 3=Flush");
+    TAG SystemFault : BOOL (Description := "Any system-level fault active");
+    TAG EStopActive : BOOL (Description := "Emergency stop circuit broken");
+    TAG FilterDP : REAL (Description := "Differential pressure across filter bank");
+    TAG FilterBackwashReq : BOOL (Description := "Filter backwash required");
+    TAG PID_Level : PID_Config (Description := "Level control PID configuration");
+    TAG PID_Chlorine : PID_Config (Description := "Chlorine dosing PID configuration");
+
+    TASK MainTask (Type := CONTINUOUS,
+                   Rate := 10,
+                   Priority := 1,
+                   Watchdog := 500,
+                   DisableUpdateOutputs := 0,
+                   InhibitTask := 0)
+
+        PROGRAM MainProgram (Description := "Main control logic")
+            TAG PumpCtrl1 : PumpControl;
+            TAG PumpCtrl2 : PumpControl;
+            TAG ChlorineCtrl : PumpControl;
+            TAG LevelScale : AnalogScale;
+            TAG FlowScale : AnalogScale;
+            TAG PHScale : AnalogScale;
+            TAG ClScale : AnalogScale;
+            TAG TempScale : AnalogScale;
+            TAG PressIn : AnalogScale;
+            TAG PressOut : AnalogScale;
+            TAG AutoStartPump1 : BOOL;
+            TAG AutoStartPump2 : BOOL;
+            TAG LevelPIDOutput : REAL;
+            TAG ChlorinePIDOutput : REAL;
+
+            ROUTINE MainRoutine (Type := RLL,
+                                  Description := "Main program scan routine")
+                RC := "Scale analog inputs";
+                N: AnalogScale(LevelScale,LT100.RawValue,100.0,0.0,95.0,90.0,10.0,5.0);
+                N: AnalogScale(FlowScale,FT100.RawValue,1000.0,0.0,950.0,900.0,50.0,25.0);
+                N: AnalogScale(PHScale,AT100.RawValue,14.0,0.0,9.0,8.5,6.0,5.5);
+                N: AnalogScale(ClScale,AT200.RawValue,5.0,0.0,4.0,3.5,0.2,0.1);
+                N: AnalogScale(TempScale,TT100.RawValue,50.0,0.0,40.0,35.0,2.0,1.0);
+                N: AnalogScale(PressIn,PT100.RawValue,100.0,0.0,90.0,85.0,10.0,5.0);
+                N: AnalogScale(PressOut,PT200.RawValue,100.0,0.0,90.0,85.0,10.0,5.0);
+                RC := "Calculate filter differential pressure";
+                N: SUB(PressIn.o_ScaledValue,PressOut.o_ScaledValue,FilterDP);
+                RC := "Filter backwash required if DP > 15 PSI";
+                N: GRT(FilterDP,15.0) OTE(FilterBackwashReq);
+                RC := "Auto mode - level control starts pump 1";
+                N: EQU(SystemMode,2) LES(LevelScale.o_ScaledValue,50.0) OTE(AutoStartPump1);
+                RC := "Auto mode - high demand starts pump 2";
+                N: EQU(SystemMode,2) LES(LevelScale.o_ScaledValue,30.0) OTE(AutoStartPump2);
+                RC := "Pump 1 control";
+                N: PumpControl(PumpCtrl1,Pump1.AutoMode,Pump1.ManualMode,AutoStartPump1,Pump1.StopCmd,Pump1.ResetCmd,Pump1.Speed_SP,Pump1.Running,Pump1.Faulted,Pump1.Ready,Pump1.Speed_PV,EStopActive,Pump1);
+                RC := "Pump 2 control";
+                N: PumpControl(PumpCtrl2,Pump2.AutoMode,Pump2.ManualMode,AutoStartPump2,Pump2.StopCmd,Pump2.ResetCmd,Pump2.Speed_SP,Pump2.Running,Pump2.Faulted,Pump2.Ready,Pump2.Speed_PV,EStopActive,Pump2);
+                RC := "System fault detection";
+                N: [XIC(PumpCtrl1.o_Faulted) ,XIC(PumpCtrl2.o_Faulted) ,XIC(LevelScale.o_SensorFault) ]OTE(SystemFault);
+            END_ROUTINE
+
+            ROUTINE ChlorineControl (Type := ST,
+                                      Description := "Chlorine dosing PID control")
+                (* Simple proportional chlorine control based on flow and residual *)
+                IF SystemMode = 2 THEN
+                    (* Auto mode — PID control *)
+                    ChlorinePIDOutput := PID_Chlorine.Kp * (PID_Chlorine.SP_High - ClScale.o_ScaledValue);
+
+                    (* Clamp output *)
+                    IF ChlorinePIDOutput > PID_Chlorine.CV_High THEN
+                        ChlorinePIDOutput := PID_Chlorine.CV_High;
+                    ELSIF ChlorinePIDOutput < PID_Chlorine.CV_Low THEN
+                        ChlorinePIDOutput := PID_Chlorine.CV_Low;
+                    END_IF;
+
+                    ChlorineDosingPump.Speed_SP := ChlorinePIDOutput;
+                    ChlorineDosingPump.RunCmd := TRUE;
+                ELSE
+                    ChlorinePIDOutput := 0.0;
+                    ChlorineDosingPump.RunCmd := FALSE;
+                END_IF;
+            END_ROUTINE
+        END_PROGRAM
+    END_TASK
+
+    MODULE Local (Type := "1769-L33ER",
+                  ParentModule := Local,
+                  ParentModPortId := 1,
+                  CatalogNumber := "1769-L33ER",
+                  Vendor := 1,
+                  ProductType := 14,
+                  ProductCode := 55,
+                  Major := 33,
+                  Minor := 11,
+                  PortId := 1,
+                  Slot := 0)
+    END_MODULE
+
+    MODULE AI_Mod1 (Type := "1769-IF8",
+                     ParentModule := Local,
+                     ParentModPortId := 1,
+                     CatalogNumber := "1769-IF8",
+                     Vendor := 1,
+                     ProductType := 10,
+                     ProductCode := 8,
+                     Major := 3,
+                     Minor := 1,
+                     Slot := 1,
+                     Description := "8-Channel Analog Input Module")
+    END_MODULE
+
+    MODULE DO_Mod1 (Type := "1769-OB16",
+                     ParentModule := Local,
+                     ParentModPortId := 1,
+                     CatalogNumber := "1769-OB16",
+                     Vendor := 1,
+                     ProductType := 7,
+                     ProductCode := 9,
+                     Major := 3,
+                     Minor := 1,
+                     Slot := 2,
+                     Description := "16-Point Digital Output Module")
+    END_MODULE
+
+END_CONTROLLER

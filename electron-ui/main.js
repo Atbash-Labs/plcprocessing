@@ -192,9 +192,9 @@ ipcMain.handle('select-file', async (event, options) => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
     filters: options.filters || [
-      { name: 'All Supported', extensions: ['json', 'sc', 'L5X', 'st', 'xml'] },
+      { name: 'All Supported', extensions: ['json', 'sc', 'L5X', 'L5K', 'ACD', 'st', 'xml'] },
       { name: 'Ignition Backup', extensions: ['json'] },
-      { name: 'Rockwell PLC', extensions: ['sc', 'L5X'] },
+      { name: 'Rockwell PLC', extensions: ['sc', 'L5X', 'L5K', 'ACD'] },
       { name: 'Siemens PLC', extensions: ['st'] },
       { name: 'TIA Portal XML', extensions: ['xml'] }
     ]
@@ -211,10 +211,17 @@ ipcMain.handle('select-directory', async () => {
 });
 
 // Ingest PLC files - Rockwell (with streaming)
+// Supports L5X, L5K, ACD, and pre-exported .sc files
 ipcMain.handle('ingest-plc', async (event, filePath) => {
   const streamId = `ingest-plc-${Date.now()}`;
   try {
-    const output = await runPythonScript('ontology_analyzer.py', [filePath, '-v'], {
+    // Auto-detect Rockwell native formats (L5X, L5K, ACD) vs pre-exported .sc
+    const ext = path.extname(filePath).toLowerCase();
+    const isNativeRockwell = ['.l5x', '.l5k', '.acd'].includes(ext);
+    const args = isNativeRockwell
+      ? [filePath, '--rockwell', '-v']
+      : [filePath, '-v'];
+    const output = await runPythonScript('ontology_analyzer.py', args, {
       streaming: true,
       streamId
     });

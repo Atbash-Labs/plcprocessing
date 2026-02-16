@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Export Rockwell/Allen-Bradley L5X files to structured code (.sc) format.
-Extracts Add-On Instructions (AOIs), their parameters, local tags, and routines.
+
+Handles both component-level L5X exports (single AOI/UDT) and full-project
+L5X files that contain Programs, controller-scoped Tags, Tasks, Modules,
+and Add-On Instructions.
 
 Usage:
     python l5x_export.py <input.L5X> <output_dir>
@@ -11,8 +14,11 @@ Usage:
 import sys
 import os
 from pathlib import Path
+from typing import List, Optional
 import xml.etree.ElementTree as ET
 import html
+
+from sc_parser import SCFile, Tag, LogicRung
 
 
 def extract_parameters(aoi_element):
@@ -273,6 +279,419 @@ def export_datatypes_from_l5x(l5x_root, output_dir):
     return datatypes_exported
 
 
+def _extract_tags_from_xml(tags_element) -> List[Tag]:
+    """Extract Tag objects from an L5X <Tags> element."""
+    tags = []
+    if tags_element is None:
+        return tags
+
+    for tag_elem in tags_element.findall("Tag"):
+        name = tag_elem.get("Name", "")
+        data_type = tag_elem.get("DataType", "BOOL")
+        usage = tag_elem.get("Usage", "")
+        tag_type = tag_elem.get("TagType", "Base")
+        dimensions = tag_elem.get("Dimensions", "0")
+        external_access = tag_elem.get("ExternalAccess", "Read/Write")
+
+        # Get description
+        desc_elem = tag_elem.find("Description")
+        description = None
+        if desc_elem is not None:
+            # L5X descriptions can have CDATA children
+            cdata = desc_elem.find(".//{http://www.w3.org/1999/xhtml}span")
+            if cdata is not None and cdata.text:
+                description = cdata.text.strip()
+            elif desc_elem.text:
+                description = desc_elem.text.strip()
+
+        # Map usage to direction
+        direction_map = {
+            'Input': 'INPUT',
+            'Output': 'OUTPUT',
+            'InOut': 'IN_OUT',
+        }
+        direction = direction_map.get(usage)
+
+        # Handle arrays
+        is_array = False
+        array_bounds = None
+        if dimensions and dimensions != "0":
+            is_array = True
+            array_bounds = f"0..{int(dimensions) - 1}"
+
+        tags.append(Tag(
+            name=name,
+            data_type=data_type,
+            direction=direction,
+            description=description,
+            is_array=is_array,
+            array_bounds=array_bounds,
+        ))
+
+    return tags
+
+
+def _extract_routines_as_dicts(routines_element) -> List[dict]:
+    """Extract routine dicts from an L5X <Routines> element."""
+    routine_list = []
+    if routines_element is None:
+        return routine_list
+
+    for routine in routines_element.findall("Routine"):
+        routine_name = routine.get("Name", "Main")
+        routine_type = routine.get("Type", "RLL")
+
+        rungs: List[LogicRung] = []
+        raw_content_parts = []
+
+        if routine_type == "RLL":
+            rll_content = routine.find("RLLContent")
+            if rll_content is not None:
+                for rung in rll_content.findall("Rung"):
+                    rung_num = int(rung.get("Number", "0"))
+                    comment_elem = rung.find("Comment")
+                    comment = None
+                    if comment_elem is not None:
+                        cdata = comment_elem.find(".//{http://www.w3.org/1999/xhtml}span")
+                        if cdata is not None and cdata.text:
+                            comment = cdata.text.strip()
+                        elif comment_elem.text:
+                            comment = comment_elem.text.strip()
+
+                    text_elem = rung.find("Text")
+                    logic = ""
+                    if text_elem is not None:
+                        cdata = text_elem.find(".//{http://www.w3.org/1999/xhtml}span")
+                        if cdata is not None and cdata.text:
+                            logic = cdata.text.strip()
+                        elif text_elem.text:
+                            logic = text_elem.text.strip()
+
+                    rungs.append(LogicRung(
+                        number=rung_num,
+                        comment=comment,
+                        logic=logic,
+                    ))
+                    if comment:
+                        raw_content_parts.append(f"// Rung {rung_num}: {comment}")
+                    else:
+                        raw_content_parts.append(f"// Rung {rung_num}")
+                    raw_content_parts.append(logic)
+
+        elif routine_type == "ST":
+            st_content = routine.find("STContent")
+            if st_content is not None:
+                for line_elem in st_content.findall("Line"):
+                    if line_elem.text:
+                        raw_content_parts.append(line_elem.text)
+                # Fallback: some L5X files put ST in text directly
+                if not raw_content_parts and st_content.text:
+                    raw_content_parts.append(st_content.text.strip())
+
+        elif routine_type == "FBD":
+            fbd_content = routine.find("FBDContent")
+            if fbd_content is not None:
+                raw_content_parts.append(f"(* FBD routine — {routine_name} *)")
+                # Extract sheet/block names for context
+                for sheet in fbd_content.findall("Sheet"):
+                    sheet_num = sheet.get("Number", "?")
+                    raw_content_parts.append(f"(* Sheet {sheet_num} *)")
+                    for block in sheet.findall(".//Block"):
+                        block_type = block.get("Type", "?")
+                        operand = block.get("Operand", "")
+                        raw_content_parts.append(f"  {block_type}({operand})")
+
+        elif routine_type == "SFC":
+            sfc_content = routine.find("SFCContent")
+            if sfc_content is not None:
+                raw_content_parts.append(f"(* SFC routine — {routine_name} *)")
+                for step in sfc_content.findall(".//Step"):
+                    step_name = step.get("Name", "?")
+                    raw_content_parts.append(f"  STEP: {step_name}")
+                for trans in sfc_content.findall(".//Transition"):
+                    trans_name = trans.get("Name", "?")
+                    raw_content_parts.append(f"  TRANSITION: {trans_name}")
+
+        routine_list.append({
+            'name': routine_name,
+            'type': routine_type,
+            'rungs': rungs,
+            'raw_content': '\n'.join(raw_content_parts),
+        })
+
+    return routine_list
+
+
+def _parse_aoi_to_scfile(aoi_element, source_file: str) -> SCFile:
+    """Parse an L5X AddOnInstructionDefinition element into an SCFile."""
+    aoi_name = aoi_element.get("Name", "Unknown")
+    revision = aoi_element.get("Revision", "1.0")
+    vendor = aoi_element.get("Vendor", "")
+
+    desc_elem = aoi_element.find("Description")
+    description = None
+    if desc_elem is not None and desc_elem.text:
+        description = desc_elem.text.strip()
+
+    sc = SCFile(
+        file_path=source_file,
+        name=aoi_name,
+        type='AOI',
+        revision=revision,
+        vendor=vendor,
+        description=description,
+    )
+
+    # Parameters
+    parameters = aoi_element.find("Parameters")
+    if parameters is not None:
+        for param in parameters.findall("Parameter"):
+            name = param.get("Name", "")
+            usage = param.get("Usage", "Input")
+            data_type = param.get("DataType", "BOOL")
+
+            if name in ("EnableIn", "EnableOut"):
+                continue
+
+            p_desc_elem = param.find("Description")
+            p_desc = None
+            if p_desc_elem is not None and p_desc_elem.text:
+                p_desc = p_desc_elem.text.strip()
+
+            tag = Tag(name=name, data_type=data_type, description=p_desc)
+            if usage == "Input":
+                tag.direction = "INPUT"
+                sc.input_tags.append(tag)
+            elif usage == "Output":
+                tag.direction = "OUTPUT"
+                sc.output_tags.append(tag)
+            elif usage == "InOut":
+                tag.direction = "IN_OUT"
+                sc.inout_tags.append(tag)
+
+    # Local tags
+    local_tags = aoi_element.find("LocalTags")
+    if local_tags is not None:
+        for lt in local_tags.findall("LocalTag"):
+            name = lt.get("Name", "")
+            data_type = lt.get("DataType", "BOOL")
+
+            lt_desc_elem = lt.find("Description")
+            lt_desc = None
+            if lt_desc_elem is not None and lt_desc_elem.text:
+                lt_desc = lt_desc_elem.text.strip()
+
+            default_val = None
+            default_elem = lt.find("DefaultData")
+            if default_elem is not None:
+                data_value = default_elem.find(".//DataValue")
+                if data_value is not None:
+                    value = data_value.get("Value", "")
+                    if value:
+                        default_val = value
+
+            sc.local_tags.append(Tag(
+                name=name,
+                data_type=data_type,
+                description=lt_desc,
+                default_value=default_val,
+            ))
+
+    # Routines
+    routines_elem = aoi_element.find("Routines")
+    sc.routines = _extract_routines_as_dicts(routines_elem)
+
+    # Build raw implementation
+    if sc.routines:
+        parts = []
+        for r in sc.routines:
+            parts.append(f"(* ROUTINE: {r['name']} [{r['type']}] *)")
+            if r.get('raw_content'):
+                parts.append(r['raw_content'])
+        sc.raw_implementation = '\n'.join(parts)
+
+    return sc
+
+
+def _parse_datatype_to_scfile(datatype_elem, source_file: str) -> Optional[SCFile]:
+    """Parse an L5X DataType element into an SCFile (UDT)."""
+    dt_name = datatype_elem.get("Name", "Unknown")
+    dt_family = datatype_elem.get("Family", "NoFamily")
+
+    desc_elem = datatype_elem.find("Description")
+    description = None
+    if desc_elem is not None and desc_elem.text:
+        description = desc_elem.text.strip()
+
+    members = []
+    members_elem = datatype_elem.find("Members")
+    if members_elem is not None:
+        for member in members_elem.findall("Member"):
+            mem_name = member.get("Name", "")
+            mem_type = member.get("DataType", "SINT")
+            dimension = member.get("Dimension", "0")
+            hidden = member.get("Hidden", "false")
+
+            if hidden == "true":
+                continue
+
+            m_desc_elem = member.find("Description")
+            m_desc = None
+            if m_desc_elem is not None and m_desc_elem.text:
+                m_desc = m_desc_elem.text.strip()
+
+            target = member.get("Target")
+            bit_num = member.get("BitNumber")
+
+            is_array = False
+            array_bounds = None
+            if target and bit_num:
+                mem_type = "BIT"
+                m_desc = f"Bit {bit_num} of {target}" + (f" - {m_desc}" if m_desc else "")
+            elif dimension != "0":
+                is_array = True
+                array_bounds = f"0..{int(dimension) - 1}"
+
+            members.append(Tag(
+                name=mem_name,
+                data_type=mem_type,
+                description=m_desc,
+                is_array=is_array,
+                array_bounds=array_bounds,
+            ))
+
+    if not members:
+        return None
+
+    sc = SCFile(
+        file_path=source_file,
+        name=dt_name,
+        type='UDT',
+        description=description,
+    )
+    sc.local_tags = members
+    return sc
+
+
+def _parse_program_to_scfile(program_elem, source_file: str) -> SCFile:
+    """Parse an L5X Program element into an SCFile."""
+    prog_name = program_elem.get("Name", "Unknown")
+
+    desc_elem = program_elem.find("Description")
+    description = None
+    if desc_elem is not None and desc_elem.text:
+        description = desc_elem.text.strip()
+
+    sc = SCFile(
+        file_path=source_file,
+        name=prog_name,
+        type='PROGRAM',
+        description=description,
+    )
+
+    # Program-scoped tags
+    tags_elem = program_elem.find("Tags")
+    for tag in _extract_tags_from_xml(tags_elem):
+        if tag.direction == 'INPUT':
+            sc.input_tags.append(tag)
+        elif tag.direction == 'OUTPUT':
+            sc.output_tags.append(tag)
+        elif tag.direction == 'IN_OUT':
+            sc.inout_tags.append(tag)
+        else:
+            sc.local_tags.append(tag)
+
+    # Routines
+    routines_elem = program_elem.find("Routines")
+    sc.routines = _extract_routines_as_dicts(routines_elem)
+
+    if sc.routines:
+        parts = []
+        for r in sc.routines:
+            parts.append(f"(* ROUTINE: {r['name']} [{r['type']}] *)")
+            if r.get('raw_content'):
+                parts.append(r['raw_content'])
+        sc.raw_implementation = '\n'.join(parts)
+
+    return sc
+
+
+class L5XParser:
+    """Parser for Rockwell L5X (XML) project and component files.
+
+    Parses full L5X projects or component exports and returns SCFile objects
+    for each AOI, UDT, and Program found.
+    """
+
+    def parse_file(self, file_path: str) -> List[SCFile]:
+        """Parse an L5X file and return list of SCFile objects."""
+        try:
+            tree = ET.parse(file_path)
+            root = tree.getroot()
+        except ET.ParseError as e:
+            print(f"[ERROR] Failed to parse L5X XML: {e}")
+            return []
+
+        return self._parse_root(root, source_file=file_path)
+
+    def _parse_root(self, root, source_file: str) -> List[SCFile]:
+        """Parse the L5X XML root element."""
+        results: List[SCFile] = []
+
+        # Determine export scope
+        target_type = root.get("TargetType", "Controller")
+
+        controller = root.find(".//Controller")
+        if controller is None:
+            # Component-level export (single routine, etc.)
+            # Try to extract whatever is in the root
+            return results
+
+        controller_name = controller.get("Name", "Unknown")
+
+        # 1. DataTypes → UDTs
+        datatypes = controller.find("DataTypes")
+        if datatypes is not None:
+            for dt in datatypes.findall("DataType"):
+                sc = _parse_datatype_to_scfile(dt, source_file)
+                if sc:
+                    results.append(sc)
+
+        # 2. Add-On Instructions → AOIs
+        aoi_defs = controller.find("AddOnInstructionDefinitions")
+        if aoi_defs is not None:
+            for aoi in aoi_defs.findall("AddOnInstructionDefinition"):
+                sc = _parse_aoi_to_scfile(aoi, source_file)
+                results.append(sc)
+
+        # 3. Programs
+        programs = controller.find("Programs")
+        if programs is not None:
+            for prog in programs.findall("Program"):
+                sc = _parse_program_to_scfile(prog, source_file)
+                results.append(sc)
+
+        # 4. Controller-scoped tags
+        ctrl_tags_elem = controller.find("Tags")
+        ctrl_tags = _extract_tags_from_xml(ctrl_tags_elem)
+        if ctrl_tags:
+            ctrl_sc = SCFile(
+                file_path=source_file,
+                name=controller_name,
+                type='CONTROLLER',
+            )
+            for tag in ctrl_tags:
+                if tag.direction == 'INPUT':
+                    ctrl_sc.input_tags.append(tag)
+                elif tag.direction == 'OUTPUT':
+                    ctrl_sc.output_tags.append(tag)
+                else:
+                    ctrl_sc.local_tags.append(tag)
+            results.append(ctrl_sc)
+
+        return results
+
+
 def export_l5x_to_sc(l5x_path, output_dir):
     """Export L5X file to structured code (.sc) format."""
 
@@ -289,6 +708,7 @@ def export_l5x_to_sc(l5x_path, output_dir):
 
     aois_count = 0
     datatypes_count = 0
+    programs_count = 0
 
     # Extract Add-On Instructions
     controller = root.find(".//Controller")
@@ -299,13 +719,108 @@ def export_l5x_to_sc(l5x_path, output_dir):
                 if export_aoi_from_l5x(aoi, output_dir):
                     aois_count += 1
 
+        # Extract Programs (new)
+        programs = controller.find("Programs")
+        if programs is not None:
+            for prog in programs.findall("Program"):
+                if _export_program_from_l5x(prog, output_dir):
+                    programs_count += 1
+
+        # Extract controller-scoped tags (new)
+        ctrl_name = controller.get("Name", "Controller")
+        ctrl_tags_elem = controller.find("Tags")
+        if ctrl_tags_elem is not None and len(ctrl_tags_elem.findall("Tag")) > 0:
+            _export_controller_tags(ctrl_name, ctrl_tags_elem, output_dir)
+
     # Extract custom data types
     datatypes_count = export_datatypes_from_l5x(root, output_dir)
 
-    print(f"\n[OK] Export complete: {aois_count} AOIs, {datatypes_count} UDTs")
+    print(f"\n[OK] Export complete: {aois_count} AOIs, {datatypes_count} UDTs, "
+          f"{programs_count} Programs")
     print(f"[INFO] Exported to: {output_dir}")
 
     return True
+
+
+def _export_program_from_l5x(program_elem, output_dir):
+    """Export a Program element from L5X to .sc file."""
+    prog_name = program_elem.get("Name", "Unknown")
+
+    desc_elem = program_elem.find("Description")
+    description = ""
+    if desc_elem is not None and desc_elem.text:
+        description = desc_elem.text.strip()
+
+    # Extract program-scoped tags
+    tags_elem = program_elem.find("Tags")
+    tag_lines = []
+    if tags_elem is not None:
+        for tag in tags_elem.findall("Tag"):
+            name = tag.get("Name", "")
+            data_type = tag.get("DataType", "BOOL")
+            t_desc_elem = tag.find("Description")
+            t_desc = ""
+            if t_desc_elem is not None and t_desc_elem.text:
+                t_desc = f"  // {t_desc_elem.text.strip()}"
+            tag_lines.append(f"\t{name}: {data_type};{t_desc}")
+
+    # Extract routines
+    routines = extract_routines(program_elem)
+
+    filename = os.path.join(output_dir, f"{prog_name}.prog.sc")
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(f"(* POU: {prog_name} *)\n")
+        f.write(f"(* Type: Program *)\n")
+        if description:
+            f.write(f"(* Description: {description} *)\n")
+        f.write("\n")
+
+        if tag_lines:
+            f.write("(* PROGRAM TAGS *)\n")
+            f.write("VAR\n")
+            f.write("\n".join(tag_lines))
+            f.write("\nEND_VAR\n\n")
+
+        if routines:
+            f.write("(* IMPLEMENTATION *)\n")
+            f.write(routines)
+            f.write("\n")
+
+    print(f"[OK] Exported Program: {prog_name}")
+    return True
+
+
+def _export_controller_tags(ctrl_name, tags_elem, output_dir):
+    """Export controller-scoped tags to a .sc file."""
+    tag_lines = []
+    for tag in tags_elem.findall("Tag"):
+        name = tag.get("Name", "")
+        data_type = tag.get("DataType", "BOOL")
+        dimensions = tag.get("Dimensions", "0")
+
+        desc_elem = tag.find("Description")
+        desc = ""
+        if desc_elem is not None and desc_elem.text:
+            desc = f"  // {desc_elem.text.strip()}"
+
+        if dimensions and dimensions != "0":
+            tag_lines.append(f"\t{name}: ARRAY[0..{int(dimensions)-1}] OF {data_type};{desc}")
+        else:
+            tag_lines.append(f"\t{name}: {data_type};{desc}")
+
+    if not tag_lines:
+        return
+
+    filename = os.path.join(output_dir, f"{ctrl_name}.ctrl.sc")
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(f"(* POU: {ctrl_name} *)\n")
+        f.write(f"(* Type: Controller *)\n\n")
+        f.write("(* CONTROLLER-SCOPED TAGS *)\n")
+        f.write("VAR\n")
+        f.write("\n".join(tag_lines))
+        f.write("\nEND_VAR\n")
+
+    print(f"[OK] Exported Controller Tags: {ctrl_name} ({len(tag_lines)} tags)")
 
 
 def process_directory(input_dir, output_dir):
