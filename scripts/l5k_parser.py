@@ -601,6 +601,11 @@ class L5KParser:
         return count
 
 
+def _sanitize_comment(text: str) -> str:
+    """Collapse multi-line text into a single line for inline comments."""
+    return ' | '.join(line.strip() for line in text.splitlines() if line.strip())
+
+
 def _write_sc_file(sc: SCFile, path: str):
     """Write an SCFile to disk in the standard .sc text format."""
     with open(path, 'w', encoding='utf-8') as f:
@@ -635,7 +640,7 @@ def _write_sc_file(sc: SCFile, path: str):
             f.write(f"TYPE {sc.name} :\n")
             f.write("STRUCT\n")
             for tag in sc.local_tags:
-                desc = f"  // {tag.description}" if tag.description else ""
+                desc = f"  // {_sanitize_comment(tag.description)}" if tag.description else ""
                 if tag.is_array and tag.array_bounds:
                     f.write(f"\t{tag.name}: ARRAY[{tag.array_bounds}] OF {tag.data_type};{desc}\n")
                 else:
@@ -649,21 +654,21 @@ def _write_sc_file(sc: SCFile, path: str):
             f.write("(* PARAMETERS *)\n")
             f.write("VAR_INPUT\n")
             for tag in sc.input_tags:
-                desc = f"  // {tag.description}" if tag.description else ""
+                desc = f"  // {_sanitize_comment(tag.description)}" if tag.description else ""
                 f.write(f"\t{tag.name}: {tag.data_type};{desc}\n")
             f.write("END_VAR\n\n")
 
         if sc.output_tags:
             f.write("VAR_OUTPUT\n")
             for tag in sc.output_tags:
-                desc = f"  // {tag.description}" if tag.description else ""
+                desc = f"  // {_sanitize_comment(tag.description)}" if tag.description else ""
                 f.write(f"\t{tag.name}: {tag.data_type};{desc}\n")
             f.write("END_VAR\n\n")
 
         if sc.inout_tags:
             f.write("VAR_IN_OUT\n")
             for tag in sc.inout_tags:
-                desc = f"  // {tag.description}" if tag.description else ""
+                desc = f"  // {_sanitize_comment(tag.description)}" if tag.description else ""
                 f.write(f"\t{tag.name}: {tag.data_type};{desc}\n")
             f.write("END_VAR\n\n")
 
@@ -671,7 +676,7 @@ def _write_sc_file(sc: SCFile, path: str):
             f.write("(* LOCAL TAGS *)\n")
             f.write("VAR\n")
             for tag in sc.local_tags:
-                desc = f"  // {tag.description}" if tag.description else ""
+                desc = f"  // {_sanitize_comment(tag.description)}" if tag.description else ""
                 default = f" := {tag.default_value}" if tag.default_value else ""
                 f.write(f"\t{tag.name}: {tag.data_type}{default};{desc}\n")
             f.write("END_VAR\n\n")
@@ -684,7 +689,7 @@ def _write_sc_file(sc: SCFile, path: str):
                 if routine.get('rungs'):
                     for rung in routine['rungs']:
                         if rung.comment:
-                            f.write(f"\n// Rung {rung.number}: {rung.comment}\n")
+                            f.write(f"\n// Rung {rung.number}: {_sanitize_comment(rung.comment)}\n")
                         else:
                             f.write(f"\n// Rung {rung.number}\n")
                         f.write(f"{rung.logic}\n")
