@@ -312,12 +312,17 @@ def _extract_tags_from_xml(tags_element) -> List[Tag]:
         }
         direction = direction_map.get(usage)
 
-        # Handle arrays
+        # Handle arrays (dimensions can be single "10" or multi-dimensional "10 10" or "2 4")
         is_array = False
         array_bounds = None
         if dimensions and dimensions != "0":
-            is_array = True
-            array_bounds = f"0..{int(dimensions) - 1}"
+            dim_parts = dimensions.strip().split()
+            if len(dim_parts) > 1:
+                is_array = True
+                array_bounds = ",".join(f"0..{int(d) - 1}" for d in dim_parts)
+            elif int(dim_parts[0]) > 0:
+                is_array = True
+                array_bounds = f"0..{int(dim_parts[0]) - 1}"
 
         tags.append(Tag(
             name=name,

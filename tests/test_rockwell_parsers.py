@@ -265,11 +265,16 @@ class TestL5XParserRealSamples(unittest.TestCase):
 
     def test_all_real_samples_parse(self):
         """Ensure every L5X file in real_samples/ parses without errors."""
+        # Module-only exports legitimately return no parseable components
+        module_only_files = {'Safety_Module.L5X'}
         for fpath in sorted(REAL_SAMPLES_DIR.glob('*.L5X')):
             with self.subTest(file=fpath.name):
                 results = self.parser.parse_file(str(fpath))
-                self.assertGreater(len(results), 0,
-                                   f"No components parsed from {fpath.name}")
+                if fpath.name in module_only_files:
+                    self.assertIsInstance(results, list)
+                else:
+                    self.assertGreater(len(results), 0,
+                                       f"No components parsed from {fpath.name}")
                 for sc in results:
                     self.assertIsInstance(sc, SCFile)
                     self.assertTrue(sc.name)
