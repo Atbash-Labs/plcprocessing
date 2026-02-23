@@ -62,7 +62,6 @@ class OntologyTools:
     - read_tags: Read multiple tags (batch)
     - get_gateway_status: Gateway health and connections
     - get_alarm_status: Alarm pipeline states
-    (browse_tags disabled pending fix)
     """
 
     # Tool definitions for Claude (base + MES tools)
@@ -176,7 +175,6 @@ class OntologyTools:
             "description": "Get the current state of all alarm notification pipelines on the Ignition gateway.",
             "input_schema": {"type": "object", "properties": {}, "required": []},
         },
-        # browse_tags disabled – results unreliable; will re-enable after fix
     ]
 
     def __init__(self, graph: OntologyGraph, api_client: Optional["IgnitionApiClient"] = None):
@@ -204,7 +202,6 @@ class OntologyTools:
             "read_tags": self._read_tags,
             "get_gateway_status": self._get_gateway_status,
             "get_alarm_status": self._get_alarm_status,
-            # "browse_tags": self._browse_tags,  # disabled – results unreliable
         }
 
     def get_all_tool_definitions(self) -> List[Dict]:
@@ -576,17 +573,6 @@ class OntologyTools:
         return {
             "count": len(pipelines),
             "pipelines": pipelines,
-        }
-
-    def _browse_tags(self, path: str = "", depth: int = 1) -> Dict:
-        err = self._check_api()
-        if err:
-            return err
-        entities = self._api_client.browse_entities(path, depth)
-        return {
-            "path": path or "(root)",
-            "count": len(entities),
-            "children": entities,
         }
 
 
