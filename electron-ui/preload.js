@@ -66,6 +66,11 @@ contextBridge.exposeInMainWorld('api', {
   dexpiLegend: () => ipcRenderer.invoke('dexpi:legend'),
   dexpiCheck: () => ipcRenderer.invoke('dexpi:check'),
   
+  // Settings
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+  testIgnitionConnection: (options) => ipcRenderer.invoke('test-ignition-connection', options),
+  
   // Event listeners for streaming (returns cleanup function)
   onStreamOutput: (callback) => {
     const handler = (event, data) => callback(data);

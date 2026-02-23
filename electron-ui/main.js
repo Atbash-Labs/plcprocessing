@@ -1143,3 +1143,149 @@ ipcMain.handle('dexpi:check', async () => {
     return { success: false, error: error.message };
   }
 });
+
+// ============================================
+// Settings IPC Handlers
+// ============================================
+
+function getEnvPath() {
+  if (pyConfig && pyConfig.packaged) {
+    return path.join(pyConfig.cwd, '.env');
+  }
+  return path.join(pyConfig ? pyConfig.cwd : path.join(__dirname, '..'), '.env');
+}
+
+function parseEnvFile(content) {
+  const result = {};
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    // Match both active and commented-out lines
+    const match = trimmed.match(/^#?\s*([\w]+)\s*=\s*(.*)/);
+    if (match) {
+      const key = match[1];
+      const value = match[2].trim();
+      const isCommented = trimmed.startsWith('#');
+      result[key] = { value, commented: isCommented };
+    }
+  }
+  return result;
+}
+
+// Get current settings from .env
+ipcMain.handle('get-settings', async () => {
+  try {
+    const envPath = getEnvPath();
+    if (!fs.existsSync(envPath)) {
+      return { success: true, ignitionApiUrl: '', ignitionApiToken: '' };
+    }
+    const content = fs.readFileSync(envPath, 'utf-8');
+    const parsed = parseEnvFile(content);
+
+    return {
+      success: true,
+      ignitionApiUrl: parsed.IGNITION_API_URL && !parsed.IGNITION_API_URL.commented
+        ? parsed.IGNITION_API_URL.value : '',
+      ignitionApiToken: parsed.IGNITION_API_TOKEN && !parsed.IGNITION_API_TOKEN.commented
+        ? parsed.IGNITION_API_TOKEN.value : '',
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Save settings to .env
+ipcMain.handle('save-settings', async (event, settings) => {
+  try {
+    const envPath = getEnvPath();
+    let content = '';
+    if (fs.existsSync(envPath)) {
+      content = fs.readFileSync(envPath, 'utf-8');
+    }
+
+    const { ignitionApiUrl, ignitionApiToken } = settings;
+
+    // Helper: update or insert a key in .env content
+    function upsertEnvVar(text, key, value) {
+      // Match existing line (commented or not)
+      const regex = new RegExp(`^#?\\s*${key}\\s*=.*$`, 'm');
+      const newLine = value ? `${key}=${value}` : `# ${key}=`;
+
+      if (regex.test(text)) {
+        return text.replace(regex, newLine);
+      }
+      // Append if not found
+      const sep = text.endsWith('\n') ? '' : '\n';
+      return text + sep + newLine + '\n';
+    }
+
+    content = upsertEnvVar(content, 'IGNITION_API_URL', ignitionApiUrl);
+    content = upsertEnvVar(content, 'IGNITION_API_TOKEN', ignitionApiToken);
+
+    fs.writeFileSync(envPath, content, 'utf-8');
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Test Ignition gateway connectivity
+ipcMain.handle('test-ignition-connection', async (event, options) => {
+  const { url, token } = options;
+  if (!url) {
+    return { success: false, error: 'No URL provided' };
+  }
+
+  const http = url.startsWith('https') ? require('https') : require('http');
+  const testUrl = new URL('/data/api/v1/overview', url.replace(/\/+$/, ''));
+
+  return new Promise((resolve) => {
+    const headers = { 'Accept': 'application/json' };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    // Force IPv4 when host is localhost — Node.js v17+ defaults to IPv6
+    // which fails when the gateway only listens on 127.0.0.1
+    const reqOptions = {
+      hostname: testUrl.hostname,
+      port: testUrl.port,
+      path: testUrl.pathname,
+      headers,
+      timeout: 8000,
+    };
+    if (testUrl.hostname === 'localhost') {
+      reqOptions.hostname = '127.0.0.1';
+    }
+
+    const req = http.get(reqOptions, (res) => {
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try {
+            const data = JSON.parse(body);
+            resolve({
+              success: true,
+              version: data.version || null,
+              state: data.state || null,
+              platform: data.platform || null,
+            });
+          } catch (e) {
+            resolve({ success: true, version: null, state: 'Reachable (non-JSON response)' });
+          }
+        } else {
+          resolve({ success: false, error: `HTTP ${res.statusCode}: ${res.statusMessage}` });
+        }
+      });
+    });
+
+    req.on('error', (err) => {
+      resolve({ success: false, error: err.message });
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ success: false, error: 'Connection timed out (8s)' });
+    });
+  });
+});

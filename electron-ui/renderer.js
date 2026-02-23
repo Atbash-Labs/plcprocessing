@@ -3247,6 +3247,125 @@ document.getElementById('btn-dexpi-fit')?.addEventListener('click', () => {
 // Initialize Browse tab
 initBrowseSubTabs();
 
+// ============================================
+// Settings Tab
+// ============================================
+
+const settingsUrlInput = document.getElementById('settings-ignition-url');
+const settingsTokenInput = document.getElementById('settings-ignition-token');
+const btnToggleToken = document.getElementById('btn-toggle-token');
+const btnTestIgnition = document.getElementById('btn-test-ignition');
+const btnSaveSettings = document.getElementById('btn-save-settings');
+const connectionStatusEl = document.getElementById('ignition-connection-status');
+const ignitionSidebarStatus = document.getElementById('ignition-api-status');
+
+// Toggle password visibility
+btnToggleToken?.addEventListener('click', () => {
+  const isPassword = settingsTokenInput.type === 'password';
+  settingsTokenInput.type = isPassword ? 'text' : 'password';
+  btnToggleToken.querySelector('.icon-eye').classList.toggle('hidden', !isPassword);
+  btnToggleToken.querySelector('.icon-eye-off').classList.toggle('hidden', isPassword);
+});
+
+async function loadSettings() {
+  const result = await api.getSettings();
+  if (result.success) {
+    settingsUrlInput.value = result.ignitionApiUrl || '';
+    settingsTokenInput.value = result.ignitionApiToken || '';
+    updateIgnitionSidebarStatus(!!result.ignitionApiUrl);
+  }
+}
+
+function updateConnectionStatus(state, text) {
+  const dot = connectionStatusEl.querySelector('.status-dot');
+  const label = connectionStatusEl.querySelector('.connection-status-text');
+
+  dot.className = 'status-dot';
+  if (state === 'connected') dot.classList.add('connected');
+  else if (state === 'error') dot.classList.add('error');
+
+  label.textContent = text;
+}
+
+function updateIgnitionSidebarStatus(configured, connected) {
+  if (!ignitionSidebarStatus) return;
+  const dot = ignitionSidebarStatus.querySelector('.status-dot');
+  const label = ignitionSidebarStatus.querySelector('.status-text');
+
+  dot.className = 'status-dot';
+  if (connected) {
+    dot.classList.add('connected');
+    label.textContent = 'Ignition Connected';
+  } else if (configured) {
+    label.textContent = 'Ignition API';
+  } else {
+    label.textContent = 'Ignition API';
+  }
+}
+
+btnTestIgnition?.addEventListener('click', async () => {
+  const url = settingsUrlInput.value.trim();
+  const token = settingsTokenInput.value.trim();
+
+  if (!url) {
+    updateConnectionStatus('error', 'Enter a gateway URL first');
+    return;
+  }
+
+  updateConnectionStatus('', 'Testing...');
+  btnTestIgnition.disabled = true;
+
+  try {
+    const result = await api.testIgnitionConnection({ url, token });
+    if (result.success) {
+      const parts = [];
+      if (result.version) parts.push(`v${result.version}`);
+      if (result.state) parts.push(result.state);
+      if (result.platform) parts.push(result.platform);
+      const detail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+      updateConnectionStatus('connected', `Connected${detail}`);
+      updateIgnitionSidebarStatus(true, true);
+    } else {
+      updateConnectionStatus('error', result.error || 'Connection failed');
+      updateIgnitionSidebarStatus(true, false);
+    }
+  } catch (err) {
+    updateConnectionStatus('error', err.message || 'Connection failed');
+    updateIgnitionSidebarStatus(true, false);
+  } finally {
+    btnTestIgnition.disabled = false;
+  }
+});
+
+btnSaveSettings?.addEventListener('click', async () => {
+  const url = settingsUrlInput.value.trim();
+  const token = settingsTokenInput.value.trim();
+
+  btnSaveSettings.disabled = true;
+  btnSaveSettings.textContent = 'Saving...';
+
+  try {
+    const result = await api.saveSettings({
+      ignitionApiUrl: url,
+      ignitionApiToken: token,
+    });
+
+    if (result.success) {
+      btnSaveSettings.textContent = 'Saved';
+      updateIgnitionSidebarStatus(!!url);
+      setTimeout(() => { btnSaveSettings.textContent = 'Save Settings'; }, 1500);
+    } else {
+      btnSaveSettings.textContent = 'Error';
+      setTimeout(() => { btnSaveSettings.textContent = 'Save Settings'; }, 2000);
+    }
+  } catch (err) {
+    btnSaveSettings.textContent = 'Error';
+    setTimeout(() => { btnSaveSettings.textContent = 'Save Settings'; }, 2000);
+  } finally {
+    btnSaveSettings.disabled = false;
+  }
+});
+
 // Initialize graph tab when it's first shown
 navButtons.forEach(btn => {
   btn.addEventListener('click', () => {
@@ -3264,6 +3383,9 @@ navButtons.forEach(btn => {
       // Initialize DEXPI tab on first visit
       setTimeout(initDexpiTab, 100);
     }
+    if (btn.dataset.tab === 'settings') {
+      loadSettings();
+    }
   });
 });
 
@@ -3273,5 +3395,6 @@ setTimeout(() => {
   loadProjects();
   loadGatewayResources();
   loadTiaProjects();
+  loadSettings();
 }, 500);
 

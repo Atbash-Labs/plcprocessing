@@ -533,7 +533,10 @@ class IgnitionOntologyAnalyzer:
             # Extract relevant props for troubleshooting
             relevant_props = self._extract_relevant_props(comp)
 
-            # Create component node
+            # Extract event scripts for this component
+            comp_event_scripts = self._extract_component_event_scripts(comp)
+
+            # Create component node first (bindings need it to exist)
             success = self.graph.create_view_component(
                 view_name=view_name,
                 component_name=comp.name,
@@ -541,15 +544,19 @@ class IgnitionOntologyAnalyzer:
                 component_path=comp_path,
                 inferred_purpose=comp_purpose,
                 props=relevant_props,
+                event_scripts=comp_event_scripts or None,
             )
             if success:
                 component_count += 1
 
+            # Collect unresolved bindings for this component
+            unresolved_bindings = []
+
             # Process bindings to link component to UDTs, Tags, or Queries
             for binding in comp.bindings:
-                # Check if this is a query binding
+                resolved = False
+
                 if binding.binding_type == "query":
-                    # Link to NamedQuery
                     query_path = binding.target
                     bind_success = self.graph.create_query_usage(
                         source_type="ViewComponent",
@@ -559,13 +566,21 @@ class IgnitionOntologyAnalyzer:
                     )
                     if bind_success:
                         binding_count += 1
+                        resolved = True
                         if verbose:
                             print(
                                 f"[DEBUG] Component '{comp_path}' binds to Query '{query_path}' via {binding.property_path}"
                             )
+                    if not resolved:
+                        unresolved_bindings.append({
+                            "property": binding.property_path,
+                            "type": binding.binding_type,
+                            "target": binding.target,
+                            "bidirectional": binding.bidirectional,
+                        })
                     continue
 
-                # First try to resolve to a UDT (for tag bindings)
+                # Try to resolve to a UDT (for tag and expression bindings)
                 udt_name = self._resolve_binding_to_udt(
                     binding.target, udt_names, member_to_udt
                 )
@@ -576,9 +591,13 @@ class IgnitionOntologyAnalyzer:
                         udt_name=udt_name,
                         binding_property=binding.property_path,
                         tag_path=binding.target,
+                        binding_type=binding.binding_type,
+                        target_text=binding.target,
+                        bidirectional=binding.bidirectional,
                     )
                     if bind_success:
                         binding_count += 1
+                        resolved = True
                         if verbose:
                             print(
                                 f"[DEBUG] Component '{comp_path}' binds to UDT '{udt_name}' via {binding.property_path}"
@@ -593,13 +612,38 @@ class IgnitionOntologyAnalyzer:
                             tag_name=tag_name,
                             binding_property=binding.property_path,
                             tag_path=binding.target,
+                            binding_type=binding.binding_type,
+                            target_text=binding.target,
+                            bidirectional=binding.bidirectional,
                         )
                         if bind_success:
                             binding_count += 1
+                            resolved = True
                             if verbose:
                                 print(
                                     f"[DEBUG] Component '{comp_path}' binds to Tag '{tag_name}' via {binding.property_path}"
                                 )
+
+                if not resolved:
+                    unresolved_bindings.append({
+                        "property": binding.property_path,
+                        "type": binding.binding_type,
+                        "target": binding.target,
+                        "bidirectional": binding.bidirectional,
+                    })
+
+            # Update node with unresolved bindings if any were collected
+            if unresolved_bindings:
+                self.graph.create_view_component(
+                    view_name=view_name,
+                    component_name=comp.name,
+                    component_type=comp.component_type,
+                    component_path=comp_path,
+                    inferred_purpose=comp_purpose,
+                    props=relevant_props,
+                    unresolved_bindings=unresolved_bindings,
+                    event_scripts=comp_event_scripts or None,
+                )
 
             # Recurse into children
             if comp.children:
@@ -1098,6 +1142,30 @@ class IgnitionOntologyAnalyzer:
             # Recurse into children
             if hasattr(comp, "children") and comp.children:
                 results.extend(self._extract_event_scripts(comp.children, comp_path))
+
+        return results
+
+    def _extract_component_event_scripts(self, comp) -> list:
+        """Extract event scripts from a single component (non-recursive).
+
+        Returns:
+            List of {"event_type": str, "script": str} dicts, or empty list.
+        """
+        results = []
+        if not hasattr(comp, "props") or not isinstance(comp.props, dict):
+            return results
+
+        events = comp.props.get("events", {})
+        if not isinstance(events, dict):
+            return results
+
+        for event_type, event_data in events.items():
+            if isinstance(event_data, dict):
+                script = event_data.get("script", "")
+                if script:
+                    results.append({"event_type": event_type, "script": script})
+            elif isinstance(event_data, str) and event_data:
+                results.append({"event_type": event_type, "script": event_data})
 
         return results
 
@@ -1705,10 +1773,28 @@ def main():
         metavar="DIR",
         help="Path to named_queries_library directory (auto-detected if not specified)",
     )
+    parser.add_argument(
+        "--api-url",
+        help="Ignition gateway API URL for live data (or set IGNITION_API_URL)",
+    )
+    parser.add_argument(
+        "--api-token",
+        help="Ignition API token (or set IGNITION_API_TOKEN)",
+    )
+    parser.add_argument(
+        "--enrich-live",
+        action="store_true",
+        help="After backup analysis, enrich the graph with live data from the Ignition API",
+    )
 
     args = parser.parse_args()
 
-    client = ClaudeClient(model=args.model, enable_tools=not args.no_tools)
+    client = ClaudeClient(
+        model=args.model,
+        enable_tools=not args.no_tools,
+        ignition_api_url=args.api_url,
+        ignition_api_token=args.api_token,
+    )
     analyzer = IgnitionOntologyAnalyzer(client=client)
 
     try:
@@ -1791,6 +1877,24 @@ def main():
             ontology = analyzer.analyze_backup(
                 backup, verbose=args.verbose, skip_ai=args.skip_ai
             )
+
+            # Live enrichment (optional post-processing step)
+            if args.enrich_live:
+                from ignition_api_client import IgnitionApiClient
+                from live_enricher import LiveEnricher
+
+                api_client = IgnitionApiClient(
+                    base_url=args.api_url, api_token=args.api_token
+                )
+                if api_client.is_configured:
+                    if args.verbose:
+                        print(f"\n[INFO] Running live enrichment from {api_client.base_url}...")
+                    enricher = LiveEnricher(analyzer.graph, api_client)
+                    live_summary = enricher.enrich_all(verbose=args.verbose)
+                    ontology["live_enrichment"] = live_summary
+                else:
+                    print("[WARN] --enrich-live specified but no API URL configured. "
+                          "Pass --api-url or set IGNITION_API_URL.")
 
             # Export if requested
             if args.export:

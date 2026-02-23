@@ -520,7 +520,11 @@ class IncrementalAnalyzer:
                     MATCH (v)-[:HAS_COMPONENT]->(n:ViewComponent)
                     WHERE (n.semantic_status IS NULL OR n.semantic_status = 'pending')
                       AND (n.deleted IS NULL OR n.deleted = false)
-                    RETURN n.name as name, n.path as path, n.purpose as purpose, v.name as view
+                    RETURN n.name as name, n.path as path, n.purpose as purpose, v.name as view,
+                           n.type as type, n.props as props,
+                           n.inferred_purpose as inferred_purpose,
+                           n.unresolved_bindings as unresolved_bindings,
+                           n.event_scripts as event_scripts
                     LIMIT $limit
                 """,
                     {"project": project, "limit": limit},
@@ -729,13 +733,18 @@ class IncrementalAnalyzer:
         elif item_type == "ViewComponent":
             for item in items:
                 path = item.get("path", "")
-                context["raw_definitions"][path] = {
+                comp_def = {
                     "view": item.get("view", ""),
                     "name": item.get("name", ""),
                     "type": item.get("type", ""),
                     "inferred_purpose": item.get("inferred_purpose", ""),
                     "props": item.get("props", ""),
                 }
+                if item.get("unresolved_bindings"):
+                    comp_def["unresolved_bindings"] = item["unresolved_bindings"]
+                if item.get("event_scripts"):
+                    comp_def["event_scripts"] = item["event_scripts"]
+                context["raw_definitions"][path] = comp_def
 
         elif item_type == "ScadaTag":
             for item in items:
@@ -875,6 +884,14 @@ Equipment instances are based on UDT templates.
 You are analyzing UI components within HMI views.
 Each component has a type (button, label, LED, input field, etc.) and may be bound to equipment data.
 Describe what this specific component does for the operator - what action it triggers or what information it shows.
+
+Pay attention to these additional fields when present:
+- "unresolved_bindings": JSON array of bindings that could not be resolved to a known UDT, ScadaTag, or NamedQuery.
+  Each entry has: property (which UI prop is bound), type (tag/expression/query/property), target (the binding target text), bidirectional (bool).
+  Property-type bindings (type="property") describe component-to-component data flow within the view (e.g., "../SiblingComponent.props.value").
+  Expression-type bindings contain formula text. These are critical for understanding what data the component displays or controls.
+- "event_scripts": JSON array of event handlers on this component. Each entry has: event_type and script (Python code).
+  These scripts run when the operator interacts with the component (e.g., onClick, onChange) and often call named queries, navigate views, or write to tags.
 """,
             "Script": """
 You are analyzing Python scripts in an Ignition project library.

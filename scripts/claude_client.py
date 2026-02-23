@@ -21,6 +21,7 @@ from mes_ontology import (
     extend_ontology,
     MES_SYSTEM_PROMPT_EXTENSION,
 )
+from ignition_api_client import IgnitionApiClient
 
 
 # Load environment variables
@@ -55,6 +56,13 @@ class OntologyTools:
     - trace_tag_impact: Trace PLC tag to business impact
     - get_process_ccps: List CCPs for a process
     - get_open_deviations: Open deviations with context
+
+    And live Ignition API tools (when configured):
+    - read_tag: Read a single tag's live value
+    - read_tags: Read multiple tags (batch)
+    - get_gateway_status: Gateway health and connections
+    - get_alarm_status: Alarm pipeline states
+    (browse_tags disabled pending fix)
     """
 
     # Tool definitions for Claude (base + MES tools)
@@ -128,9 +136,53 @@ class OntologyTools:
         },
     ] + MES_TOOL_DEFINITIONS  # Add MES/RCA tools
 
-    def __init__(self, graph: OntologyGraph):
-        """Initialize with Neo4j graph connection."""
+    LIVE_TOOL_DEFINITIONS = [
+        {
+            "name": "read_tag",
+            "description": "Read a single Ignition tag's current value, quality, timestamp, and configuration from the live gateway. Use this when you need to check the real-time state of a tag during troubleshooting.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Tag path with provider prefix, e.g., '[default]Final_Process/FinalProduct_Temperature'. If the [default] prefix is omitted it will be added automatically.",
+                    }
+                },
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "read_tags",
+            "description": "Read multiple Ignition tags at once in a single call. Returns current value, quality, and timestamp for each tag. Paths should include the provider prefix, e.g., '[default]Folder/Tag'.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of tag paths to read, e.g., ['[default]Final_Process/FinalProduct_Temperature', '[default]Final_Process/FinalProduct_Pressure'].",
+                    }
+                },
+                "required": ["paths"],
+            },
+        },
+        {
+            "name": "get_gateway_status",
+            "description": "Get Ignition gateway health including version, uptime, platform, active connections, and session info.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "get_alarm_status",
+            "description": "Get the current state of all alarm notification pipelines on the Ignition gateway.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        # browse_tags disabled – results unreliable; will re-enable after fix
+    ]
+
+    def __init__(self, graph: OntologyGraph, api_client: Optional["IgnitionApiClient"] = None):
+        """Initialize with Neo4j graph connection and optional live API client."""
         self.graph = graph
+        self._api_client = api_client
 
         # Extend graph with MES methods
         extend_ontology(graph)
@@ -146,8 +198,32 @@ class OntologyTools:
             "create_mapping": self._create_mapping,
         }
 
+        # Live API tools (always registered; return clear messages if API not available)
+        self._live_tools: Dict[str, Callable] = {
+            "read_tag": self._read_tag,
+            "read_tags": self._read_tags,
+            "get_gateway_status": self._get_gateway_status,
+            "get_alarm_status": self._get_alarm_status,
+            # "browse_tags": self._browse_tags,  # disabled – results unreliable
+        }
+
+    def get_all_tool_definitions(self) -> List[Dict]:
+        """Return combined base + MES + live tool definitions."""
+        defs = list(self.TOOL_DEFINITIONS)
+        if self._api_client and self._api_client.is_configured:
+            defs.extend(self.LIVE_TOOL_DEFINITIONS)
+        return defs
+
     def execute(self, tool_name: str, tool_input: Dict) -> str:
         """Execute a tool and return the result as a string."""
+        # Check live API tools first
+        if tool_name in self._live_tools:
+            try:
+                result = self._live_tools[tool_name](**tool_input)
+                return json.dumps(result, indent=2, default=str)
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
         # Check if it's a MES tool
         if tool_name in self._mes_tools._tools:
             return self._mes_tools.execute(tool_name, tool_input)
@@ -415,6 +491,104 @@ class OntologyTools:
                     "hint": "Query for exact node names using get_schema or run_query first",
                 }
 
+    # ------------------------------------------------------------------ #
+    #  Live API tools
+    # ------------------------------------------------------------------ #
+
+    def _check_api(self) -> Optional[Dict]:
+        """Return an error dict if the live API is not available."""
+        if not self._api_client or not self._api_client.is_configured:
+            return {
+                "error": "Live Ignition API not configured. "
+                         "Pass --api-url or set IGNITION_API_URL to enable live data."
+            }
+        return None
+
+    def _read_tag(self, path: str) -> Dict:
+        err = self._check_api()
+        if err:
+            return err
+        tv = self._api_client.read_tag(path)
+        return {
+            "path": tv.path,
+            "value": tv.value,
+            "quality": tv.quality,
+            "timestamp": tv.timestamp,
+            "data_type": tv.data_type,
+            "config": tv.config,
+            "error": tv.error,
+        }
+
+    def _read_tags(self, paths: List[str]) -> Dict:
+        err = self._check_api()
+        if err:
+            return err
+        results = self._api_client.read_tags(paths)
+        return {
+            "count": len(results),
+            "tags": [
+                {
+                    "path": tv.path,
+                    "value": tv.value,
+                    "quality": tv.quality,
+                    "timestamp": tv.timestamp,
+                    "data_type": tv.data_type,
+                    "error": tv.error,
+                }
+                for tv in results
+            ],
+        }
+
+    def _get_gateway_status(self) -> Dict:
+        err = self._check_api()
+        if err:
+            return err
+        overview = self._api_client.get_gateway_overview()
+        connections = self._api_client.get_connections()
+
+        result: Dict[str, Any] = {}
+        if overview:
+            result["gateway"] = {
+                "version": overview.version,
+                "state": overview.state,
+                "platform": overview.platform,
+                "uptime_ms": overview.uptime_ms,
+                "edition": overview.edition,
+            }
+        else:
+            result["gateway"] = {"error": "Could not fetch gateway overview"}
+
+        result["connections"] = [
+            {
+                "name": c.name,
+                "status": c.status,
+                "type": c.server_type,
+            }
+            for c in connections
+        ]
+        return result
+
+    def _get_alarm_status(self) -> Dict:
+        err = self._check_api()
+        if err:
+            return err
+        pipelines = self._api_client.get_alarm_pipelines()
+        return {
+            "count": len(pipelines),
+            "pipelines": pipelines,
+        }
+
+    def _browse_tags(self, path: str = "", depth: int = 1) -> Dict:
+        err = self._check_api()
+        if err:
+            return err
+        entities = self._api_client.browse_entities(path, depth)
+        return {
+            "path": path or "(root)",
+            "count": len(entities),
+            "children": entities,
+        }
+
 
 class ClaudeClient:
     """
@@ -423,11 +597,13 @@ class ClaudeClient:
     Provides generic graph exploration tools that give Claude
     maximum flexibility to query and understand the ontology.
 
-    Includes both PLC/SCADA tools and MES/ERP tools:
+    Includes PLC/SCADA, MES/ERP, and optional live API tools:
     - Base tools: get_schema, run_query, get_node, create_mapping
     - MES tools: get_batch_context, get_equipment_rca, get_ccp_context,
                  search_by_symptom, trace_tag_impact, get_process_ccps,
                  get_open_deviations
+    - Live tools (when ignition_api_url provided): read_tag, read_tags,
+                 get_gateway_status, get_alarm_status
     """
 
     def __init__(
@@ -436,6 +612,8 @@ class ClaudeClient:
         model: str = "claude-sonnet-4-5-20250929",
         graph: Optional[OntologyGraph] = None,
         enable_tools: bool = True,
+        ignition_api_url: Optional[str] = None,
+        ignition_api_token: Optional[str] = None,
     ):
         """
         Initialize the Claude client.
@@ -445,6 +623,8 @@ class ClaudeClient:
             model: Claude model to use
             graph: Optional Neo4j graph connection (created if not provided)
             enable_tools: Whether to enable Neo4j tools for Claude
+            ignition_api_url: Optional Ignition gateway URL for live data tools
+            ignition_api_token: Optional API token for Ignition gateway auth
         """
         load_dotenv()
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
@@ -464,6 +644,14 @@ class ClaudeClient:
         self._tools: Optional[OntologyTools] = None
         self._enable_tools = enable_tools
 
+        # Live Ignition API client (optional)
+        self._api_client: Optional[IgnitionApiClient] = None
+        if ignition_api_url or os.getenv("IGNITION_API_URL"):
+            self._api_client = IgnitionApiClient(
+                base_url=ignition_api_url,
+                api_token=ignition_api_token,
+            )
+
         if enable_tools:
             self._init_tools()
 
@@ -475,13 +663,19 @@ class ClaudeClient:
         return self._graph
 
     def _init_tools(self) -> None:
-        """Initialize Neo4j tools (includes MES tools)."""
-        self._tools = OntologyTools(self._get_graph())
+        """Initialize Neo4j tools (includes MES + live API tools)."""
+        self._tools = OntologyTools(self._get_graph(), api_client=self._api_client)
 
     @staticmethod
     def get_mes_system_prompt() -> str:
         """Get the MES system prompt extension for RCA workflows."""
         return MES_SYSTEM_PROMPT_EXTENSION
+
+    def get_live_system_prompt(self) -> str:
+        """Get the live-data system prompt extension (empty if API not configured)."""
+        if self._api_client and self._api_client.is_configured:
+            return LIVE_SYSTEM_PROMPT_EXTENSION
+        return ""
 
     def _stream_response(
         self,
@@ -489,6 +683,7 @@ class ClaudeClient:
         messages: List[Dict],
         max_tokens: int,
         tools: Optional[List[Dict]],
+        tool_choice: Optional[Dict] = None,
     ):
         """Stream response from Claude, printing text as it arrives."""
         print("[STREAM] ", end="", file=sys.stderr, flush=True)
@@ -503,6 +698,8 @@ class ClaudeClient:
             }
             if tools:
                 kwargs["tools"] = tools
+                if tool_choice:
+                    kwargs["tool_choice"] = tool_choice
 
             with self.client.messages.stream(**kwargs) as stream:
                 # Track if we got any text (tool_use responses might not have text)
@@ -543,10 +740,13 @@ class ClaudeClient:
             raise
 
     def close(self) -> None:
-        """Close Neo4j connection if we own it."""
+        """Close Neo4j connection if we own it, and the API client."""
         if self._owns_graph and self._graph:
             self._graph.close()
             self._graph = None
+        if self._api_client:
+            self._api_client.close()
+            self._api_client = None
 
     def __enter__(self):
         return self
@@ -564,6 +764,7 @@ class ClaudeClient:
         max_tool_rounds: int = 50,  # High limit - Claude self-regulates
         use_tools: bool = True,
         verbose: bool = False,
+        require_data_query: bool = False,
     ) -> Dict[str, Any]:
         """
         Send a query to Claude with optional tool support.
@@ -578,6 +779,8 @@ class ClaudeClient:
             max_tool_rounds: Max rounds of tool calls before final response
             use_tools: Whether to allow tool calls (if enabled at init)
             verbose: Print debug information
+            require_data_query: If True, force at least one substantive tool call
+                (run_query or get_node) beyond just get_schema before final response
 
         Returns:
             Dict with 'text' (final text response), 'tool_calls' (list of tool calls made),
@@ -594,11 +797,12 @@ class ClaudeClient:
         # Determine if we should use tools
         tools = None
         if use_tools and self._enable_tools and self._tools:
-            tools = OntologyTools.TOOL_DEFINITIONS
+            tools = self._tools.get_all_tool_definitions()
 
         tool_calls_made = []
         total_input_tokens = 0
         total_output_tokens = 0
+        data_query_nudged = False
 
         for tool_round in range(max_tool_rounds + 1):
             if verbose:
@@ -608,12 +812,17 @@ class ClaudeClient:
                     flush=True,
                 )
 
+            # On first round with require_data_query, force tool use
+            tc = None
+            if tool_round == 0 and require_data_query and tools:
+                tc = {"type": "any"}
+
             # Make API call with streaming for visibility
             api_start = time.time()
             if verbose:
                 # Use streaming to show response as it's generated
                 response = self._stream_response(
-                    system_prompt, messages, max_tokens, tools
+                    system_prompt, messages, max_tokens, tools, tool_choice=tc
                 )
             else:
                 # Build kwargs - only include tools if provided
@@ -625,6 +834,8 @@ class ClaudeClient:
                 }
                 if tools:
                     kwargs["tools"] = tools
+                    if tc:
+                        kwargs["tool_choice"] = tc
                 response = self.client.messages.create(**kwargs)
             api_elapsed = time.time() - api_start
 
@@ -720,7 +931,45 @@ class ClaudeClient:
                 # Continue to next round
                 continue
 
-            # No tool use - extract final text
+            # No tool use - check if we need to nudge for a data query
+            if (
+                require_data_query
+                and not data_query_nudged
+                and tools
+            ):
+                substantive_tools = {"run_query", "get_node", "read_tag", "read_tags",
+                                     "get_batch_context", "get_equipment_rca",
+                                     "get_ccp_context", "search_by_symptom",
+                                     "trace_tag_impact", "get_alarm_status"}
+                used_tools = {tc["name"] for tc in tool_calls_made}
+                if not used_tools & substantive_tools:
+                    data_query_nudged = True
+                    # Collect the response so far as assistant content
+                    assistant_content = []
+                    for block in response.content:
+                        if hasattr(block, "text"):
+                            assistant_content.append({"type": "text", "text": block.text})
+                    if assistant_content:
+                        messages.append({"role": "assistant", "content": assistant_content})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Before answering, please use run_query or get_node to look up "
+                            "specific data from the graph database that is relevant to this question. "
+                            "For example, search for related components, check ViewComponent "
+                            "unresolved_bindings, or query BINDS_TO relationships. "
+                            "Do not answer based only on schema information."
+                        ),
+                    })
+                    if verbose:
+                        print(
+                            f"[DEBUG] Nudging for substantive data query...",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    continue
+
+            # Extract final text
             if verbose:
                 print(
                     f"[DEBUG] Extracting final response, content blocks: {[b.type for b in response.content]}",
@@ -918,12 +1167,46 @@ class ClaudeClient:
         return self._get_graph()
 
 
+# System prompt extension for live Ignition API tools
+LIVE_SYSTEM_PROMPT_EXTENSION = """
+## Live Ignition Gateway Data
+
+You have access to the live Ignition gateway. Use these tools to check real-time system state during troubleshooting:
+
+### Live Tools:
+- **read_tag**: Read a single tag's current value, quality, and timestamp. Use when you find a relevant tag in the ontology and need its live state.
+- **read_tags**: Read multiple tags at once (batch). Use to check several related tags simultaneously (e.g., all interlocks for a motor).
+- **get_gateway_status**: Check gateway health, version, uptime, and connection status. Start here when diagnosing communication issues.
+- **get_alarm_status**: Get alarm pipeline states. Use when investigating alarm-related issues.
+### Troubleshooting Workflow with Live Data:
+1. Use `get_node` or `run_query` to find the equipment/tag in the ontology
+2. Use `read_tag` to check the live value of relevant tags
+3. Compare live values against expected states (from ontology knowledge)
+4. Use `read_tags` to check related tags (interlocks, upstream signals)
+5. Use `get_gateway_status` if you suspect communication issues
+6. Trace from symptoms to root cause using both ontology and live data
+
+### Tag Path Format:
+Tag paths should include the provider prefix, e.g., `[default]Final_Process/FinalProduct_Temperature`.
+If the `[default]` prefix is omitted it will be added automatically.
+Multiple tags can be read in a single `read_tags` call for efficiency.
+"""
+
+
 # Convenience function
 def get_claude_client(
-    model: str = "claude-sonnet-4-5-20250929", enable_tools: bool = True
+    model: str = "claude-sonnet-4-5-20250929",
+    enable_tools: bool = True,
+    ignition_api_url: Optional[str] = None,
+    ignition_api_token: Optional[str] = None,
 ) -> ClaudeClient:
-    """Get a configured Claude client with Neo4j tools."""
-    return ClaudeClient(model=model, enable_tools=enable_tools)
+    """Get a configured Claude client with Neo4j tools and optional live API."""
+    return ClaudeClient(
+        model=model,
+        enable_tools=enable_tools,
+        ignition_api_url=ignition_api_url,
+        ignition_api_token=ignition_api_token,
+    )
 
 
 # Relationship proposal system prompt
@@ -948,7 +1231,7 @@ Common relationship types:
 - HAS_TAG: AOI has tag
 - HAS_SYMPTOM: AOI has fault symptom
 - MONITORED_BY: CCP monitored by equipment
-- BINDS_TO: ViewComponent binds to UDT/Equipment
+- BINDS_TO: ViewComponent binds to UDT/Equipment/ScadaTag (has properties: binding_type, target_text, bidirectional, property, tag_path)
 
 IMPORTANT: First use tools to verify that the referenced nodes exist. If they don't exist, include a create_node action.
 
@@ -1044,6 +1327,14 @@ def main():
         nargs="*",
         help="Explain the relationships between specified nodes",
     )
+    parser.add_argument(
+        "--api-url",
+        help="Ignition gateway API URL (or set IGNITION_API_URL)",
+    )
+    parser.add_argument(
+        "--api-token",
+        help="Ignition API token (or set IGNITION_API_TOKEN)",
+    )
 
     args = parser.parse_args()
 
@@ -1051,7 +1342,11 @@ def main():
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    with ClaudeClient(enable_tools=not args.no_tools) as client:
+    with ClaudeClient(
+        enable_tools=not args.no_tools,
+        ignition_api_url=args.api_url,
+        ignition_api_token=args.api_token,
+    ) as client:
         if args.propose_relationship:
             # Read JSON from stdin with description
             try:

@@ -1810,6 +1810,8 @@ class OntologyGraph:
         inferred_purpose: str = "",
         props: dict = None,
         semantic_status: str = "pending",
+        unresolved_bindings: list = None,
+        event_scripts: list = None,
     ) -> bool:
         """Create a ViewComponent node and link it to a View.
 
@@ -1821,6 +1823,8 @@ class OntologyGraph:
             inferred_purpose: Type-based inferred purpose (deterministic, not AI)
             props: Additional properties (text, style, etc.)
             semantic_status: One of 'pending', 'in_progress', 'complete', 'review'
+            unresolved_bindings: Bindings that couldn't resolve to a known entity
+            event_scripts: Event script text extracted from this component
 
         Returns:
             True if component was created and linked
@@ -1833,7 +1837,9 @@ class OntologyGraph:
                 SET c.name = $component_name,
                     c.type = $component_type,
                     c.inferred_purpose = $inferred_purpose,
-                    c.props = $props
+                    c.props = $props,
+                    c.unresolved_bindings = $unresolved_bindings,
+                    c.event_scripts = $event_scripts
                 WITH c
                 SET c.semantic_status = COALESCE(c.semantic_status, $semantic_status)
                 WITH c
@@ -1849,6 +1855,8 @@ class OntologyGraph:
                     "inferred_purpose": inferred_purpose,
                     "props": json.dumps(props or {}),
                     "semantic_status": semantic_status,
+                    "unresolved_bindings": json.dumps(unresolved_bindings) if unresolved_bindings else None,
+                    "event_scripts": json.dumps(event_scripts) if event_scripts else None,
                 },
             )
             return result.single() is not None
@@ -1860,6 +1868,9 @@ class OntologyGraph:
         udt_name: str,
         binding_property: str,
         tag_path: str = "",
+        binding_type: str = "",
+        target_text: str = "",
+        bidirectional: bool = False,
     ) -> bool:
         """Create a BINDS_TO relationship between a ViewComponent and a UDT.
 
@@ -1869,6 +1880,9 @@ class OntologyGraph:
             udt_name: Name of the UDT being bound
             binding_property: Which property is bound (e.g., 'value', 'text', 'visible')
             tag_path: Full tag path of the binding
+            binding_type: Type of binding (tag, expression, query, property)
+            target_text: Full binding target as-written
+            bidirectional: Whether the binding is bidirectional
 
         Returns:
             True if relationship was created
@@ -1880,7 +1894,10 @@ class OntologyGraph:
                 MATCH (u:UDT {name: $udt_name})
                 MERGE (c)-[r:BINDS_TO]->(u)
                 SET r.property = $binding_property,
-                    r.tag_path = $tag_path
+                    r.tag_path = $tag_path,
+                    r.binding_type = $binding_type,
+                    r.target_text = $target_text,
+                    r.bidirectional = $bidirectional
                 RETURN c.path as component, u.name as udt
             """,
                 {
@@ -1889,6 +1906,9 @@ class OntologyGraph:
                     "udt_name": udt_name,
                     "binding_property": binding_property,
                     "tag_path": tag_path,
+                    "binding_type": binding_type,
+                    "target_text": target_text,
+                    "bidirectional": bidirectional,
                 },
             )
             return result.single() is not None
@@ -1900,6 +1920,9 @@ class OntologyGraph:
         tag_name: str,
         binding_property: str,
         tag_path: str = "",
+        binding_type: str = "",
+        target_text: str = "",
+        bidirectional: bool = False,
     ) -> bool:
         """Create a BINDS_TO relationship between a ViewComponent and a ScadaTag.
 
@@ -1909,6 +1932,9 @@ class OntologyGraph:
             tag_name: Name of the ScadaTag being bound
             binding_property: Which property is bound (e.g., 'value', 'text', 'visible')
             tag_path: Full tag path of the binding
+            binding_type: Type of binding (tag, expression, query, property)
+            target_text: Full binding target as-written
+            bidirectional: Whether the binding is bidirectional
 
         Returns:
             True if relationship was created
@@ -1920,7 +1946,10 @@ class OntologyGraph:
                 MATCH (t:ScadaTag {name: $tag_name})
                 MERGE (c)-[r:BINDS_TO]->(t)
                 SET r.property = $binding_property,
-                    r.tag_path = $tag_path
+                    r.tag_path = $tag_path,
+                    r.binding_type = $binding_type,
+                    r.target_text = $target_text,
+                    r.bidirectional = $bidirectional
                 RETURN c.path as component, t.name as tag
             """,
                 {
@@ -1929,6 +1958,9 @@ class OntologyGraph:
                     "tag_name": tag_name,
                     "binding_property": binding_property,
                     "tag_path": tag_path,
+                    "binding_type": binding_type,
+                    "target_text": target_text,
+                    "bidirectional": bidirectional,
                 },
             )
             return result.single() is not None
@@ -2394,7 +2426,9 @@ class OntologyGraph:
                       AND (n.deleted IS NULL OR n.deleted = false)
                     RETURN n.view as view, n.path as path, n.name as name, 
                            n.type as type, n.props as props,
-                           n.inferred_purpose as inferred_purpose
+                           n.inferred_purpose as inferred_purpose,
+                           n.unresolved_bindings as unresolved_bindings,
+                           n.event_scripts as event_scripts
                     LIMIT $limit
                     """,
                     {"limit": limit},

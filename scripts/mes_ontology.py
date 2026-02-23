@@ -922,7 +922,9 @@ When investigating issues:
 1. Start with `search_by_symptom` using the operator's description
 2. Get context with `get_batch_context` or `get_equipment_rca`
 3. Trace to specific tags with `trace_tag_impact`
-4. Check CCP status with `get_ccp_context`
+4. If live API tools are available, use `read_tag` / `read_tags` to check current tag values
+5. Check CCP status with `get_ccp_context`
+6. Use `get_gateway_status` if communication issues are suspected
 
 ### RCA Enrichments:
 Equipment and CCP nodes may have RCA enrichments (properties added by LLM analysis):

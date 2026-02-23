@@ -471,6 +471,11 @@ class IgnitionParser:
                     target = config.get("queryPath", "")
                 elif binding_type == "expr":
                     target = binding_data.get("expression", "")
+                elif binding_type == "property":
+                    config = binding_data.get("config", {})
+                    target = config.get("path", binding_data.get("value", ""))
+                    if not target:
+                        target = str(binding_data)
                 else:
                     target = str(binding_data)
 
