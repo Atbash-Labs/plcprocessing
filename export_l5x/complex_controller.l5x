@@ -1,0 +1,372 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<RSLogix5000Content SchemaRevision="1.0" SoftwareRevision="33.00"
+  TargetName="ProcessController" TargetType="Controller" ContainsContext="false" Owner="test_user">
+<Controller Use="Target" Name="ProcessController">
+<DataTypes>
+  <DataType Name="MotorStatus" Family="NoFamily" Class="User">
+    <Members>
+      <Member Name="Running" DataType="BOOL" Dimension="0" Hidden="false"/>
+      <Member Name="Faulted" DataType="BOOL" Dimension="0" Hidden="false"/>
+      <Member Name="Speed" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="Current" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="RunHours" DataType="DINT" Dimension="0" Hidden="false"/>
+      <Member Name="ZZZZZZZZZZZZZZ0" DataType="SINT" Dimension="0" Hidden="true"/>
+    </Members>
+  </DataType>
+  <DataType Name="ValveStatus" Family="NoFamily" Class="User">
+    <Members>
+      <Member Name="Open" DataType="BOOL" Dimension="0" Hidden="false"/>
+      <Member Name="Closed" DataType="BOOL" Dimension="0" Hidden="false"/>
+      <Member Name="InTransit" DataType="BOOL" Dimension="0" Hidden="false"/>
+      <Member Name="FaultCode" DataType="DINT" Dimension="0" Hidden="false"/>
+      <Member Name="Position" DataType="REAL" Dimension="0" Hidden="false"/>
+    </Members>
+  </DataType>
+  <DataType Name="AlarmConfig" Family="NoFamily" Class="User">
+    <Members>
+      <Member Name="HighLimit" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="LowLimit" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="Deadband" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="Delay" DataType="DINT" Dimension="0" Hidden="false"/>
+      <Member Name="Severity" DataType="DINT" Dimension="0" Hidden="false"/>
+    </Members>
+  </DataType>
+  <DataType Name="PIDConfig" Family="NoFamily" Class="User">
+    <Members>
+      <Member Name="Kp" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="Ki" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="Kd" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="Setpoint" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="OutputMin" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="OutputMax" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="AlarmCfg" DataType="AlarmConfig" Dimension="0" Hidden="false"/>
+    </Members>
+  </DataType>
+  <DataType Name="BatchStep" Family="NoFamily" Class="User">
+    <Members>
+      <Member Name="StepName" DataType="STRING" Dimension="0" Hidden="false"/>
+      <Member Name="Duration" DataType="DINT" Dimension="0" Hidden="false"/>
+      <Member Name="TargetTemp" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="TargetPressure" DataType="REAL" Dimension="0" Hidden="false"/>
+      <Member Name="AgitatorSpeed" DataType="REAL" Dimension="0" Hidden="false"/>
+    </Members>
+  </DataType>
+  <DataType Name="BatchRecipe" Family="NoFamily" Class="User">
+    <Members>
+      <Member Name="RecipeName" DataType="STRING" Dimension="0" Hidden="false"/>
+      <Member Name="NumSteps" DataType="DINT" Dimension="0" Hidden="false"/>
+      <Member Name="Steps" DataType="BatchStep" Dimension="10" Hidden="false"/>
+    </Members>
+  </DataType>
+</DataTypes>
+<AddOnInstructionDefinitions>
+  <!-- AOI 1: Alarm handler (standalone, no deps) -->
+  <AddOnInstructionDefinition Name="AlarmHandler" Revision="2.1" Vendor="ProcessCo">
+    <Description>Generic analog alarm with high/low limits and deadband</Description>
+    <Parameters>
+      <Parameter Name="EnableIn" TagType="Base" DataType="BOOL" Usage="Input" Required="false" Visible="false" ExternalAccess="Read Only"/>
+      <Parameter Name="EnableOut" TagType="Base" DataType="BOOL" Usage="Output" Required="false" Visible="false" ExternalAccess="Read Only"/>
+      <Parameter Name="PV" TagType="Base" DataType="REAL" Usage="Input" Required="true" Visible="true">
+        <Description>Process value to monitor</Description>
+      </Parameter>
+      <Parameter Name="Cfg" TagType="Base" DataType="AlarmConfig" Usage="InOut" Required="true" Visible="true">
+        <Description>Alarm configuration structure</Description>
+      </Parameter>
+      <Parameter Name="HighAlarm" TagType="Base" DataType="BOOL" Usage="Output" Required="false" Visible="true">
+        <Description>High alarm active</Description>
+      </Parameter>
+      <Parameter Name="LowAlarm" TagType="Base" DataType="BOOL" Usage="Output" Required="false" Visible="true">
+        <Description>Low alarm active</Description>
+      </Parameter>
+      <Parameter Name="Acknowledged" TagType="Base" DataType="BOOL" Usage="Input" Required="false" Visible="true">
+        <Description>Alarm acknowledged by operator</Description>
+      </Parameter>
+    </Parameters>
+    <LocalTags>
+      <LocalTag Name="HighTimer" DataType="TIMER"/>
+      <LocalTag Name="LowTimer" DataType="TIMER"/>
+      <LocalTag Name="HighLatched" DataType="BOOL"/>
+      <LocalTag Name="LowLatched" DataType="BOOL"/>
+    </LocalTags>
+    <Routines>
+      <Routine Name="Logic" Type="RLL">
+        <RLLContent>
+          <Rung Number="0" Type="N">
+            <Comment>High alarm detection with deadband</Comment>
+            <Text>[GRT(PV,Cfg.HighLimit) TON(HighTimer,?,?) ];</Text>
+          </Rung>
+          <Rung Number="1" Type="N">
+            <Comment>Latch high alarm after delay</Comment>
+            <Text>[XIC(HighTimer.DN) OTL(HighLatched) ];</Text>
+          </Rung>
+          <Rung Number="2" Type="N">
+            <Comment>Clear high alarm on acknowledge and PV below limit minus deadband</Comment>
+            <Text>[XIC(Acknowledged) ,LES(PV,Cfg.HighLimit) ,SUB(Cfg.HighLimit,Cfg.Deadband,0) OTU(HighLatched) ];</Text>
+          </Rung>
+          <Rung Number="3" Type="N">
+            <Comment>Output high alarm status</Comment>
+            <Text>[XIC(HighLatched) OTE(HighAlarm) ];</Text>
+          </Rung>
+          <Rung Number="4" Type="N">
+            <Comment>Low alarm detection with deadband</Comment>
+            <Text>[LES(PV,Cfg.LowLimit) TON(LowTimer,?,?) ];</Text>
+          </Rung>
+          <Rung Number="5" Type="N">
+            <Text>[XIC(LowTimer.DN) OTL(LowLatched) ];</Text>
+          </Rung>
+          <Rung Number="6" Type="N">
+            <Text>[XIC(Acknowledged) ,GRT(PV,Cfg.LowLimit) OTU(LowLatched) ];</Text>
+          </Rung>
+          <Rung Number="7" Type="N">
+            <Text>[XIC(LowLatched) OTE(LowAlarm) ];</Text>
+          </Rung>
+        </RLLContent>
+      </Routine>
+    </Routines>
+  </AddOnInstructionDefinition>
+
+  <!-- AOI 2: PID Loop (uses AlarmConfig UDT via PIDConfig) -->
+  <AddOnInstructionDefinition Name="PIDLoop" Revision="3.0" Vendor="ProcessCo">
+    <Description>PID controller with integrated alarm handling</Description>
+    <Parameters>
+      <Parameter Name="EnableIn" TagType="Base" DataType="BOOL" Usage="Input" Required="false" Visible="false" ExternalAccess="Read Only"/>
+      <Parameter Name="EnableOut" TagType="Base" DataType="BOOL" Usage="Output" Required="false" Visible="false" ExternalAccess="Read Only"/>
+      <Parameter Name="PV" TagType="Base" DataType="REAL" Usage="Input" Required="true" Visible="true">
+        <Description>Process variable</Description>
+      </Parameter>
+      <Parameter Name="Config" TagType="Base" DataType="PIDConfig" Usage="InOut" Required="true" Visible="true">
+        <Description>PID configuration with embedded alarm config</Description>
+      </Parameter>
+      <Parameter Name="Output" TagType="Base" DataType="REAL" Usage="Output" Required="false" Visible="true">
+        <Description>Control output 0-100%</Description>
+      </Parameter>
+      <Parameter Name="AutoMode" TagType="Base" DataType="BOOL" Usage="Input" Required="false" Visible="true">
+        <Description>Auto/Manual mode select</Description>
+      </Parameter>
+      <Parameter Name="ManualOutput" TagType="Base" DataType="REAL" Usage="Input" Required="false" Visible="true">
+        <Description>Manual output value</Description>
+      </Parameter>
+    </Parameters>
+    <LocalTags>
+      <LocalTag Name="Error" DataType="REAL"/>
+      <LocalTag Name="Integral" DataType="REAL"/>
+      <LocalTag Name="Derivative" DataType="REAL"/>
+      <LocalTag Name="LastError" DataType="REAL"/>
+      <LocalTag Name="RawOutput" DataType="REAL"/>
+      <LocalTag Name="AlmHandler" DataType="AlarmHandler">
+        <Description>Embedded alarm handler instance</Description>
+      </LocalTag>
+    </LocalTags>
+    <Routines>
+      <Routine Name="Logic" Type="ST">
+        <STContent>
+Error := Config.Setpoint - PV;
+Integral := Integral + (Error * Config.Ki);
+Derivative := (Error - LastError) * Config.Kd;
+RawOutput := (Error * Config.Kp) + Integral + Derivative;
+LastError := Error;
+
+IF AutoMode THEN
+    Output := RawOutput;
+ELSE
+    Output := ManualOutput;
+END_IF;
+
+IF Output > Config.OutputMax THEN
+    Output := Config.OutputMax;
+ELSIF Output &lt; Config.OutputMin THEN
+    Output := Config.OutputMin;
+END_IF;
+        </STContent>
+      </Routine>
+    </Routines>
+  </AddOnInstructionDefinition>
+
+  <!-- AOI 3: Motor Control (uses MotorStatus UDT) -->
+  <AddOnInstructionDefinition Name="MotorControl" Revision="1.5" Vendor="ProcessCo">
+    <Description>Full-featured motor control with interlock and alarm</Description>
+    <Parameters>
+      <Parameter Name="EnableIn" TagType="Base" DataType="BOOL" Usage="Input" Required="false" Visible="false" ExternalAccess="Read Only"/>
+      <Parameter Name="EnableOut" TagType="Base" DataType="BOOL" Usage="Output" Required="false" Visible="false" ExternalAccess="Read Only"/>
+      <Parameter Name="StartCmd" TagType="Base" DataType="BOOL" Usage="Input" Required="true" Visible="true">
+        <Description>Start command from operator</Description>
+      </Parameter>
+      <Parameter Name="StopCmd" TagType="Base" DataType="BOOL" Usage="Input" Required="true" Visible="true">
+        <Description>Stop command from operator</Description>
+      </Parameter>
+      <Parameter Name="InterlockOK" TagType="Base" DataType="BOOL" Usage="Input" Required="true" Visible="true">
+        <Description>Safety interlock permissive</Description>
+      </Parameter>
+      <Parameter Name="SpeedRef" TagType="Base" DataType="REAL" Usage="Input" Required="false" Visible="true">
+        <Description>Speed reference 0-100%</Description>
+      </Parameter>
+      <Parameter Name="Status" TagType="Base" DataType="MotorStatus" Usage="InOut" Required="true" Visible="true">
+        <Description>Motor status structure</Description>
+      </Parameter>
+      <Parameter Name="DriveOutput" TagType="Base" DataType="REAL" Usage="Output" Required="false" Visible="true">
+        <Description>Output to VFD</Description>
+      </Parameter>
+    </Parameters>
+    <LocalTags>
+      <LocalTag Name="RunLatch" DataType="BOOL"/>
+      <LocalTag Name="FaultTimer" DataType="TIMER"/>
+      <LocalTag Name="RunTimer" DataType="TIMER"/>
+      <LocalTag Name="AlarmInst" DataType="AlarmHandler">
+        <Description>Current alarm instance</Description>
+      </LocalTag>
+    </LocalTags>
+    <Routines>
+      <Routine Name="Logic" Type="RLL">
+        <RLLContent>
+          <Rung Number="0" Type="N">
+            <Comment>Start latch with interlock check</Comment>
+            <Text>[XIC(StartCmd) ,XIC(InterlockOK) ,XIO(Status.Faulted) OTL(RunLatch) ];</Text>
+          </Rung>
+          <Rung Number="1" Type="N">
+            <Comment>Stop or interlock trip</Comment>
+            <Text>[XIC(StopCmd) OTU(RunLatch) ][XIO(InterlockOK) OTU(RunLatch) ];</Text>
+          </Rung>
+          <Rung Number="2" Type="N">
+            <Comment>Drive output based on run status</Comment>
+            <Text>[XIC(RunLatch) MOV(SpeedRef,DriveOutput) ][XIO(RunLatch) MOV(0,DriveOutput) ];</Text>
+          </Rung>
+          <Rung Number="3" Type="N">
+            <Comment>Update status running</Comment>
+            <Text>[XIC(RunLatch) OTE(Status.Running) ];</Text>
+          </Rung>
+          <Rung Number="4" Type="N">
+            <Comment>Run hours accumulator</Comment>
+            <Text>[XIC(RunLatch) TON(RunTimer,3600000,0) ];</Text>
+          </Rung>
+          <Rung Number="5" Type="N">
+            <Text>[XIC(RunTimer.DN) ADD(Status.RunHours,1,Status.RunHours) ][XIC(RunTimer.DN) RES(RunTimer) ];</Text>
+          </Rung>
+        </RLLContent>
+      </Routine>
+    </Routines>
+  </AddOnInstructionDefinition>
+
+  <!-- AOI 4: Valve Control (uses ValveStatus UDT) -->
+  <AddOnInstructionDefinition Name="ValveControl" Revision="1.2" Vendor="ProcessCo">
+    <Description>On/off valve control with position feedback and fault detection</Description>
+    <Parameters>
+      <Parameter Name="EnableIn" TagType="Base" DataType="BOOL" Usage="Input" Required="false" Visible="false" ExternalAccess="Read Only"/>
+      <Parameter Name="EnableOut" TagType="Base" DataType="BOOL" Usage="Output" Required="false" Visible="false" ExternalAccess="Read Only"/>
+      <Parameter Name="OpenCmd" TagType="Base" DataType="BOOL" Usage="Input" Required="true" Visible="true"/>
+      <Parameter Name="CloseCmd" TagType="Base" DataType="BOOL" Usage="Input" Required="true" Visible="true"/>
+      <Parameter Name="OpenFeedback" TagType="Base" DataType="BOOL" Usage="Input" Required="true" Visible="true"/>
+      <Parameter Name="CloseFeedback" TagType="Base" DataType="BOOL" Usage="Input" Required="true" Visible="true"/>
+      <Parameter Name="Status" TagType="Base" DataType="ValveStatus" Usage="InOut" Required="true" Visible="true"/>
+      <Parameter Name="SolenoidOut" TagType="Base" DataType="BOOL" Usage="Output" Required="false" Visible="true"/>
+      <Parameter Name="TransitTime" TagType="Base" DataType="DINT" Usage="Input" Required="false" Visible="true">
+        <Description>Expected transit time in ms</Description>
+      </Parameter>
+    </Parameters>
+    <LocalTags>
+      <LocalTag Name="TransitTimer" DataType="TIMER"/>
+      <LocalTag Name="OpenLatch" DataType="BOOL"/>
+    </LocalTags>
+    <Routines>
+      <Routine Name="Logic" Type="RLL">
+        <RLLContent>
+          <Rung Number="0" Type="N">
+            <Comment>Open command latch</Comment>
+            <Text>[XIC(OpenCmd) OTL(OpenLatch) ][XIC(CloseCmd) OTU(OpenLatch) ];</Text>
+          </Rung>
+          <Rung Number="1" Type="N">
+            <Comment>Solenoid output</Comment>
+            <Text>[XIC(OpenLatch) OTE(SolenoidOut) ];</Text>
+          </Rung>
+          <Rung Number="2" Type="N">
+            <Comment>Update feedback status</Comment>
+            <Text>[XIC(OpenFeedback) OTE(Status.Open) ][XIC(CloseFeedback) OTE(Status.Closed) ];</Text>
+          </Rung>
+          <Rung Number="3" Type="N">
+            <Comment>Transit detection</Comment>
+            <Text>[XIC(OpenLatch) ,XIO(OpenFeedback) OTE(Status.InTransit) ][XIO(OpenLatch) ,XIO(CloseFeedback) OTE(Status.InTransit) ];</Text>
+          </Rung>
+          <Rung Number="4" Type="N">
+            <Comment>Fault on stuck transit</Comment>
+            <Text>[XIC(Status.InTransit) TON(TransitTimer,TransitTime,0) ];</Text>
+          </Rung>
+          <Rung Number="5" Type="N">
+            <Text>[XIC(TransitTimer.DN) MOV(1,Status.FaultCode) ];</Text>
+          </Rung>
+        </RLLContent>
+      </Routine>
+    </Routines>
+  </AddOnInstructionDefinition>
+
+  <!-- AOI 5: Batch Sequence Controller (uses BatchRecipe, depends on MotorControl, ValveControl, PIDLoop) -->
+  <AddOnInstructionDefinition Name="BatchController" Revision="1.0" Vendor="ProcessCo">
+    <Description>Batch sequence controller that orchestrates motors, valves, and PID loops</Description>
+    <Parameters>
+      <Parameter Name="EnableIn" TagType="Base" DataType="BOOL" Usage="Input" Required="false" Visible="false" ExternalAccess="Read Only"/>
+      <Parameter Name="EnableOut" TagType="Base" DataType="BOOL" Usage="Output" Required="false" Visible="false" ExternalAccess="Read Only"/>
+      <Parameter Name="StartBatch" TagType="Base" DataType="BOOL" Usage="Input" Required="true" Visible="true">
+        <Description>Start batch execution</Description>
+      </Parameter>
+      <Parameter Name="AbortBatch" TagType="Base" DataType="BOOL" Usage="Input" Required="true" Visible="true">
+        <Description>Emergency abort batch</Description>
+      </Parameter>
+      <Parameter Name="Recipe" TagType="Base" DataType="BatchRecipe" Usage="InOut" Required="true" Visible="true">
+        <Description>Active recipe definition</Description>
+      </Parameter>
+      <Parameter Name="CurrentStep" TagType="Base" DataType="DINT" Usage="Output" Required="false" Visible="true">
+        <Description>Current step index 0-based</Description>
+      </Parameter>
+      <Parameter Name="BatchComplete" TagType="Base" DataType="BOOL" Usage="Output" Required="false" Visible="true">
+        <Description>Batch finished successfully</Description>
+      </Parameter>
+      <Parameter Name="BatchFaulted" TagType="Base" DataType="BOOL" Usage="Output" Required="false" Visible="true">
+        <Description>Batch faulted</Description>
+      </Parameter>
+    </Parameters>
+    <LocalTags>
+      <LocalTag Name="StepTimer" DataType="TIMER"/>
+      <LocalTag Name="AgitatorMotor" DataType="MotorControl">
+        <Description>Agitator motor instance</Description>
+      </LocalTag>
+      <LocalTag Name="InletValve" DataType="ValveControl">
+        <Description>Feed inlet valve instance</Description>
+      </LocalTag>
+      <LocalTag Name="OutletValve" DataType="ValveControl">
+        <Description>Product outlet valve instance</Description>
+      </LocalTag>
+      <LocalTag Name="TempLoop" DataType="PIDLoop">
+        <Description>Temperature control PID loop</Description>
+      </LocalTag>
+      <LocalTag Name="PressureLoop" DataType="PIDLoop">
+        <Description>Pressure control PID loop</Description>
+      </LocalTag>
+      <LocalTag Name="BatchState" DataType="DINT"/>
+      <LocalTag Name="StepDuration" DataType="DINT"/>
+    </LocalTags>
+    <Routines>
+      <Routine Name="Logic" Type="ST">
+        <STContent>
+IF AbortBatch THEN
+    BatchState := 99;
+END_IF;
+
+CASE BatchState OF
+    0: (* IDLE *)
+        IF StartBatch THEN
+            CurrentStep := 0;
+            BatchComplete := 0;
+            BatchFaulted := 0;
+            BatchState := 1;
+        END_IF;
+    1: (* RUNNING STEP *)
+        StepDuration := Recipe.Steps[CurrentStep].Duration;
+    99: (* ABORT *)
+        BatchFaulted := 1;
+        BatchState := 0;
+END_CASE;
+        </STContent>
+      </Routine>
+    </Routines>
+  </AddOnInstructionDefinition>
+</AddOnInstructionDefinitions>
+</Controller>
+</RSLogix5000Content>

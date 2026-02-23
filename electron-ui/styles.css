@@ -45,6 +45,8 @@
   /* ---- Colors: Graph nodes ---- */
   --color-node-plc: #F57C00;
   --color-node-scada: #7B1FA2;
+  --color-node-scada-tag: #26A69A;
+  --color-node-scada-component: #5C6BC0;
   --color-node-project: #3F51B5;
   --color-node-mes: #00897B;
   --color-node-fault: #FF5722;
