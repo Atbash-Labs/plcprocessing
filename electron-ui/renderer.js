@@ -3273,6 +3273,19 @@ async function loadSettings() {
     settingsUrlInput.value = result.ignitionApiUrl || '';
     settingsTokenInput.value = result.ignitionApiToken || '';
     updateIgnitionSidebarStatus(!!result.ignitionApiUrl);
+
+    if (result.ignitionApiUrl) {
+      autoTestIgnitionConnection(result.ignitionApiUrl, result.ignitionApiToken || '');
+    }
+  }
+}
+
+async function autoTestIgnitionConnection(url, token) {
+  try {
+    const result = await api.testIgnitionConnection({ url, token });
+    updateIgnitionSidebarStatus(true, !!result.success);
+  } catch {
+    updateIgnitionSidebarStatus(true, false);
   }
 }
 
@@ -3353,6 +3366,9 @@ btnSaveSettings?.addEventListener('click', async () => {
     if (result.success) {
       btnSaveSettings.textContent = 'Saved';
       updateIgnitionSidebarStatus(!!url);
+      if (url) {
+        autoTestIgnitionConnection(url, token);
+      }
       setTimeout(() => { btnSaveSettings.textContent = 'Save Settings'; }, 1500);
     } else {
       btnSaveSettings.textContent = 'Error';
