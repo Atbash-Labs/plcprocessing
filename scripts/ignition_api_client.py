@@ -238,6 +238,53 @@ class IgnitionApiClient:
         return self._parse_tags_response(normalised, data)
 
     # --------------------------------------------------------------------- #
+    #  Tag history – WebDev module endpoint
+    # --------------------------------------------------------------------- #
+
+    def query_tag_history(
+        self,
+        tag_paths: List[str],
+        start_date: str,
+        end_date: str,
+        return_size: int = 100,
+        aggregation_mode: str = "Average",
+        return_format: str = "Wide",
+        interval_minutes: Optional[int] = None,
+        include_bounding_values: bool = False,
+    ) -> Optional[Any]:
+        """Query historical tag values via the WebDev queryTagHistory endpoint.
+
+        Args:
+            tag_paths: Tag paths with provider prefix, e.g. ['[default]Folder/Tag'].
+            start_date: ISO datetime string or epoch ms.
+            end_date: ISO datetime string or epoch ms.
+            return_size: Max rows to return (default 100).
+            aggregation_mode: Average, MinMax, LastValue, Sum, Minimum, Maximum.
+            return_format: Wide or Tall.
+            interval_minutes: Aggregation interval in minutes.
+            include_bounding_values: Include values at boundaries.
+        """
+        normalised = [self._ensure_provider_prefix(p) for p in tag_paths]
+        params: Dict[str, Any] = {
+            "tagPaths": ",".join(normalised),
+            "startDate": start_date,
+            "endDate": end_date,
+            "returnSize": return_size,
+            "aggregationMode": aggregation_mode,
+            "returnFormat": return_format,
+            "includeBoundingValues": str(include_bounding_values).lower(),
+        }
+        if interval_minutes is not None:
+            params["intervalMinutes"] = interval_minutes
+
+        data = self._get("system/webdev/Axilon/queryTagHistory", params=params)
+
+        if data is None:
+            return {"error": "API request failed or not configured", "tagPaths": normalised}
+
+        return data
+
+    # --------------------------------------------------------------------- #
     #  Alarm pipelines
     # --------------------------------------------------------------------- #
 

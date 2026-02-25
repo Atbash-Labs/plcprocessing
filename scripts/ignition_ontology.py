@@ -171,6 +171,7 @@ class IgnitionOntologyAnalyzer:
                 folder_path=query.folder_path or "",
                 query_id=query.id,
                 query_text=query.query_text,
+                database=query.database,
             )
             queries_created += 1
             if query.query_text:
@@ -193,6 +194,27 @@ class IgnitionOntologyAnalyzer:
             )
             events_created += 1
 
+        # Create database connection nodes
+        db_conns_created = 0
+        for conn in backup.db_connections:
+            self.graph.create_database_connection(
+                name=conn.name,
+                database_type=conn.database_type,
+                url=conn.url,
+                username=conn.username,
+                enabled=conn.enabled,
+                description=conn.description,
+                translator=conn.translator,
+                max_active=conn.max_active,
+                validation_query=conn.validation_query,
+            )
+            db_conns_created += 1
+
+        # Link NamedQueries and query ScadaTags to their DatabaseConnections
+        db_links = 0
+        if db_conns_created > 0:
+            db_links = self.graph.link_uses_database()
+
         if verbose:
             print(
                 f"[OK] Created {len(backup.udt_definitions)} UDTs, {views_created} views, "
@@ -205,6 +227,12 @@ class IgnitionOntologyAnalyzer:
                 f"{events_created} gateway events",
                 flush=True,
             )
+            if db_conns_created > 0:
+                print(
+                    f"[OK] Created {db_conns_created} database connections, "
+                    f"{db_links} USES_DATABASE links",
+                    flush=True,
+                )
 
         # Create inter-entity relationships
         if verbose:

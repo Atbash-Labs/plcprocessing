@@ -92,6 +92,10 @@
           <span class="status-dot"></span>
           <span class="status-text">Ignition API</span>
         </div>
+        <div class="status" id="db-connections-status">
+          <span class="status-dot"></span>
+          <span class="status-text">DB Connections</span>
+        </div>
       </div>
     </aside>
 
@@ -1067,6 +1071,27 @@
             <div class="connection-status" id="ignition-connection-status">
               <span class="status-dot"></span>
               <span class="connection-status-text">Not configured</span>
+            </div>
+          </div>
+
+          <!-- Database Connections card -->
+          <div class="card settings-card-wide">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+              </svg>
+            </div>
+            <h3>Database Connections</h3>
+            <p>Configure credentials for project database connections discovered during ingestion. These are used for live query testing.</p>
+
+            <div id="db-connections-list" style="margin-top: var(--space-4);">
+              <p class="text-muted text-sm">Loading database connections...</p>
+            </div>
+
+            <div class="settings-actions" id="db-connections-actions" style="display: none;">
+              <button class="btn btn-primary" id="btn-save-db-creds">Save Credentials</button>
             </div>
           </div>
         </div>

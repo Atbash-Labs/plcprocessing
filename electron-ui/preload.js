@@ -71,6 +71,11 @@ contextBridge.exposeInMainWorld('api', {
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   testIgnitionConnection: (options) => ipcRenderer.invoke('test-ignition-connection', options),
   
+  // Database connections
+  getDbConnections: () => ipcRenderer.invoke('get-db-connections'),
+  saveDbCredentials: (credentials) => ipcRenderer.invoke('save-db-credentials', credentials),
+  testDbConnection: (connectionName) => ipcRenderer.invoke('test-db-connection', connectionName),
+  
   // Event listeners for streaming (returns cleanup function)
   onStreamOutput: (callback) => {
     const handler = (event, data) => callback(data);

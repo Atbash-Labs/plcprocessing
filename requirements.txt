@@ -15,5 +15,11 @@ lxml>=4.9.0
 # SQL Server connectivity
 pyodbc>=4.0.0
 
+# MySQL connectivity
+mysql-connector-python>=8.0.0
+
+# PostgreSQL connectivity
+psycopg2-binary>=2.9.0
+
 # HTTP client for Ignition gateway API
 requests>=2.28.0

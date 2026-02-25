@@ -24,6 +24,7 @@ from ignition_parser import (
     UDTParameter,
     Project,
     GatewayEventScript,
+    DatabaseConnection,
 )
 
 
@@ -105,6 +106,11 @@ class WorkbenchParser:
         for tag in backup_tags:
             if tag.name not in inline_tag_names:
                 backup.tags.append(tag)
+
+        # Parse database connections from root.databaseConnections
+        backup.db_connections = self._parse_database_connections(
+            root.get("databaseConnections", [])
+        )
 
         # Gateway events are not included in workbench backups
         backup.gateway_events = []
@@ -284,11 +290,36 @@ class WorkbenchParser:
                     id=query_id,
                     folder_path=folder_path,
                     project=project_name,
-                    query_text=query_data.get("query", ""),  # SQL is inline!
+                    query_text=query_data.get("query", ""),
+                    database=query_data.get("dbName", ""),
                 )
             )
 
         return queries
+
+    def _parse_database_connections(
+        self, connections_list: List[Dict]
+    ) -> List[DatabaseConnection]:
+        """Parse database connections from workbench format."""
+        connections = []
+        for conn in connections_list:
+            name = conn.get("name", "")
+            if not name:
+                continue
+            connections.append(
+                DatabaseConnection(
+                    name=name,
+                    database_type=conn.get("databaseType", ""),
+                    url=conn.get("url", ""),
+                    username=conn.get("username", ""),
+                    enabled=conn.get("enabled", True),
+                    description=conn.get("description") or "",
+                    translator=conn.get("translator", ""),
+                    max_active=conn.get("maxActive", 8),
+                    validation_query=conn.get("validationQuery", "SELECT 1"),
+                )
+            )
+        return connections
 
     def _parse_scripts(self, scripts_list: List[Dict]) -> List[Script]:
         """Parse scripts from workbench format.

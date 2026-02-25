@@ -60,6 +60,7 @@ class OntologyTools:
     And live Ignition API tools (when configured):
     - read_tag: Read a single tag's live value
     - read_tags: Read multiple tags (batch)
+    - query_tag_history: Query historical tag values over a time range
     - get_gateway_status: Gateway health and connections
     - get_alarm_status: Alarm pipeline states
     """
@@ -175,6 +176,101 @@ class OntologyTools:
             "description": "Get the current state of all alarm notification pipelines on the Ignition gateway.",
             "input_schema": {"type": "object", "properties": {}, "required": []},
         },
+        {
+            "name": "query_tag_history",
+            "description": "Query historical values of one or more Ignition tags over a time range. Returns timestamped data with configurable aggregation. Use this to analyze trends, detect anomalies, or compare tag behavior over time during troubleshooting.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "tag_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tag paths with provider prefix, e.g. ['[default]Feed_Storage/Tank1_Level']. The [default] prefix is added automatically if omitted.",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date/time in ISO format (e.g. '2024-01-01T00:00:00') or epoch milliseconds as a string.",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date/time in ISO format (e.g. '2024-01-02T00:00:00') or epoch milliseconds as a string.",
+                    },
+                    "return_size": {
+                        "type": "integer",
+                        "description": "Maximum number of rows to return. Default 100.",
+                    },
+                    "aggregation_mode": {
+                        "type": "string",
+                        "description": "Aggregation mode: Average, MinMax, LastValue, Sum, Minimum, Maximum. Default Average.",
+                        "enum": ["Average", "MinMax", "LastValue", "Sum", "Minimum", "Maximum"],
+                    },
+                    "return_format": {
+                        "type": "string",
+                        "description": "Data format: Wide (one column per tag) or Tall (one row per tag per timestamp). Default Wide.",
+                        "enum": ["Wide", "Tall"],
+                    },
+                    "interval_minutes": {
+                        "type": "integer",
+                        "description": "Aggregation interval in minutes. If omitted, the server picks an appropriate interval.",
+                    },
+                },
+                "required": ["tag_paths", "start_date", "end_date"],
+            },
+        },
+    ]
+
+    DB_TOOL_DEFINITIONS = [
+        {
+            "name": "list_db_connections",
+            "description": "List all database connections defined in the Ignition project. Returns connection name, type (MySQL/MSSQL/PostgreSQL), URL, and whether credentials are configured. Use this to discover which databases are available before running queries.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "describe_db_schema",
+            "description": "List all tables and their columns for a database connection. Use this to understand the database structure before writing queries.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "connection_name": {
+                        "type": "string",
+                        "description": "Name of the database connection (from list_db_connections).",
+                    },
+                },
+                "required": ["connection_name"],
+            },
+        },
+        {
+            "name": "execute_db_query",
+            "description": "Execute a read-only SQL query against a project database. Only SELECT/SHOW/DESCRIBE/EXPLAIN are allowed. Results are limited to 100 rows. Use this to test named queries, inspect data, or validate query logic.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "connection_name": {
+                        "type": "string",
+                        "description": "Name of the database connection to query.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "SQL SELECT query to execute.",
+                    },
+                },
+                "required": ["connection_name", "query"],
+            },
+        },
+        {
+            "name": "execute_named_query",
+            "description": "Execute a named query from the Ignition project by looking up its SQL and database connection in the ontology. Useful for validating that a named query works correctly.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query_name": {
+                        "type": "string",
+                        "description": "Name of the NamedQuery node in the ontology (use run_query to find it first).",
+                    },
+                },
+                "required": ["query_name"],
+            },
+        },
     ]
 
     def __init__(self, graph: OntologyGraph, api_client: Optional["IgnitionApiClient"] = None):
@@ -187,6 +283,11 @@ class OntologyTools:
 
         # Initialize MES tools
         self._mes_tools = MESTools(graph)
+
+        # Initialize DB client for live database queries
+        from db_client import DatabaseClient
+
+        self._db_client = DatabaseClient(neo4j_graph=graph)
 
         # Map tool names to methods (base tools)
         self._tools: Dict[str, Callable] = {
@@ -202,13 +303,24 @@ class OntologyTools:
             "read_tags": self._read_tags,
             "get_gateway_status": self._get_gateway_status,
             "get_alarm_status": self._get_alarm_status,
+            "query_tag_history": self._query_tag_history,
+        }
+
+        # Database query tools
+        self._db_tools: Dict[str, Callable] = {
+            "list_db_connections": self._list_db_connections,
+            "describe_db_schema": self._describe_db_schema,
+            "execute_db_query": self._execute_db_query,
+            "execute_named_query": self._execute_named_query,
         }
 
     def get_all_tool_definitions(self) -> List[Dict]:
-        """Return combined base + MES + live tool definitions."""
+        """Return combined base + MES + live + DB tool definitions."""
         defs = list(self.TOOL_DEFINITIONS)
         if self._api_client and self._api_client.is_configured:
             defs.extend(self.LIVE_TOOL_DEFINITIONS)
+        # DB tools are always included (they return helpful messages if not configured)
+        defs.extend(self.DB_TOOL_DEFINITIONS)
         return defs
 
     def execute(self, tool_name: str, tool_input: Dict) -> str:
@@ -217,6 +329,14 @@ class OntologyTools:
         if tool_name in self._live_tools:
             try:
                 result = self._live_tools[tool_name](**tool_input)
+                return json.dumps(result, indent=2, default=str)
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        # Check DB tools
+        if tool_name in self._db_tools:
+            try:
+                result = self._db_tools[tool_name](**tool_input)
                 return json.dumps(result, indent=2, default=str)
             except Exception as e:
                 return json.dumps({"error": str(e)})
@@ -575,6 +695,107 @@ class OntologyTools:
             "pipelines": pipelines,
         }
 
+    def _query_tag_history(
+        self,
+        tag_paths: List[str],
+        start_date: str,
+        end_date: str,
+        return_size: int = 100,
+        aggregation_mode: str = "Average",
+        return_format: str = "Wide",
+        interval_minutes: Optional[int] = None,
+    ) -> Dict:
+        err = self._check_api()
+        if err:
+            return err
+        return self._api_client.query_tag_history(
+            tag_paths=tag_paths,
+            start_date=start_date,
+            end_date=end_date,
+            return_size=return_size,
+            aggregation_mode=aggregation_mode,
+            return_format=return_format,
+            interval_minutes=interval_minutes,
+        )
+
+    # -----------------------------------------------------------------
+    # Database query tool implementations
+    # -----------------------------------------------------------------
+
+    def _list_db_connections(self) -> Dict:
+        conns = self._db_client.list_connections()
+        if not conns:
+            return {
+                "message": "No database connections found. Ingest a project with databaseConnections first.",
+                "connections": [],
+            }
+        return {
+            "count": len(conns),
+            "connections": [
+                {
+                    "name": c.name,
+                    "database_type": c.database_type,
+                    "url": c.url,
+                    "enabled": c.enabled,
+                    "credentials_configured": c.has_credentials,
+                }
+                for c in conns
+            ],
+        }
+
+    def _describe_db_schema(self, connection_name: str) -> Dict:
+        return self._db_client.describe_schema(connection_name)
+
+    def _execute_db_query(self, connection_name: str, query: str) -> Dict:
+        return self._db_client.execute_query(connection_name, query)
+
+    def _execute_named_query(self, query_name: str) -> Dict:
+        """Look up a NamedQuery in the ontology, find its SQL and DB, execute it."""
+        with self.graph.session() as session:
+            result = session.run(
+                """
+                MATCH (q:NamedQuery)
+                WHERE q.name = $name OR q.name CONTAINS $name
+                RETURN q.name AS name, q.query_text AS sql,
+                       q.database AS database
+                LIMIT 1
+            """,
+                {"name": query_name},
+            )
+            record = result.single()
+
+        if not record:
+            return {"error": f"Named query '{query_name}' not found in the ontology"}
+
+        sql = record["sql"]
+        db = record["database"]
+
+        if not sql:
+            return {
+                "error": f"Named query '{record['name']}' has no SQL text stored",
+                "query_name": record["name"],
+                "database": db,
+            }
+        if not db:
+            return {
+                "error": f"Named query '{record['name']}' has no database connection associated",
+                "query_name": record["name"],
+                "sql": sql,
+            }
+
+        try:
+            result = self._db_client.execute_query(db, sql)
+            result["query_name"] = record["name"]
+            result["database"] = db
+            return result
+        except Exception as exc:
+            return {
+                "error": str(exc),
+                "query_name": record["name"],
+                "database": db,
+                "sql": sql,
+            }
+
 
 class ClaudeClient:
     """
@@ -583,13 +804,15 @@ class ClaudeClient:
     Provides generic graph exploration tools that give Claude
     maximum flexibility to query and understand the ontology.
 
-    Includes PLC/SCADA, MES/ERP, and optional live API tools:
+    Includes PLC/SCADA, MES/ERP, live API, and database tools:
     - Base tools: get_schema, run_query, get_node, create_mapping
     - MES tools: get_batch_context, get_equipment_rca, get_ccp_context,
                  search_by_symptom, trace_tag_impact, get_process_ccps,
                  get_open_deviations
     - Live tools (when ignition_api_url provided): read_tag, read_tags,
-                 get_gateway_status, get_alarm_status
+                 query_tag_history, get_gateway_status, get_alarm_status
+    - DB tools: list_db_connections, describe_db_schema, execute_db_query,
+                execute_named_query
     """
 
     def __init__(
@@ -924,6 +1147,7 @@ class ClaudeClient:
                 and tools
             ):
                 substantive_tools = {"run_query", "get_node", "read_tag", "read_tags",
+                                     "query_tag_history",
                                      "get_batch_context", "get_equipment_rca",
                                      "get_ccp_context", "search_by_symptom",
                                      "trace_tag_impact", "get_alarm_status"}
@@ -1162,15 +1386,24 @@ You have access to the live Ignition gateway. Use these tools to check real-time
 ### Live Tools:
 - **read_tag**: Read a single tag's current value, quality, and timestamp. Use when you find a relevant tag in the ontology and need its live state.
 - **read_tags**: Read multiple tags at once (batch). Use to check several related tags simultaneously (e.g., all interlocks for a motor).
+- **query_tag_history**: Query historical values of tags over a time range with configurable aggregation. Use to analyze trends, detect anomalies, compare before/after behavior, or investigate what happened leading up to an event.
 - **get_gateway_status**: Check gateway health, version, uptime, and connection status. Start here when diagnosing communication issues.
 - **get_alarm_status**: Get alarm pipeline states. Use when investigating alarm-related issues.
+
 ### Troubleshooting Workflow with Live Data:
 1. Use `get_node` or `run_query` to find the equipment/tag in the ontology
 2. Use `read_tag` to check the live value of relevant tags
 3. Compare live values against expected states (from ontology knowledge)
 4. Use `read_tags` to check related tags (interlocks, upstream signals)
-5. Use `get_gateway_status` if you suspect communication issues
-6. Trace from symptoms to root cause using both ontology and live data
+5. Use `query_tag_history` to look at how values changed over time — compare the period before/during an issue
+6. Use `get_gateway_status` if you suspect communication issues
+7. Trace from symptoms to root cause using both ontology and live data
+
+### Tag History Tips:
+- Use `aggregation_mode` "Average" for smooth trends, "MinMax" for spikes/dips, "LastValue" for raw snapshots.
+- Set `interval_minutes` to control granularity (e.g., 1 for minute-by-minute, 60 for hourly).
+- For long time ranges, increase `return_size` or use a larger `interval_minutes` to avoid hitting the row limit.
+- Use `return_format` "Tall" when comparing many tags — it puts tag path in a column instead of one column per tag.
 
 ### Tag Path Format:
 Tag paths should include the provider prefix, e.g., `[default]Final_Process/FinalProduct_Temperature`.

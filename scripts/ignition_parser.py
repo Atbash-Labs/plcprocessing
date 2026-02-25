@@ -113,6 +113,22 @@ class NamedQuery:
     folder_path: Optional[str] = None
     project: Optional[str] = None
     query_text: str = ""  # Actual SQL from query.sql file
+    database: str = ""  # DB connection name (workbench: "dbName", ignition: "database")
+
+
+@dataclass
+class DatabaseConnection:
+    """Database connection defined in the Ignition gateway."""
+
+    name: str
+    database_type: str  # MYSQL, MSSQL, POSTGRESQL
+    url: str
+    username: str
+    enabled: bool = True
+    description: str = ""
+    translator: str = ""
+    max_active: int = 8
+    validation_query: str = "SELECT 1"
 
 
 @dataclass
@@ -174,7 +190,7 @@ class IgnitionBackup:
     folders: Dict[str, Any] = field(default_factory=dict)
 
     # Connections
-    db_connections: List[Dict] = field(default_factory=list)
+    db_connections: List[DatabaseConnection] = field(default_factory=list)
     servers: List[Dict] = field(default_factory=list)
 
 
@@ -249,7 +265,7 @@ class IgnitionParser:
 
         # Other metadata
         backup.folders = data.get("folders", {})
-        backup.db_connections = data.get("db_connections", [])
+        backup.db_connections = self._parse_db_connections(data.get("db_connections", []))
         backup.servers = data.get("servers", [])
 
         return backup
@@ -279,6 +295,16 @@ class IgnitionParser:
                 return ""
         return ""
 
+    def _query_dir(
+        self, project: str, folder_path: Optional[str], query_name: str
+    ) -> Optional[Path]:
+        """Resolve the directory for a named query in named_queries_library."""
+        if not self.named_queries_path:
+            return None
+        if folder_path:
+            return self.named_queries_path / project / folder_path / query_name
+        return self.named_queries_path / project / query_name
+
     def _read_query_file(
         self, project: str, folder_path: Optional[str], query_name: str
     ) -> str:
@@ -294,25 +320,29 @@ class IgnitionParser:
 
         Directory structure: nq_dir/project_name/folder_path/query_name/query.sql
         """
-        if not self.named_queries_path:
+        qdir = self._query_dir(project, folder_path, query_name)
+        if not qdir:
             return ""
-
-        # Build path: nq_dir/project_name/folder_path/query_name/query.sql
-        # folder_path and query_name can have spaces
-        if folder_path:
-            query_file = (
-                self.named_queries_path
-                / project
-                / folder_path
-                / query_name
-                / "query.sql"
-            )
-        else:
-            query_file = self.named_queries_path / project / query_name / "query.sql"
-
+        query_file = qdir / "query.sql"
         if query_file.exists():
             try:
                 return query_file.read_text(encoding="utf-8")
+            except Exception:
+                return ""
+        return ""
+
+    def _read_query_database(
+        self, project: str, folder_path: Optional[str], query_name: str
+    ) -> str:
+        """Read the database connection name from resource.json for a named query."""
+        qdir = self._query_dir(project, folder_path, query_name)
+        if not qdir:
+            return ""
+        resource_file = qdir / "resource.json"
+        if resource_file.exists():
+            try:
+                data = json.loads(resource_file.read_text(encoding="utf-8"))
+                return data.get("attributes", {}).get("database", "")
             except Exception:
                 return ""
         return ""
@@ -512,10 +542,10 @@ class IgnitionParser:
                     query_id = query_data.get("id", "")
                     folder_path = query_data.get("folder_path")
 
-                    # Read actual SQL from file using folder_path and name
-                    # Directory structure: nq_dir/project_name/folder_path/query_name/query.sql
-                    # Both folder_path and query_name can have spaces
                     query_text = self._read_query_file(
+                        project_name, folder_path, query_name
+                    )
+                    database = self._read_query_database(
                         project_name, folder_path, query_name
                     )
 
@@ -526,10 +556,37 @@ class IgnitionParser:
                             folder_path=folder_path,
                             project=project_name,
                             query_text=query_text,
+                            database=database,
                         )
                     )
 
         return queries
+
+    @staticmethod
+    def _parse_db_connections(connections_list: List[Dict]) -> List[DatabaseConnection]:
+        """Parse database connections from backup JSON (may be raw dicts)."""
+        connections = []
+        for conn in connections_list:
+            if isinstance(conn, DatabaseConnection):
+                connections.append(conn)
+                continue
+            name = conn.get("name", "")
+            if not name:
+                continue
+            connections.append(
+                DatabaseConnection(
+                    name=name,
+                    database_type=conn.get("databaseType", conn.get("database_type", "")),
+                    url=conn.get("url", ""),
+                    username=conn.get("username", ""),
+                    enabled=conn.get("enabled", True),
+                    description=conn.get("description") or "",
+                    translator=conn.get("translator", ""),
+                    max_active=conn.get("maxActive", conn.get("max_active", 8)),
+                    validation_query=conn.get("validationQuery", conn.get("validation_query", "SELECT 1")),
+                )
+            )
+        return connections
 
     def _parse_scripts(self, scripts_list: List[Dict]) -> List[Script]:
         """Parse script library entries with project association."""

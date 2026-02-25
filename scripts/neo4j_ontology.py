@@ -1470,6 +1470,7 @@ class OntologyGraph:
         folder_path: str = "",
         query_id: str = "",
         query_text: str = "",
+        database: str = "",
         semantic_status: str = "pending",
     ) -> str:
         """Create a NamedQuery node and link to project.
@@ -1480,6 +1481,7 @@ class OntologyGraph:
             folder_path: Folder path within project
             query_id: Query identifier
             query_text: Full SQL from query.sql file
+            database: DB connection name this query targets
             semantic_status: Analysis status
 
         Returns:
@@ -1493,6 +1495,7 @@ class OntologyGraph:
                     q.folder_path = $folder_path,
                     q.query_id = $query_id,
                     q.query_text = $query_text,
+                    q.database = $database,
                     q.semantic_status = COALESCE(q.semantic_status, $semantic_status)
                 WITH q
                 MATCH (p:Project {name: $project})
@@ -1504,10 +1507,104 @@ class OntologyGraph:
                     "folder_path": folder_path,
                     "query_id": query_id,
                     "query_text": query_text,
+                    "database": database or "",
                     "semantic_status": semantic_status,
                 },
             )
         return name
+
+    # -------------------------------------------------------------------------
+    # Database Connection Operations
+    # -------------------------------------------------------------------------
+
+    def create_database_connection(
+        self,
+        name: str,
+        database_type: str,
+        url: str,
+        username: str = "",
+        enabled: bool = True,
+        description: str = "",
+        translator: str = "",
+        max_active: int = 8,
+        validation_query: str = "SELECT 1",
+    ) -> str:
+        """Create a DatabaseConnection node.
+
+        Args:
+            name: Connection name (e.g. 'ProveITDBMESLite')
+            database_type: MYSQL, MSSQL, POSTGRESQL
+            url: Connection URL (host:port/database)
+            username: Default username from project config
+            enabled: Whether the connection is enabled
+            description: Optional description
+            translator: SQL translator type
+            max_active: Max active connections in pool
+            validation_query: Query used to validate connections
+
+        Returns:
+            Connection name
+        """
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (d:DatabaseConnection {name: $name})
+                SET d.database_type = $database_type,
+                    d.url = $url,
+                    d.username = $username,
+                    d.enabled = $enabled,
+                    d.description = $description,
+                    d.translator = $translator,
+                    d.max_active = $max_active,
+                    d.validation_query = $validation_query
+            """,
+                {
+                    "name": name,
+                    "database_type": database_type,
+                    "url": url,
+                    "username": username,
+                    "enabled": enabled,
+                    "description": description,
+                    "translator": translator,
+                    "max_active": max_active,
+                    "validation_query": validation_query,
+                },
+            )
+        return name
+
+    def link_uses_database(self) -> int:
+        """Create USES_DATABASE edges from NamedQueries and query ScadaTags
+        to their corresponding DatabaseConnection nodes. Run after all nodes
+        are created.
+
+        Returns:
+            Number of relationships created.
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (q:NamedQuery)
+                WHERE q.database IS NOT NULL AND q.database <> ''
+                MATCH (d:DatabaseConnection {name: q.database})
+                MERGE (q)-[:USES_DATABASE]->(d)
+                RETURN count(*) AS cnt
+            """
+            )
+            nq_count = result.single()["cnt"]
+
+            result = session.run(
+                """
+                MATCH (t:ScadaTag)
+                WHERE t.tag_type = 'query'
+                  AND t.datasource IS NOT NULL AND t.datasource <> ''
+                MATCH (d:DatabaseConnection {name: t.datasource})
+                MERGE (t)-[:USES_DATABASE]->(d)
+                RETURN count(*) AS cnt
+            """
+            )
+            tag_count = result.single()["cnt"]
+
+        return nq_count + tag_count
 
     # -------------------------------------------------------------------------
     # UDT Operations
@@ -4094,6 +4191,7 @@ def main():
             "project-resources",
             "tia-projects",
             "tia-project-resources",
+            "db-connections",
         ],
         help="Command to execute",
     )
@@ -4314,6 +4412,31 @@ def main():
                 print(f"  HMI Alarms:      {len(resources.get('hmi_alarms', []))}")
                 print(f"  HMI Screens:     {len(resources.get('hmi_screens', []))}")
                 print(f"  HMI Connections: {len(resources.get('hmi_connections', []))}")
+
+        elif args.command == "db-connections":
+            with graph.session() as session:
+                result = session.run(
+                    """
+                    MATCH (d:DatabaseConnection)
+                    RETURN d.name AS name, d.database_type AS database_type,
+                           d.url AS url, d.username AS username,
+                           d.enabled AS enabled, d.description AS description,
+                           d.translator AS translator
+                    ORDER BY d.name
+                """
+                )
+                connections = [dict(record) for record in result]
+            if args.json:
+                print(json_module.dumps(connections))
+            else:
+                print(f"\nDatabase Connections ({len(connections)}):")
+                print("-" * 40)
+                for c in connections:
+                    enabled = "enabled" if c.get("enabled") else "disabled"
+                    print(
+                        f"  {c['name']} ({c['database_type']}) "
+                        f"- {c['url']} [{enabled}]"
+                    )
 
 
 if __name__ == "__main__":

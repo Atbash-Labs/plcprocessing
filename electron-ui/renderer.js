@@ -3382,6 +3382,161 @@ btnSaveSettings?.addEventListener('click', async () => {
   }
 });
 
+// ============================================
+// Database Connections Settings
+// ============================================
+
+const dbConnectionsList = document.getElementById('db-connections-list');
+const dbConnectionsActions = document.getElementById('db-connections-actions');
+const btnSaveDbCreds = document.getElementById('btn-save-db-creds');
+const dbSidebarStatus = document.getElementById('db-connections-status');
+
+async function loadDbConnections() {
+  if (!dbConnectionsList) return;
+  try {
+    const result = await api.getDbConnections();
+    if (!result.success || !result.connections || result.connections.length === 0) {
+      dbConnectionsList.innerHTML =
+        '<p class="text-muted text-sm">No database connections found. Ingest a project to discover them.</p>';
+      dbConnectionsActions.style.display = 'none';
+      updateDbSidebarStatus(false);
+      return;
+    }
+
+    const conns = result.connections;
+    let html = '';
+    for (const conn of conns) {
+      const typeBadge = conn.database_type || 'Unknown';
+      const statusClass = conn.hasPassword ? 'connected' : '';
+      const statusText = conn.hasPassword ? 'Credentials set' : 'No password';
+      html += `
+        <div class="db-conn-row" data-conn-name="${conn.name}" style="margin-bottom: var(--space-3); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md);">
+          <div style="display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2);">
+            <strong>${conn.name}</strong>
+            <span class="badge" style="font-size: 0.7rem; padding: 2px 6px; background: var(--surface-2); border-radius: var(--radius-sm);">${typeBadge}</span>
+            <span class="text-muted text-xs" style="margin-left: auto;">${conn.url}</span>
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr auto; gap: var(--space-2); align-items: end;">
+            <div class="form-group" style="margin: 0;">
+              <label class="text-xs">Username</label>
+              <input type="text" class="input db-username" value="${conn.savedUsername || conn.username || ''}" placeholder="username" autocomplete="off" style="font-size: 0.85rem;">
+            </div>
+            <div class="form-group" style="margin: 0;">
+              <label class="text-xs">Password</label>
+              <input type="password" class="input db-password" value="" placeholder="${conn.hasPassword ? '••••••••' : 'not set'}" autocomplete="off" style="font-size: 0.85rem;">
+            </div>
+            <button class="btn btn-sm btn-secondary btn-test-db" data-conn="${conn.name}" style="height: 36px;" title="Test connection">Test</button>
+          </div>
+          <div class="connection-status db-conn-status" style="margin-top: var(--space-1);">
+            <span class="status-dot ${statusClass}"></span>
+            <span class="connection-status-text text-xs">${statusText}</span>
+          </div>
+        </div>
+      `;
+    }
+    dbConnectionsList.innerHTML = html;
+    dbConnectionsActions.style.display = '';
+    updateDbSidebarStatus(true, conns.some(c => c.hasPassword));
+
+    // Attach test button handlers
+    dbConnectionsList.querySelectorAll('.btn-test-db').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const connName = btn.dataset.conn;
+        const row = btn.closest('.db-conn-row');
+        const statusDot = row.querySelector('.status-dot');
+        const statusText = row.querySelector('.connection-status-text');
+
+        // Save credentials first before testing
+        const username = row.querySelector('.db-username').value.trim();
+        const password = row.querySelector('.db-password').value;
+        if (username || password) {
+          const creds = {};
+          creds[connName] = { username, password };
+          await api.saveDbCredentials(creds);
+        }
+
+        btn.disabled = true;
+        btn.textContent = '...';
+        statusDot.className = 'status-dot';
+        statusText.textContent = 'Testing...';
+
+        try {
+          const result = await api.testDbConnection(connName);
+          if (result.success) {
+            statusDot.className = 'status-dot connected';
+            statusText.textContent = 'Connected';
+          } else {
+            statusDot.className = 'status-dot error';
+            statusText.textContent = result.error || 'Failed';
+          }
+        } catch (err) {
+          statusDot.className = 'status-dot error';
+          statusText.textContent = err.message || 'Failed';
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Test';
+        }
+      });
+    });
+  } catch (err) {
+    dbConnectionsList.innerHTML =
+      `<p class="text-muted text-sm">Error loading connections: ${err.message}</p>`;
+  }
+}
+
+function updateDbSidebarStatus(hasConnections, anyConfigured) {
+  if (!dbSidebarStatus) return;
+  const dot = dbSidebarStatus.querySelector('.status-dot');
+  const label = dbSidebarStatus.querySelector('.status-text');
+
+  dot.className = 'status-dot';
+  if (anyConfigured) {
+    dot.classList.add('connected');
+    label.textContent = 'DB Connected';
+  } else if (hasConnections) {
+    label.textContent = 'DB Connections';
+  } else {
+    label.textContent = 'DB Connections';
+  }
+}
+
+btnSaveDbCreds?.addEventListener('click', async () => {
+  const rows = dbConnectionsList.querySelectorAll('.db-conn-row');
+  const credentials = {};
+  let count = 0;
+
+  rows.forEach(row => {
+    const connName = row.dataset.connName;
+    const username = row.querySelector('.db-username').value.trim();
+    const password = row.querySelector('.db-password').value;
+    if (username || password) {
+      credentials[connName] = { username, password };
+      count++;
+    }
+  });
+
+  if (count === 0) return;
+
+  btnSaveDbCreds.disabled = true;
+  btnSaveDbCreds.textContent = 'Saving...';
+
+  try {
+    const result = await api.saveDbCredentials(credentials);
+    if (result.success) {
+      btnSaveDbCreds.textContent = 'Saved';
+      setTimeout(() => { btnSaveDbCreds.textContent = 'Save Credentials'; }, 1500);
+    } else {
+      btnSaveDbCreds.textContent = 'Error';
+      setTimeout(() => { btnSaveDbCreds.textContent = 'Save Credentials'; }, 2000);
+    }
+  } catch {
+    btnSaveDbCreds.textContent = 'Error';
+    setTimeout(() => { btnSaveDbCreds.textContent = 'Save Credentials'; }, 2000);
+  } finally {
+    btnSaveDbCreds.disabled = false;
+  }
+});
+
 // Initialize graph tab when it's first shown
 navButtons.forEach(btn => {
   btn.addEventListener('click', () => {
@@ -3401,6 +3556,7 @@ navButtons.forEach(btn => {
     }
     if (btn.dataset.tab === 'settings') {
       loadSettings();
+      loadDbConnections();
     }
   });
 });
@@ -3412,5 +3568,6 @@ setTimeout(() => {
   loadGatewayResources();
   loadTiaProjects();
   loadSettings();
+  loadDbConnections();
 }, 500);
 

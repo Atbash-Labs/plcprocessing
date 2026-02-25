@@ -1289,3 +1289,107 @@ ipcMain.handle('test-ignition-connection', async (event, options) => {
     });
   });
 });
+
+// ============================================
+// Database Connection IPC Handlers
+// ============================================
+
+function getDbCredentialsPath() {
+  const envDir = pyConfig ? pyConfig.cwd : path.join(__dirname, '..');
+  return path.join(envDir, 'db_credentials.json');
+}
+
+function readDbCredentials() {
+  const credPath = getDbCredentialsPath();
+  if (!fs.existsSync(credPath)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(credPath, 'utf-8'));
+  } catch { return {}; }
+}
+
+// Get database connections from Neo4j + credential status from db_credentials.json
+ipcMain.handle('get-db-connections', async () => {
+  try {
+    return new Promise((resolve) => {
+      const proc = spawnPythonProcess('neo4j_ontology.py', ['db-connections', '--json']);
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          resolve({ success: true, connections: [] });
+          return;
+        }
+        try {
+          const connections = JSON.parse(stdout.trim());
+          const creds = readDbCredentials();
+
+          const enriched = connections.map(c => ({
+            ...c,
+            hasPassword: !!(creds[c.name] && creds[c.name].password),
+            savedUsername: creds[c.name] ? creds[c.name].username || '' : '',
+          }));
+
+          resolve({ success: true, connections: enriched });
+        } catch (e) {
+          resolve({ success: true, connections: [] });
+        }
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Save database credentials to db_credentials.json
+ipcMain.handle('save-db-credentials', async (event, credentials) => {
+  try {
+    const credPath = getDbCredentialsPath();
+    let existing = readDbCredentials();
+
+    for (const [name, cred] of Object.entries(credentials)) {
+      existing[name] = {
+        username: cred.username || '',
+        password: cred.password || '',
+      };
+    }
+
+    fs.writeFileSync(credPath, JSON.stringify(existing, null, 2), 'utf-8');
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Test a database connection via Python
+ipcMain.handle('test-db-connection', async (event, connectionName) => {
+  try {
+    return new Promise((resolve) => {
+      const proc = spawnPythonProcess('db_client_test.py', [connectionName]);
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+      proc.on('close', (code) => {
+        try {
+          const result = JSON.parse(stdout.trim());
+          resolve(result);
+        } catch {
+          resolve({
+            success: code === 0,
+            error: code !== 0 ? (stderr.trim() || 'Connection test failed') : null,
+          });
+        }
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
