@@ -241,6 +241,33 @@ class IgnitionApiClient:
     #  Tag history – WebDev module endpoint
     # --------------------------------------------------------------------- #
 
+    @staticmethod
+    def _local_iso_to_utc(dt_str: str) -> str:
+        """Convert a bare ISO datetime string (assumed local) to UTC.
+
+        If the string already has a timezone indicator (Z, +, -)
+        or looks like epoch milliseconds, it is returned unchanged.
+        """
+        from datetime import datetime, timezone
+
+        s = str(dt_str).strip()
+
+        # Epoch ms – pass through
+        if s.isdigit():
+            return s
+
+        # Already has TZ info – pass through
+        if s.endswith("Z") or "+" in s[10:] or s[10:].count("-") > 0:
+            return s
+
+        try:
+            naive = datetime.fromisoformat(s)
+            local_dt = naive.astimezone()          # attach local TZ
+            utc_dt = local_dt.astimezone(timezone.utc)
+            return utc_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        except (ValueError, TypeError):
+            return s
+
     def query_tag_history(
         self,
         tag_paths: List[str],
@@ -254,10 +281,14 @@ class IgnitionApiClient:
     ) -> Optional[Any]:
         """Query historical tag values via the WebDev queryTagHistory endpoint.
 
+        Bare ISO datetime strings (no timezone suffix) are assumed to be in
+        the server's local timezone and are converted to UTC before sending
+        to the gateway (which interprets all times as UTC).
+
         Args:
             tag_paths: Tag paths with provider prefix, e.g. ['[default]Folder/Tag'].
-            start_date: ISO datetime string or epoch ms.
-            end_date: ISO datetime string or epoch ms.
+            start_date: ISO datetime string (local) or epoch ms.
+            end_date: ISO datetime string (local) or epoch ms.
             return_size: Max rows to return (default 100).
             aggregation_mode: Average, MinMax, LastValue, Sum, Minimum, Maximum.
             return_format: Wide or Tall.
@@ -265,10 +296,14 @@ class IgnitionApiClient:
             include_bounding_values: Include values at boundaries.
         """
         normalised = [self._ensure_provider_prefix(p) for p in tag_paths]
+
+        utc_start = self._local_iso_to_utc(start_date)
+        utc_end = self._local_iso_to_utc(end_date)
+
         params: Dict[str, Any] = {
             "tagPaths": ",".join(normalised),
-            "startDate": start_date,
-            "endDate": end_date,
+            "startDate": utc_start,
+            "endDate": utc_end,
             "returnSize": return_size,
             "aggregationMode": aggregation_mode,
             "returnFormat": return_format,

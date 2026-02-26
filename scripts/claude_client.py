@@ -134,6 +134,11 @@ class OntologyTools:
                 "required": ["aoi_name", "scada_name", "mapping_type", "description"],
             },
         },
+        {
+            "name": "get_current_time",
+            "description": "Get the current date and time on the server in both local and UTC. Use this before calling query_tag_history so you can construct accurate start/end date parameters relative to 'now'. Returns local time, UTC, epoch_ms, timezone name, and UTC offset.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
     ] + MES_TOOL_DEFINITIONS  # Add MES/RCA tools
 
     LIVE_TOOL_DEFINITIONS = [
@@ -178,7 +183,7 @@ class OntologyTools:
         },
         {
             "name": "query_tag_history",
-            "description": "Query historical values of one or more Ignition tags over a time range. Returns timestamped data with configurable aggregation. Use this to analyze trends, detect anomalies, or compare tag behavior over time during troubleshooting.",
+            "description": "Query historical values of one or more Ignition tags over a time range. Returns timestamped data with configurable aggregation. Use this to analyze trends, detect anomalies, or compare tag behavior over time during troubleshooting. Pass start_date/end_date as local time (e.g. '2026-02-25T13:00:00') — the system automatically converts to UTC. Call get_current_time first to know what time it is now.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -295,6 +300,7 @@ class OntologyTools:
             "run_query": self._run_query,
             "get_node": self._get_node,
             "create_mapping": self._create_mapping,
+            "get_current_time": self._get_current_time,
         }
 
         # Live API tools (always registered; return clear messages if API not available)
@@ -607,6 +613,21 @@ class OntologyTools:
                     "scada_found": scada_check["name"] if scada_check else None,
                     "hint": "Query for exact node names using get_schema or run_query first",
                 }
+
+    def _get_current_time(self) -> Dict:
+        """Return the current server date/time in multiple formats."""
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc)
+        now_local = datetime.now().astimezone()
+        offset = now_local.strftime("%z")          # e.g. "-0500"
+        offset_fmt = f"{offset[:3]}:{offset[3:]}"  # e.g. "-05:00"
+        return {
+            "local": now_local.strftime("%Y-%m-%dT%H:%M:%S"),
+            "utc": now_utc.strftime("%Y-%m-%dT%H:%M:%S"),
+            "epoch_ms": int(now_utc.timestamp() * 1000),
+            "timezone": str(now_local.tzinfo),
+            "utc_offset": offset_fmt,
+        }
 
     # ------------------------------------------------------------------ #
     #  Live API tools
@@ -1400,6 +1421,7 @@ You have access to the live Ignition gateway. Use these tools to check real-time
 7. Trace from symptoms to root cause using both ontology and live data
 
 ### Tag History Tips:
+- **Timestamps are local time.** Pass `start_date`/`end_date` in the server's local timezone (e.g., `2026-02-25T13:00:00`). The system auto-converts to UTC before querying the gateway. Response `t_stamp` values are in UTC.
 - Use `aggregation_mode` "Average" for smooth trends, "MinMax" for spikes/dips, "LastValue" for raw snapshots.
 - Set `interval_minutes` to control granularity (e.g., 1 for minute-by-minute, 60 for hourly).
 - For long time ranges, increase `return_size` or use a larger `interval_minutes` to avoid hitting the row limit.
