@@ -263,7 +263,7 @@ class AnomalyMonitor:
                 values.append(val)
         return values
 
-    def fetch_history_values(self, tag_path: str) -> List[float]:
+    def fetch_history_values(self, tag_path: str) -> tuple[List[float], Optional[str]]:
         minutes = int(self.config.get("historyWindowMinutes", 360))
         end_dt = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(minutes=minutes)
@@ -275,7 +275,9 @@ class AnomalyMonitor:
             aggregation_mode="Average",
             return_format="Wide",
         )
-        return self._extract_history_values(data, tag_path)
+        if isinstance(data, dict) and data.get("error"):
+            return [], str(data.get("error"))
+        return self._extract_history_values(data, tag_path), None
 
     def get_context(self, tag_path: str) -> Dict[str, Any]:
         with self.graph.session() as session:
@@ -517,6 +519,97 @@ class AnomalyMonitor:
 
         return event_data
 
+    def _emit_persisted_event(self, persisted: Dict[str, Any]) -> None:
+        """Emit normalized AGENT_EVENT payload for UI stream."""
+        emit("AGENT_EVENT", {
+            "runId": self.run_id,
+            "eventId": persisted["event_id"],
+            "severity": persisted["severity"],
+            "summary": persisted["summary"],
+            "category": persisted.get("category"),
+            "entityRefs": {
+                "tag": persisted.get("tag_name") or persisted.get("source_tag"),
+                "sourceTag": persisted.get("source_tag"),
+            },
+            "createdAt": persisted.get("created_at"),
+        })
+
+    def emit_provider_failure_event(
+        self,
+        code: str,
+        message: str,
+        *,
+        severity: str = "high",
+        category: str = "quality-issue",
+        source_tag: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Persist and stream provider-health anomalies so failures appear in feed.
+
+        Returns:
+            True if a new event was persisted (false if deduped).
+        """
+        emit("AGENT_ERROR", {
+            "runId": self.run_id,
+            "code": code,
+            "message": message,
+            "recoverable": True,
+            "timestamp": utc_now_iso(),
+        })
+
+        tag = source_tag or f"provider://{code}"
+        detail_blob = json.dumps(details or {}, default=str)
+        context = {
+            "tag_path": tag,
+            "tag_name": source_tag or "ProviderHealth",
+            "equipment": [],
+            "symptoms": [],
+            "causes": [],
+            "patterns": [],
+            "safety": [],
+        }
+        deterministic = {
+            "candidate": True,
+            "reasons": [code],
+            "category": category,
+            "z_score": 0.0,
+            "mad_score": 0.0,
+            "delta_rate": 0.0,
+            "window_volatility": 0.0,
+            "history_points": 0,
+        }
+        triage = {
+            "summary": message,
+            "category": category,
+            "severity": severity,
+            "confidence": 0.9,
+            "probable_causes": [message],
+            "verification_checks": [
+                "Check Ignition gateway connectivity and credentials.",
+                "Validate tag provider availability and endpoint health.",
+            ],
+            "safety_notes": [],
+            "rationale": f"Provider health event ({code}). Details: {detail_blob}",
+            "related_entities": [],
+        }
+        persisted = self.persist_event(
+            context=context,
+            deterministic=deterministic,
+            live_sample={
+                "path": tag,
+                "value": "",
+                "quality": "Bad",
+                "timestamp": utc_now_iso(),
+                "data_type": "provider_health",
+            },
+            triage=triage,
+        )
+        if persisted:
+            self._emit_persisted_event(persisted)
+            return True
+        return False
+
     # -----------------------------
     # Monitoring loop
     # -----------------------------
@@ -527,13 +620,14 @@ class AnomalyMonitor:
         min_history = int(self.config.get("minHistoryPoints", 30))
 
         if not self.api.is_configured:
-            emit("AGENT_ERROR", {
-                "runId": self.run_id,
-                "code": "ignition_not_configured",
-                "message": "Ignition API URL/token not configured.",
-                "recoverable": True,
-                "timestamp": utc_now_iso(),
-            })
+            emitted = self.emit_provider_failure_event(
+                "ignition_not_configured",
+                "Ignition API URL/token not configured.",
+                severity="critical",
+                category="state-conflict",
+            )
+            if emitted:
+                metrics["emitted"] += 1
             metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
             return metrics
 
@@ -553,17 +647,31 @@ class AnomalyMonitor:
         live_values = self.api.read_tags(tag_paths)
         candidates: List[Dict[str, Any]] = []
         now = datetime.now(timezone.utc)
+        live_error_count = 0
+        live_error_samples: List[str] = []
+        history_error_count = 0
+        history_error_samples: List[str] = []
+        valid_live_count = 0
 
         for tv in live_values:
             if tv.error:
+                live_error_count += 1
+                if len(live_error_samples) < 5:
+                    live_error_samples.append(f"{tv.path}: {tv.error}")
                 continue
+            valid_live_count += 1
             if not is_quality_good(tv.quality):
                 # quality gate: only emit quality anomalies if this persists via triage.
                 continue
             if is_stale(tv.timestamp, int(thresholds.get("stalenessSec", 120)), now=now):
                 continue
 
-            history = self.fetch_history_values(tv.path)
+            history, history_error = self.fetch_history_values(tv.path)
+            if history_error:
+                history_error_count += 1
+                if len(history_error_samples) < 5:
+                    history_error_samples.append(f"{tv.path}: {history_error}")
+                continue
             if len(history) < min_history:
                 continue
 
@@ -593,6 +701,48 @@ class AnomalyMonitor:
                         },
                     }
                 )
+
+        if live_values and live_error_count == len(live_values):
+            emitted = self.emit_provider_failure_event(
+                "live_tag_provider_failed",
+                f"Live tag provider failed for all reads ({live_error_count}/{len(live_values)}).",
+                severity="high",
+                category="quality-issue",
+                details={"samples": live_error_samples},
+            )
+            if emitted:
+                metrics["emitted"] += 1
+        elif live_error_count > 0:
+            emitted = self.emit_provider_failure_event(
+                "live_tag_provider_partial_failure",
+                f"Live tag provider partially failed ({live_error_count}/{len(live_values)} reads).",
+                severity="medium",
+                category="quality-issue",
+                details={"samples": live_error_samples},
+            )
+            if emitted:
+                metrics["emitted"] += 1
+
+        if valid_live_count > 0 and history_error_count >= max(1, int(valid_live_count * 0.8)):
+            emitted = self.emit_provider_failure_event(
+                "history_provider_failed",
+                f"History provider failed for most queries ({history_error_count}/{valid_live_count}).",
+                severity="high",
+                category="quality-issue",
+                details={"samples": history_error_samples},
+            )
+            if emitted:
+                metrics["emitted"] += 1
+        elif history_error_count > 0:
+            emitted = self.emit_provider_failure_event(
+                "history_provider_partial_failure",
+                f"History provider partially failed ({history_error_count}/{valid_live_count}).",
+                severity="medium",
+                category="quality-issue",
+                details={"samples": history_error_samples},
+            )
+            if emitted:
+                metrics["emitted"] += 1
 
         metrics["candidates"] = len(candidates)
         max_candidates = int(self.config.get("maxCandidatesPerCycle", 25))
@@ -629,18 +779,7 @@ class AnomalyMonitor:
             )
             if persisted:
                 metrics["emitted"] += 1
-                emit("AGENT_EVENT", {
-                    "runId": self.run_id,
-                    "eventId": persisted["event_id"],
-                    "severity": persisted["severity"],
-                    "summary": persisted["summary"],
-                    "category": persisted.get("category"),
-                    "entityRefs": {
-                        "tag": persisted.get("tag_name") or persisted.get("source_tag"),
-                        "sourceTag": persisted.get("source_tag"),
-                    },
-                    "createdAt": persisted.get("created_at"),
-                })
+                self._emit_persisted_event(persisted)
 
         metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
         return metrics
