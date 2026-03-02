@@ -1024,6 +1024,8 @@ class AnomalyMonitor:
         cycle_start = time.time()
         thresholds = self.config.get("thresholds", {})
         stale_threshold_sec = int(thresholds.get("stalenessSec", 120))
+        progress_emit_interval_tags = max(5, int(self.config.get("progressEveryTags", 10)))
+        progress_emit_interval_sec = max(1, int(self.config.get("progressEverySec", 2)))
         metrics = {
             "candidates": 0,
             "triaged": 0,
@@ -1148,6 +1150,42 @@ class AnomalyMonitor:
         near_shift_unlinked = 0
         stale_samples: List[Dict[str, Any]] = []
         subsystem_shift_signals: Dict[str, Dict[str, Any]] = {}
+        processed_live_count = 0
+        total_live_count = len(live_values)
+        last_progress_emit = 0.0
+
+        def emit_cycle_progress(reason: str, current_tag: str = "") -> None:
+            nonlocal last_progress_emit
+            diag = make_default_diagnostics(
+                staleness_threshold_sec=stale_threshold_sec,
+                phase="cycle_in_progress",
+                reason=reason,
+            )
+            diag.update({
+                "processedLiveCount": processed_live_count,
+                "totalLiveCount": total_live_count,
+                "currentTag": current_tag,
+                "candidatesSoFar": len(candidates),
+                "liveErrorCount": live_error_count,
+                "qualityFilteredCount": quality_filtered_count,
+                "staleFilteredCount": stale_filtered_count,
+                "historyErrorCount": history_error_count,
+                "linkedTags": linked_tag_count,
+                "unlinkedTags": unlinked_tag_count,
+            })
+            emit("AGENT_STATUS", {
+                "runId": self.run_id,
+                "state": "running",
+                "cycleMs": int((time.time() - cycle_start) * 1000),
+                "candidates": len(candidates),
+                "triaged": 0,
+                "emitted": metrics.get("emitted", 0),
+                "diagnostics": diag,
+                "timestamp": utc_now_iso(),
+            })
+            last_progress_emit = time.time()
+
+        emit_cycle_progress("cycle_started")
 
         def _update_subsystem_signal(
             subsystem_ref: Dict[str, str], deterministic: Dict[str, Any], tag_path: str
@@ -1180,9 +1218,18 @@ class AnomalyMonitor:
                 bucket["sampleTag"] = tag_path
 
         for tv in live_values:
+            processed_live_count += 1
             tag_meta = tag_lookup.get(tv.path, {"path": tv.path, "name": tv.path})
             subsystem = tag_meta.get("primary_subsystem") or _subsystem_ref("global", "all")
             is_linked = bool(tag_meta.get("views") or tag_meta.get("equipment"))
+
+            now_progress = time.time()
+            if (
+                processed_live_count == 1
+                or processed_live_count % progress_emit_interval_tags == 0
+                or (now_progress - last_progress_emit) >= progress_emit_interval_sec
+            ):
+                emit_cycle_progress("processing_live_tags", current_tag=tv.path)
 
             if tv.error:
                 live_error_count += 1
