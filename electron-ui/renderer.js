@@ -3905,7 +3905,7 @@ function ensureAgentListeners() {
     updateAgentStatusUi(agentsState.status, `Run ${agentsState.runId || 'n/a'}`);
     updateAgentMetrics(payload, payload.timestamp);
     if (payload.diagnostics) {
-      console.debug('[Agents diagnostics]', payload.diagnostics);
+      console.info('[Agents diagnostics]', payload.diagnostics);
     }
   });
 
