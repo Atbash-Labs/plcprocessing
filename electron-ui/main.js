@@ -205,7 +205,9 @@ function normalizeAgentConfig(config = {}) {
     minHistoryPoints: Math.max(10, Number(config.minHistoryPoints || 30)),
     maxMonitoredTags: Math.max(10, Number(config.maxMonitoredTags || 200)),
     maxCandidatesPerCycle: Math.max(1, Number(config.maxCandidatesPerCycle || 25)),
+    maxCandidatesPerSubsystem: Math.max(1, Number(config.maxCandidatesPerSubsystem || 8)),
     maxLlmTriagesPerCycle: Math.max(0, Number(config.maxLlmTriagesPerCycle || 5)),
+    maxLlmTriagesPerSubsystem: Math.max(0, Number(config.maxLlmTriagesPerSubsystem || 2)),
     dedupCooldownMinutes: Math.max(1, Number(config.dedupCooldownMinutes || 10)),
     retentionDays: Math.max(1, Number(config.retentionDays || 14)),
     cleanupEveryCycles: Math.max(1, Number(config.cleanupEveryCycles || 40)),
@@ -221,6 +223,11 @@ function normalizeAgentConfig(config = {}) {
       project: scope.project || null,
       equipmentTags: Array.isArray(scope.equipmentTags) ? scope.equipmentTags : [],
       tagRegex: scope.tagRegex || null,
+      subsystemMode: String(scope.subsystemMode || 'auto').toLowerCase() === 'global' ? 'global' : 'auto',
+      subsystemPriority: Array.isArray(scope.subsystemPriority) && scope.subsystemPriority.length
+        ? scope.subsystemPriority.map(String)
+        : ['view', 'equipment', 'group', 'global'],
+      subsystemInclude: Array.isArray(scope.subsystemInclude) ? scope.subsystemInclude.map(String) : [],
     },
   };
 }

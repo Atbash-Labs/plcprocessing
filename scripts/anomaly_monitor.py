@@ -23,7 +23,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     from dotenv import load_dotenv
@@ -53,6 +53,101 @@ def emit(prefix: str, payload: Dict[str, Any]) -> None:
     print(f"[{prefix}] {json.dumps(payload, default=str)}", flush=True)
 
 
+DEFAULT_SUBSYSTEM_PRIORITY = ["view", "equipment", "group", "global"]
+
+
+def _canonical_subsystem_type(kind: Any) -> str:
+    value = str(kind or "").strip().lower()
+    if value in {"view", "views"}:
+        return "view"
+    if value in {"equipment", "equip", "asset"}:
+        return "equipment"
+    if value in {"group", "groups", "folder", "path", "prefix", "tag_group"}:
+        return "group"
+    if value in {"global", "all", "system"}:
+        return "global"
+    return "group"
+
+
+def _subsystem_ref(kind: Any, name: Any) -> Dict[str, str]:
+    subsystem_type = _canonical_subsystem_type(kind)
+    subsystem_name = str(name or "").strip()
+    if not subsystem_name:
+        subsystem_type = "global"
+        subsystem_name = "all"
+    return {
+        "type": subsystem_type,
+        "name": subsystem_name,
+        "id": f"{subsystem_type}:{subsystem_name.lower()}",
+    }
+
+
+def infer_tag_group(tag_path: Optional[str], folder_name: Optional[str] = None) -> Optional[str]:
+    folder = str(folder_name or "").strip().strip("/")
+    if folder:
+        head = folder.split("/", 1)[0].strip()
+        if head:
+            return head
+
+    raw = str(tag_path or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("[") and "]" in raw:
+        raw = raw.split("]", 1)[1]
+    raw = raw.strip("/")
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split("/") if p.strip()]
+    # Ignore flat tags and only infer a group when there is at least one folder segment.
+    if len(parts) < 2:
+        return None
+    return parts[0]
+
+
+def derive_subsystems_for_tag(
+    tag_meta: Dict[str, Any],
+    subsystem_mode: str = "auto",
+    priority: Optional[List[str]] = None,
+) -> Tuple[List[Dict[str, str]], Dict[str, str]]:
+    mode = str(subsystem_mode or "auto").strip().lower()
+    if mode in {"global", "off", "disabled"}:
+        global_ref = _subsystem_ref("global", "all")
+        return [global_ref], global_ref
+
+    refs: List[Dict[str, str]] = []
+    seen: Set[str] = set()
+
+    def add_ref(kind: str, name: Optional[str]) -> None:
+        if not name:
+            return
+        ref = _subsystem_ref(kind, name)
+        if ref["id"] in seen:
+            return
+        seen.add(ref["id"])
+        refs.append(ref)
+
+    for view_name in tag_meta.get("views") or []:
+        add_ref("view", str(view_name))
+    for equipment_name in tag_meta.get("equipment") or []:
+        add_ref("equipment", str(equipment_name))
+    add_ref("group", infer_tag_group(tag_meta.get("path"), tag_meta.get("folder_name")))
+
+    if not refs:
+        refs = [_subsystem_ref("global", "all")]
+
+    ordered_priority = [
+        _canonical_subsystem_type(x) for x in (priority or DEFAULT_SUBSYSTEM_PRIORITY)
+    ]
+    primary = refs[0]
+    for kind in ordered_priority:
+        found = next((s for s in refs if s.get("type") == kind), None)
+        if found:
+            primary = found
+            break
+
+    return refs, primary
+
+
 def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     raw = dict(config or {})
     thresholds = raw.get("thresholds", {}) if isinstance(raw.get("thresholds"), dict) else {}
@@ -62,7 +157,9 @@ def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "minHistoryPoints": 30,
         "maxMonitoredTags": 200,
         "maxCandidatesPerCycle": 25,
+        "maxCandidatesPerSubsystem": 8,
         "maxLlmTriagesPerCycle": 5,
+        "maxLlmTriagesPerSubsystem": 2,
         "dedupCooldownMinutes": 10,
         "retentionDays": 14,
         "cleanupEveryCycles": 40,
@@ -71,6 +168,9 @@ def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "project": None,
             "equipmentTags": [],
             "tagRegex": None,
+            "subsystemMode": "auto",
+            "subsystemPriority": list(DEFAULT_SUBSYSTEM_PRIORITY),
+            "subsystemInclude": [],
         },
         "thresholds": {
             "z": 3.0,
@@ -81,11 +181,32 @@ def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "stuck_window_size": 20,
         },
     }
-    cfg = defaults
+    cfg = dict(defaults)
+    cfg["scope"] = dict(defaults["scope"])
+    cfg["thresholds"] = dict(defaults["thresholds"])
     cfg.update({k: v for k, v in raw.items() if k in defaults and k != "thresholds"})
     cfg["thresholds"].update({k: v for k, v in thresholds.items() if v is not None})
     if isinstance(raw.get("scope"), dict):
         cfg["scope"].update(raw["scope"])
+    scope_cfg = cfg["scope"]
+    mode = str(scope_cfg.get("subsystemMode") or "auto").strip().lower()
+    if mode not in {"auto", "global", "off", "disabled"}:
+        mode = "auto"
+    scope_cfg["subsystemMode"] = mode
+    if not isinstance(scope_cfg.get("subsystemPriority"), list) or not scope_cfg.get("subsystemPriority"):
+        scope_cfg["subsystemPriority"] = list(DEFAULT_SUBSYSTEM_PRIORITY)
+    scope_cfg["subsystemPriority"] = [
+        str(x).strip()
+        for x in scope_cfg.get("subsystemPriority", [])
+        if str(x).strip()
+    ] or list(DEFAULT_SUBSYSTEM_PRIORITY)
+    if not isinstance(scope_cfg.get("subsystemInclude"), list):
+        scope_cfg["subsystemInclude"] = []
+    scope_cfg["subsystemInclude"] = [
+        str(x).strip().lower()
+        for x in scope_cfg.get("subsystemInclude", [])
+        if str(x).strip()
+    ]
     return cfg
 
 
@@ -179,11 +300,22 @@ class AnomalyMonitor:
     # -----------------------------
     # Tag and context collection
     # -----------------------------
-    def get_monitored_tags(self) -> List[Dict[str, str]]:
+    def get_monitored_tags(self) -> List[Dict[str, Any]]:
         max_tags = int(self.config.get("maxMonitoredTags", 200))
         scope = self.config.get("scope", {})
         tag_regex = scope.get("tagRegex")
-        equipment_tags = set(scope.get("equipmentTags") or [])
+        equipment_tags = {
+            str(x).strip().lower()
+            for x in (scope.get("equipmentTags") or [])
+            if str(x).strip()
+        }
+        subsystem_mode = str(scope.get("subsystemMode") or "auto").strip().lower()
+        subsystem_priority = scope.get("subsystemPriority") or list(DEFAULT_SUBSYSTEM_PRIORITY)
+        subsystem_include = {
+            str(x).strip().lower()
+            for x in (scope.get("subsystemInclude") or [])
+            if str(x).strip()
+        }
 
         with self.graph.session() as session:
             result = session.run(
@@ -191,13 +323,29 @@ class AnomalyMonitor:
                 MATCH (t:ScadaTag)
                 WHERE coalesce(t.opc_item_path, t.name) IS NOT NULL
                   AND coalesce(t.opc_item_path, t.name) <> ''
+                OPTIONAL MATCH (c:ViewComponent)-[:BINDS_TO]->(t)
+                OPTIONAL MATCH (v:View)-[:HAS_COMPONENT]->(c)
+                OPTIONAL MATCH (eq:Equipment)-[*1..2]-(t)
                 RETURN DISTINCT coalesce(t.opc_item_path, t.name) AS tag_path,
-                                coalesce(t.name, t.opc_item_path) AS tag_name
+                                coalesce(t.name, t.opc_item_path) AS tag_name,
+                                coalesce(t.folder_name, '') AS folder_name,
+                                collect(DISTINCT v.name) AS views,
+                                collect(DISTINCT eq.name) AS equipment
                 LIMIT $limit
                 """,
                 limit=max_tags * 3,
             )
-            tags = [{"path": r["tag_path"], "name": r["tag_name"]} for r in result if r["tag_path"]]
+            tags = [
+                {
+                    "path": r["tag_path"],
+                    "name": r["tag_name"],
+                    "folder_name": r["folder_name"] or "",
+                    "views": [x for x in (r["views"] or []) if x],
+                    "equipment": [x for x in (r["equipment"] or []) if x],
+                }
+                for r in result
+                if r["tag_path"]
+            ]
 
         if tag_regex:
             import re
@@ -214,7 +362,32 @@ class AnomalyMonitor:
                 })
 
         if equipment_tags:
-            tags = [t for t in tags if t["name"] in equipment_tags or t["path"] in equipment_tags]
+            tags = [
+                t for t in tags
+                if t["name"].lower() in equipment_tags
+                or t["path"].lower() in equipment_tags
+                or any(str(eq).strip().lower() in equipment_tags for eq in t.get("equipment", []))
+            ]
+
+        for tag in tags:
+            subsystems, primary = derive_subsystems_for_tag(
+                tag_meta=tag,
+                subsystem_mode=subsystem_mode,
+                priority=subsystem_priority,
+            )
+            tag["subsystems"] = subsystems
+            tag["primary_subsystem"] = primary
+
+        if subsystem_include:
+            tags = [
+                t
+                for t in tags
+                if any(
+                    s.get("id", "").lower() in subsystem_include
+                    or s.get("name", "").lower() in subsystem_include
+                    for s in (t.get("subsystems") or [])
+                )
+            ]
 
         return tags[:max_tags]
 
@@ -285,15 +458,18 @@ class AnomalyMonitor:
                 """
                 MATCH (t:ScadaTag)
                 WHERE t.name = $tag OR t.opc_item_path = $tag
+                OPTIONAL MATCH (vc:ViewComponent)-[:BINDS_TO]->(t)
+                OPTIONAL MATCH (v:View)-[:HAS_COMPONENT]->(vc)
                 OPTIONAL MATCH (eq:Equipment)-[*1..2]-(t)
                 OPTIONAL MATCH (eq)-[:HAS_SYMPTOM]->(s:FaultSymptom)
-                OPTIONAL MATCH (s)-[:CAUSED_BY]->(c:FaultCause)
+                OPTIONAL MATCH (s)-[:CAUSED_BY]->(fc:FaultCause)
                 OPTIONAL MATCH (eq)-[:HAS_PATTERN]->(p:ControlPattern)
                 OPTIONAL MATCH (eq)-[:SAFETY_CRITICAL]->(se:SafetyElement)
                 RETURN t,
+                       collect(DISTINCT v.name) AS views,
                        collect(DISTINCT eq.name) AS equipment,
                        collect(DISTINCT s.symptom) AS symptoms,
-                       collect(DISTINCT c.cause) AS causes,
+                       collect(DISTINCT fc.cause) AS causes,
                        collect(DISTINCT p.pattern_name) AS patterns,
                        collect(DISTINCT se.name) AS safety
                 LIMIT 1
@@ -304,7 +480,9 @@ class AnomalyMonitor:
             if not record:
                 return {
                     "tag_path": tag_path,
+                    "views": [],
                     "equipment": [],
+                    "group": infer_tag_group(tag_path),
                     "symptoms": [],
                     "causes": [],
                     "patterns": [],
@@ -314,7 +492,9 @@ class AnomalyMonitor:
             return {
                 "tag_path": tag_path,
                 "tag_name": node.get("name") if node else tag_path,
+                "views": [x for x in record["views"] if x],
                 "equipment": [x for x in record["equipment"] if x],
+                "group": infer_tag_group(tag_path, node.get("folder_name") if node else None),
                 "symptoms": [x for x in record["symptoms"] if x],
                 "causes": [x for x in record["causes"] if x],
                 "patterns": [x for x in record["patterns"] if x],
@@ -344,7 +524,7 @@ class AnomalyMonitor:
             "rationale": "LLM triage unavailable; using deterministic fallback.",
             "related_entities": [
                 {"label": "Equipment", "name": e} for e in context.get("equipment", [])[:3]
-            ],
+            ] + [{"label": "View", "name": v} for v in context.get("views", [])[:2]],
         }
         if not self.llm:
             return fallback
@@ -423,9 +603,12 @@ class AnomalyMonitor:
         deterministic: Dict[str, Any],
         live_sample: Dict[str, Any],
         triage: Dict[str, Any],
+        subsystem: Optional[Dict[str, str]] = None,
     ) -> Optional[Dict[str, Any]]:
         category = triage.get("category") or deterministic.get("category", "deviation")
-        dedup_sig = dedup_key(context["tag_path"], category, int(self.config.get("dedupCooldownMinutes", 10)))
+        subsystem_ref = subsystem or _subsystem_ref("global", "all")
+        dedup_source = f"{context['tag_path']}::{subsystem_ref.get('id', 'global:all')}"
+        dedup_sig = dedup_key(dedup_source, category, int(self.config.get("dedupCooldownMinutes", 10)))
         if self.is_duplicate_recent(dedup_sig):
             return None
 
@@ -452,6 +635,9 @@ class AnomalyMonitor:
             "window_volatility": float(deterministic.get("window_volatility", 0.0)),
             "source_tag": context["tag_path"],
             "tag_name": context.get("tag_name") or context["tag_path"],
+            "subsystem_type": subsystem_ref.get("type"),
+            "subsystem_name": subsystem_ref.get("name"),
+            "subsystem_id": subsystem_ref.get("id"),
             "live_quality": live_sample.get("quality"),
             "live_timestamp": live_sample.get("timestamp"),
             "live_value": str(live_sample.get("value")),
@@ -493,6 +679,27 @@ class AnomalyMonitor:
                     name=equipment_name,
                 )
 
+            if subsystem_ref.get("type") == "view":
+                session.run(
+                    """
+                    MATCH (e:AnomalyEvent {event_id: $event_id})
+                    MATCH (v:View {name: $name})
+                    MERGE (e)-[:SCOPED_TO]->(v)
+                    """,
+                    event_id=event_id,
+                    name=subsystem_ref.get("name"),
+                )
+            elif subsystem_ref.get("type") == "equipment":
+                session.run(
+                    """
+                    MATCH (e:AnomalyEvent {event_id: $event_id})
+                    MATCH (eq:Equipment {name: $name})
+                    MERGE (e)-[:SCOPED_TO]->(eq)
+                    """,
+                    event_id=event_id,
+                    name=subsystem_ref.get("name"),
+                )
+
             related_inputs: List[Dict[str, str]] = []
             for item in triage.get("related_entities", []) or []:
                 if isinstance(item, dict) and item.get("label") and item.get("name"):
@@ -504,7 +711,7 @@ class AnomalyMonitor:
 
             for rel in related_inputs[:8]:
                 label = rel["label"]
-                if label not in {"FaultSymptom", "FaultCause", "ControlPattern", "SafetyElement", "Equipment", "ScadaTag"}:
+                if label not in {"FaultSymptom", "FaultCause", "ControlPattern", "SafetyElement", "Equipment", "ScadaTag", "View"}:
                     continue
                 session.run(
                     f"""
@@ -530,6 +737,8 @@ class AnomalyMonitor:
             "entityRefs": {
                 "tag": persisted.get("tag_name") or persisted.get("source_tag"),
                 "sourceTag": persisted.get("source_tag"),
+                "subsystemType": persisted.get("subsystem_type"),
+                "subsystemName": persisted.get("subsystem_name"),
             },
             "createdAt": persisted.get("created_at"),
         })
@@ -543,6 +752,7 @@ class AnomalyMonitor:
         category: str = "quality-issue",
         source_tag: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
+        subsystem: Optional[Dict[str, str]] = None,
     ) -> bool:
         """
         Persist and stream provider-health anomalies so failures appear in feed.
@@ -604,6 +814,7 @@ class AnomalyMonitor:
                 "data_type": "provider_health",
             },
             triage=triage,
+            subsystem=subsystem,
         )
         if persisted:
             self._emit_persisted_event(persisted)
@@ -618,6 +829,10 @@ class AnomalyMonitor:
         metrics = {"candidates": 0, "triaged": 0, "emitted": 0, "cycleMs": 0, "diagnostics": {}}
         thresholds = self.config.get("thresholds", {})
         min_history = int(self.config.get("minHistoryPoints", 30))
+        max_candidates_total = max(1, int(self.config.get("maxCandidatesPerCycle", 25)))
+        max_candidates_per_subsystem = max(1, int(self.config.get("maxCandidatesPerSubsystem", 8)))
+        max_triage_total = max(0, int(self.config.get("maxLlmTriagesPerCycle", 5)))
+        max_triage_per_subsystem = max(0, int(self.config.get("maxLlmTriagesPerSubsystem", 2)))
 
         if not self.api.is_configured:
             emitted = self.emit_provider_failure_event(
@@ -644,6 +859,13 @@ class AnomalyMonitor:
             return metrics
 
         tag_paths = [t["path"] for t in tags]
+        tag_lookup = {t["path"]: t for t in tags}
+        detected_subsystems = sorted(
+            {
+                (t.get("primary_subsystem") or _subsystem_ref("global", "all")).get("id", "global:all")
+                for t in tags
+            }
+        )
         live_values = self.api.read_tags(tag_paths)
         candidates: List[Dict[str, Any]] = []
         now = datetime.now(timezone.utc)
@@ -656,8 +878,12 @@ class AnomalyMonitor:
         stale_filtered_count = 0
         insufficient_history_count = 0
         low_history_candidate_count = 0
+        candidate_subsystem_counts: Dict[str, int] = {}
 
         for tv in live_values:
+            tag_meta = tag_lookup.get(tv.path, {"path": tv.path, "name": tv.path})
+            subsystem = tag_meta.get("primary_subsystem") or _subsystem_ref("global", "all")
+
             if tv.error:
                 live_error_count += 1
                 if len(live_error_samples) < 5:
@@ -698,6 +924,8 @@ class AnomalyMonitor:
                         deterministic["reasons"] = list(deterministic.get("reasons", [])) + ["low_history_override"]
                         deterministic["history_quality"] = "low"
                         context = self.get_context(tv.path)
+                        context["subsystem"] = subsystem
+                        context["subsystems"] = tag_meta.get("subsystems") or [subsystem]
                         candidates.append(
                             {
                                 "context": context,
@@ -709,8 +937,11 @@ class AnomalyMonitor:
                                     "timestamp": tv.timestamp,
                                     "data_type": tv.data_type,
                                 },
+                                "subsystem": subsystem,
                             }
                         )
+                        sub_id = subsystem.get("id", "global:all")
+                        candidate_subsystem_counts[sub_id] = candidate_subsystem_counts.get(sub_id, 0) + 1
                         low_history_candidate_count += 1
                 continue
 
@@ -727,6 +958,8 @@ class AnomalyMonitor:
 
             if deterministic.get("candidate"):
                 context = self.get_context(tv.path)
+                context["subsystem"] = subsystem
+                context["subsystems"] = tag_meta.get("subsystems") or [subsystem]
                 candidates.append(
                     {
                         "context": context,
@@ -738,8 +971,11 @@ class AnomalyMonitor:
                             "timestamp": tv.timestamp,
                             "data_type": tv.data_type,
                         },
+                        "subsystem": subsystem,
                     }
                 )
+                sub_id = subsystem.get("id", "global:all")
+                candidate_subsystem_counts[sub_id] = candidate_subsystem_counts.get(sub_id, 0) + 1
 
         if live_values and live_error_count == len(live_values):
             emitted = self.emit_provider_failure_event(
@@ -806,12 +1042,28 @@ class AnomalyMonitor:
                 metrics["emitted"] += 1
 
         metrics["candidates"] = len(candidates)
-        max_candidates = int(self.config.get("maxCandidatesPerCycle", 25))
-        max_triage = int(self.config.get("maxLlmTriagesPerCycle", 5))
-        shortlisted = candidates[:max_candidates]
+        shortlisted: List[Dict[str, Any]] = []
+        selected_per_subsystem: Dict[str, int] = {}
+        for candidate in candidates:
+            subsystem = candidate.get("subsystem") or _subsystem_ref("global", "all")
+            sub_id = subsystem.get("id", "global:all")
+            if selected_per_subsystem.get(sub_id, 0) >= max_candidates_per_subsystem:
+                continue
+            shortlisted.append(candidate)
+            selected_per_subsystem[sub_id] = selected_per_subsystem.get(sub_id, 0) + 1
+            if len(shortlisted) >= max_candidates_total:
+                break
 
-        for idx, candidate in enumerate(shortlisted):
-            use_llm = idx < max_triage
+        llm_total = 0
+        llm_per_subsystem: Dict[str, int] = {}
+
+        for candidate in shortlisted:
+            subsystem = candidate.get("subsystem") or _subsystem_ref("global", "all")
+            sub_id = subsystem.get("id", "global:all")
+            use_llm = (
+                llm_total < max_triage_total
+                and llm_per_subsystem.get(sub_id, 0) < max_triage_per_subsystem
+            )
             triage = (
                 self.run_llm_triage(
                     candidate["context"],
@@ -820,28 +1072,38 @@ class AnomalyMonitor:
                 )
                 if use_llm
                 else {
-                    "summary": f"Deviation on {candidate['context'].get('tag_name', candidate['context']['tag_path'])}",
+                    "summary": (
+                        f"Deviation on {candidate['context'].get('tag_name', candidate['context']['tag_path'])} "
+                        f"in subsystem {subsystem.get('name', 'all')}"
+                    ),
                     "category": candidate["deterministic"].get("category", "deviation"),
                     "severity": "medium",
                     "confidence": 0.5,
                     "verification_checks": [],
                     "probable_causes": [],
                     "safety_notes": [],
-                    "rationale": "Triaged in deterministic-only mode due per-cycle LLM cap.",
+                    "rationale": "Triaged in deterministic-only mode due per-cycle/per-subsystem LLM caps.",
                     "related_entities": [],
                 }
             )
+            if use_llm:
+                llm_total += 1
+                llm_per_subsystem[sub_id] = llm_per_subsystem.get(sub_id, 0) + 1
             metrics["triaged"] += 1
             persisted = self.persist_event(
                 candidate["context"],
                 candidate["deterministic"],
                 candidate["live_sample"],
                 triage,
+                subsystem=subsystem,
             )
             if persisted:
                 metrics["emitted"] += 1
                 self._emit_persisted_event(persisted)
 
+        top_candidates_by_subsystem = dict(
+            sorted(candidate_subsystem_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+        )
         metrics["diagnostics"] = {
             "monitoredTags": len(tag_paths),
             "validLiveCount": valid_live_count,
@@ -851,6 +1113,13 @@ class AnomalyMonitor:
             "historyErrorCount": history_error_count,
             "insufficientHistoryCount": insufficient_history_count,
             "lowHistoryCandidateCount": low_history_candidate_count,
+            "detectedSubsystemCount": len(detected_subsystems),
+            "detectedSubsystems": detected_subsystems[:10],
+            "candidateSubsystemCount": len(candidate_subsystem_counts),
+            "candidateBySubsystem": top_candidates_by_subsystem,
+            "maxCandidatesPerSubsystem": max_candidates_per_subsystem,
+            "maxLlmTriagesPerSubsystem": max_triage_per_subsystem,
+            "llmTriagedCount": llm_total,
         }
         metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
         return metrics

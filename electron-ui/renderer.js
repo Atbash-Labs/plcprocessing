@@ -3583,11 +3583,17 @@ function getAgentsConfigFromUI() {
     pollIntervalMs: Number(el.cfgPoll?.value || 15000),
     historyWindowMinutes: Number(el.cfgHist?.value || 360),
     minHistoryPoints: Number(el.cfgPoints?.value || 30),
+    maxCandidatesPerSubsystem: 8,
     maxLlmTriagesPerCycle: Number(el.cfgMaxLlm?.value || 5),
+    maxLlmTriagesPerSubsystem: 2,
     thresholds: {
       z: Number(el.cfgZ?.value || 3),
       mad: Number(el.cfgMad?.value || 3.5),
       stalenessSec: Number(el.cfgStale?.value || 120),
+    },
+    scope: {
+      subsystemMode: 'auto',
+      subsystemPriority: ['view', 'equipment', 'group', 'global'],
     },
   };
 }
@@ -3634,6 +3640,8 @@ function getFilteredAgentEvents() {
         event.summary,
         event.source_tag,
         event.tag_name,
+        event.subsystem_name,
+        event.subsystem_type,
         ...(event.equipment || []),
         ...(event.tags || []),
       ]
@@ -3659,6 +3667,12 @@ function renderAgentEventList() {
       const active = event.event_id === agentsState.selectedEventId ? ' active' : '';
       const sev = String(event.severity || 'low').toLowerCase();
       const equipment = (event.equipment || []).slice(0, 2).join(', ');
+      const subsystemLabel = event.subsystem_name
+        ? `${event.subsystem_type || 'subsystem'}: ${event.subsystem_name}`
+        : '';
+      const baseMeta = [event.tag_name || event.source_tag || '', equipment, subsystemLabel]
+        .filter(Boolean)
+        .join(' • ');
       return `
         <div class="agents-event-card${active}" data-event-id="${escapeHtml(event.event_id || '')}">
           <div class="agents-event-line-top">
@@ -3666,7 +3680,7 @@ function renderAgentEventList() {
             <span class="agents-event-time">${escapeHtml(formatAgentTime(event.created_at))}</span>
           </div>
           <div class="agents-event-summary">${escapeHtml(event.summary || 'Untitled anomaly')}</div>
-          <div class="agents-event-meta">${escapeHtml(event.tag_name || event.source_tag || '')}${equipment ? ` • ${escapeHtml(equipment)}` : ''}</div>
+          <div class="agents-event-meta">${escapeHtml(baseMeta)}</div>
         </div>
       `;
     })
@@ -3682,8 +3696,14 @@ function renderAgentEventList() {
 }
 
 function resolveAgentGraphTarget(event) {
+  if (String(event.subsystem_type || '').toLowerCase() === 'view' && event.subsystem_name) {
+    return { name: event.subsystem_name, type: 'View' };
+  }
   const equipment = (event.equipment || []).find(Boolean);
   if (equipment) return { name: equipment, type: 'Equipment' };
+  if (String(event.subsystem_type || '').toLowerCase() === 'equipment' && event.subsystem_name) {
+    return { name: event.subsystem_name, type: 'Equipment' };
+  }
   const tagName = event.tag_name || (event.tags || []).find(Boolean) || event.source_tag;
   if (tagName) return { name: tagName, type: 'ScadaTag' };
   return null;
@@ -3714,6 +3734,8 @@ function renderAgentEventDetails(event) {
       <div class="agents-detail-item"><span class="agents-detail-label">Confidence</span><span class="agents-detail-value">${escapeHtml(String(event.confidence ?? ''))}</span></div>
       <div class="agents-detail-item"><span class="agents-detail-label">Category</span><span class="agents-detail-value">${escapeHtml(event.category || '')}</span></div>
       <div class="agents-detail-item"><span class="agents-detail-label">Timestamp</span><span class="agents-detail-value">${escapeHtml(formatAgentTime(event.created_at))}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">Subsystem Type</span><span class="agents-detail-value">${escapeHtml(event.subsystem_type || 'global')}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">Subsystem</span><span class="agents-detail-value">${escapeHtml(event.subsystem_name || 'all')}</span></div>
       <div class="agents-detail-item"><span class="agents-detail-label">Source Tag</span><span class="agents-detail-value">${escapeHtml(event.source_tag || '')}</span></div>
       <div class="agents-detail-item"><span class="agents-detail-label">Tag Name</span><span class="agents-detail-value">${escapeHtml(event.tag_name || '')}</span></div>
       <div class="agents-detail-item"><span class="agents-detail-label">z-score</span><span class="agents-detail-value">${escapeHtml(String(event.z_score ?? '0'))}</span></div>
@@ -3860,6 +3882,8 @@ function upsertRealtimeAgentEvent(payload) {
     created_at: payload.createdAt || new Date().toISOString(),
     source_tag: payload.entityRefs?.sourceTag || payload.entityRefs?.tag || '',
     tag_name: payload.entityRefs?.tag || '',
+    subsystem_type: payload.entityRefs?.subsystemType || '',
+    subsystem_name: payload.entityRefs?.subsystemName || '',
     state: 'open',
   };
   if (idx >= 0) {
