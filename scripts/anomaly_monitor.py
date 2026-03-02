@@ -56,6 +56,15 @@ def emit(prefix: str, payload: Dict[str, Any]) -> None:
 DEFAULT_SUBSYSTEM_PRIORITY = ["view", "equipment", "group", "global"]
 
 
+def _preview_value(value: Any, max_len: int = 120) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = str(value)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
 def _canonical_subsystem_type(kind: Any) -> str:
     value = str(kind or "").strip().lower()
     if value in {"view", "views"}:
@@ -1017,11 +1026,24 @@ class AnomalyMonitor:
                 "count": len(live_values),
                 "errorCount": sum(1 for tv in live_values if tv.error),
                 "qualityGoodCount": sum(1 for tv in live_values if is_quality_good(tv.quality)),
+                "timestampMissingCount": sum(1 for tv in live_values if not tv.timestamp),
+                "timestampInferredCount": sum(
+                    1
+                    for tv in live_values
+                    if isinstance(tv.config, dict) and bool(tv.config.get("timestamp_inferred"))
+                ),
                 "sample": [
                     {
                         "path": tv.path,
+                        "value": _preview_value(tv.value),
                         "quality": tv.quality,
                         "timestamp": tv.timestamp,
+                        "timestampInferred": bool(tv.config.get("timestamp_inferred"))
+                        if isinstance(tv.config, dict)
+                        else False,
+                        "configKeys": sorted(list(tv.config.keys()))[:8]
+                        if isinstance(tv.config, dict)
+                        else [],
                         "error": tv.error,
                     }
                     for tv in live_values[:5]
@@ -1035,6 +1057,8 @@ class AnomalyMonitor:
         history_error_count = 0
         history_error_samples: List[str] = []
         valid_live_count = 0
+        missing_timestamp_count = 0
+        inferred_timestamp_count = 0
         quality_filtered_count = 0
         stale_filtered_count = 0
         insufficient_history_count = 0
@@ -1103,6 +1127,10 @@ class AnomalyMonitor:
                     live_error_samples.append(f"{tv.path}: {tv.error}")
                 continue
             valid_live_count += 1
+            if not tv.timestamp:
+                missing_timestamp_count += 1
+            if isinstance(tv.config, dict) and bool(tv.config.get("timestamp_inferred")):
+                inferred_timestamp_count += 1
             if not is_quality_good(tv.quality):
                 # quality gate: only emit quality anomalies if this persists via triage.
                 quality_filtered_count += 1
@@ -1444,6 +1472,8 @@ class AnomalyMonitor:
             "linkedTags": linked_tag_count,
             "unlinkedTags": unlinked_tag_count,
             "validLiveCount": valid_live_count,
+            "missingTimestampCount": missing_timestamp_count,
+            "inferredTimestampCount": inferred_timestamp_count,
             "liveErrorCount": live_error_count,
             "liveErrorLinked": live_error_linked,
             "liveErrorUnlinked": live_error_unlinked,

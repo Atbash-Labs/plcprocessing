@@ -17,6 +17,7 @@ Configuration via environment variables:
 import os
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, quote
@@ -239,7 +240,11 @@ class IgnitionApiClient:
                 for p in normalised
             ]
 
-        return self._parse_tags_response(normalised, data)
+        return self._parse_tags_response(
+            normalised,
+            data,
+            fallback_timestamp=datetime.now(timezone.utc).isoformat(),
+        )
 
     # --------------------------------------------------------------------- #
     #  Tag history – WebDev module endpoint
@@ -344,11 +349,36 @@ class IgnitionApiClient:
             return path
         return f"[default]{path}"
 
-    _TAG_ITEM_KNOWN_KEYS = {"value", "quality", "tagPath", "isGood",
-                             "timestamp", "t", "dataType", "data_type"}
+    _TAG_ITEM_KNOWN_KEYS = {
+        "value",
+        "v",
+        "quality",
+        "q",
+        "tagPath",
+        "path",
+        "fullPath",
+        "isGood",
+        "timestamp",
+        "t",
+        "ts",
+        "time",
+        "timeStamp",
+        "dateTime",
+        "datetime",
+        "lastChange",
+        "lastChanged",
+        "timestampMs",
+        "eventTime",
+        "dataType",
+        "data_type",
+    }
 
     @staticmethod
-    def _parse_tags_response(paths: List[str], data: Any) -> List["TagValue"]:
+    def _parse_tags_response(
+        paths: List[str],
+        data: Any,
+        fallback_timestamp: Optional[str] = None,
+    ) -> List["TagValue"]:
         """Parse the response from the WebDev getTags endpoint.
 
         Expected shape: {"allGood": bool, "success": bool, "count": N,
@@ -367,9 +397,41 @@ class IgnitionApiClient:
             return [TagValue(path=p, value=data, quality="Unknown") for p in paths]
 
         by_path: Dict[str, dict] = {}
+
+        def extract_item_path(item: Dict[str, Any]) -> Optional[str]:
+            for key in ("tagPath", "path", "fullPath"):
+                val = item.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            return None
+
+        def extract_item_timestamp(item: Dict[str, Any]) -> Optional[str]:
+            for key in (
+                "timestamp",
+                "t",
+                "ts",
+                "time",
+                "timeStamp",
+                "dateTime",
+                "datetime",
+                "lastChange",
+                "lastChanged",
+                "timestampMs",
+                "eventTime",
+            ):
+                val = item.get(key)
+                if val is None:
+                    continue
+                text = str(val).strip()
+                if text:
+                    return text
+            return None
+
         for item in items:
-            if isinstance(item, dict) and "tagPath" in item:
-                by_path[item["tagPath"]] = item
+            if isinstance(item, dict):
+                item_path = extract_item_path(item)
+                if item_path:
+                    by_path[item_path] = item
 
         results: List[TagValue] = []
         for i, path in enumerate(paths):
@@ -380,13 +442,22 @@ class IgnitionApiClient:
             if item is None:
                 results.append(TagValue(path=path, error="No data returned for this path"))
             elif isinstance(item, dict):
+                ts = extract_item_timestamp(item)
+                inferred_timestamp = False
+                if not ts and fallback_timestamp:
+                    ts = fallback_timestamp
+                    inferred_timestamp = True
                 extra = {k: v for k, v in item.items()
                          if k not in IgnitionApiClient._TAG_ITEM_KNOWN_KEYS} or None
+                if inferred_timestamp:
+                    if extra is None:
+                        extra = {}
+                    extra["timestamp_inferred"] = True
                 results.append(TagValue(
-                    path=item.get("tagPath", path),
-                    value=item.get("value"),
-                    quality=str(item.get("quality", "Good" if item.get("isGood") else "Unknown")),
-                    timestamp=item.get("timestamp") or item.get("t"),
+                    path=extract_item_path(item) or path,
+                    value=item.get("value", item.get("v")),
+                    quality=str(item.get("quality", item.get("q", "Good" if item.get("isGood") else "Unknown"))),
+                    timestamp=ts,
                     data_type=item.get("dataType") or item.get("data_type"),
                     config=extra,
                 ))
