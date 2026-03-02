@@ -4,6 +4,7 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 
 let mainWindow;
+let activeAgentRun = null;
 
 // ---------------------------------------------------------------------------
 // Python backend configuration  (works in both dev and packaged modes)
@@ -103,6 +104,16 @@ app.on('window-all-closed', () => {
   }
 });
 
+app.on('before-quit', () => {
+  if (activeAgentRun && activeAgentRun.process && !activeAgentRun.process.killed) {
+    try {
+      activeAgentRun.process.kill('SIGTERM');
+    } catch (err) {
+      // Ignore termination errors during shutdown.
+    }
+  }
+});
+
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
@@ -182,6 +193,132 @@ function runPythonScript(scriptName, args = [], options = {}) {
     pythonProcess.on('error', (err) => {
       reject(err);
     });
+  });
+}
+
+function normalizeAgentConfig(config = {}) {
+  const thresholds = (config && typeof config.thresholds === 'object' && config.thresholds) || {};
+  const scope = (config && typeof config.scope === 'object' && config.scope) || {};
+  return {
+    pollIntervalMs: Math.max(5000, Number(config.pollIntervalMs || 15000)),
+    historyWindowMinutes: Math.max(10, Number(config.historyWindowMinutes || 360)),
+    minHistoryPoints: Math.max(10, Number(config.minHistoryPoints || 30)),
+    maxMonitoredTags: Math.max(10, Number(config.maxMonitoredTags || 200)),
+    maxCandidatesPerCycle: Math.max(1, Number(config.maxCandidatesPerCycle || 25)),
+    maxLlmTriagesPerCycle: Math.max(0, Number(config.maxLlmTriagesPerCycle || 5)),
+    dedupCooldownMinutes: Math.max(1, Number(config.dedupCooldownMinutes || 10)),
+    retentionDays: Math.max(1, Number(config.retentionDays || 14)),
+    cleanupEveryCycles: Math.max(1, Number(config.cleanupEveryCycles || 40)),
+    thresholds: {
+      z: Number(thresholds.z ?? 3.0),
+      mad: Number(thresholds.mad ?? 3.5),
+      rate: Number(thresholds.rate ?? 0.0),
+      stalenessSec: Number(thresholds.stalenessSec ?? 120),
+      flatline_std_epsilon: Number(thresholds.flatline_std_epsilon ?? 1e-6),
+      stuck_window_size: Number(thresholds.stuck_window_size ?? 20),
+    },
+    scope: {
+      project: scope.project || null,
+      equipmentTags: Array.isArray(scope.equipmentTags) ? scope.equipmentTags : [],
+      tagRegex: scope.tagRegex || null,
+    },
+  };
+}
+
+function routeAgentMessage(channel, payload) {
+  if (mainWindow) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
+function parseAgentLine(line) {
+  const trimmed = (line || '').trim();
+  if (!trimmed) return null;
+  const prefixes = [
+    { key: '[AGENT_STATUS]', channel: 'agent-status' },
+    { key: '[AGENT_EVENT]', channel: 'agent-event' },
+    { key: '[AGENT_ERROR]', channel: 'agent-error' },
+    { key: '[AGENT_COMPLETE]', channel: 'agent-complete' },
+  ];
+  for (const prefix of prefixes) {
+    if (!trimmed.startsWith(prefix.key)) continue;
+    const jsonText = trimmed.slice(prefix.key.length).trim();
+    try {
+      const payload = JSON.parse(jsonText);
+      return { channel: prefix.channel, payload };
+    } catch (err) {
+      return {
+        channel: 'agent-error',
+        payload: {
+          runId: activeAgentRun ? activeAgentRun.runId : null,
+          code: 'invalid_agent_json',
+          message: `Failed to parse agent stream line: ${trimmed.slice(0, 200)}`,
+          recoverable: true,
+          timestamp: new Date().toISOString(),
+        },
+      };
+    }
+  }
+  return null;
+}
+
+function handleAgentStdoutChunk(text) {
+  if (!activeAgentRun) return;
+  activeAgentRun.stdoutBuffer += text;
+  const lines = activeAgentRun.stdoutBuffer.split(/\r?\n/);
+  activeAgentRun.stdoutBuffer = lines.pop() || '';
+  for (const line of lines) {
+    const parsed = parseAgentLine(line);
+    if (!parsed) continue;
+    if (parsed.channel === 'agent-status' && parsed.payload) {
+      activeAgentRun.status = parsed.payload.state || activeAgentRun.status;
+      activeAgentRun.metrics = {
+        cycleMs: parsed.payload.cycleMs || 0,
+        candidates: parsed.payload.candidates || 0,
+        triaged: parsed.payload.triaged || 0,
+        emitted: parsed.payload.emitted || 0,
+        timestamp: parsed.payload.timestamp || new Date().toISOString(),
+      };
+    }
+    routeAgentMessage(parsed.channel, parsed.payload);
+  }
+}
+
+async function stopActiveAgent(reason = 'stopped_by_user') {
+  if (!activeAgentRun || !activeAgentRun.process || activeAgentRun.process.killed) {
+    return { success: false, error: 'No active agent run' };
+  }
+  const runId = activeAgentRun.runId;
+  activeAgentRun.status = 'stopping';
+
+  return new Promise((resolve) => {
+    const proc = activeAgentRun.process;
+    let settled = false;
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    proc.once('close', () => {
+      done({ success: true, runId, stoppedAt: new Date().toISOString(), reason });
+    });
+
+    try {
+      proc.kill('SIGTERM');
+    } catch (err) {
+      done({ success: false, error: err.message });
+      return;
+    }
+
+    setTimeout(() => {
+      if (proc.killed) return;
+      try {
+        proc.kill('SIGKILL');
+      } catch (err) {
+        // Ignore forced termination errors.
+      }
+    }, 5000);
   });
 }
 
@@ -1304,7 +1441,9 @@ function readDbCredentials() {
   if (!fs.existsSync(credPath)) return {};
   try {
     return JSON.parse(fs.readFileSync(credPath, 'utf-8'));
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
 // Get database connections from Neo4j + credential status from db_credentials.json
@@ -1314,10 +1453,8 @@ ipcMain.handle('get-db-connections', async () => {
       const proc = spawnPythonProcess('neo4j_ontology.py', ['db-connections', '--json']);
 
       let stdout = '';
-      let stderr = '';
 
       proc.stdout.on('data', (data) => { stdout += data.toString(); });
-      proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
       proc.on('close', (code) => {
         if (code !== 0) {
@@ -1335,7 +1472,7 @@ ipcMain.handle('get-db-connections', async () => {
           }));
 
           resolve({ success: true, connections: enriched });
-        } catch (e) {
+        } catch {
           resolve({ success: true, connections: [] });
         }
       });
@@ -1349,7 +1486,7 @@ ipcMain.handle('get-db-connections', async () => {
 ipcMain.handle('save-db-credentials', async (event, credentials) => {
   try {
     const credPath = getDbCredentialsPath();
-    let existing = readDbCredentials();
+    const existing = readDbCredentials();
 
     for (const [name, cred] of Object.entries(credentials)) {
       existing[name] = {
@@ -1389,6 +1526,175 @@ ipcMain.handle('test-db-connection', async (event, connectionName) => {
         }
       });
     });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ============================================
+// Long-running Agent Monitoring IPC Handlers
+// ============================================
+
+ipcMain.handle('agents:start', async (event, rawConfig = {}) => {
+  if (activeAgentRun && activeAgentRun.process && !activeAgentRun.process.killed) {
+    return { success: false, error: `Agent run already active: ${activeAgentRun.runId}`, runId: activeAgentRun.runId };
+  }
+
+  const runId = `agent-${Date.now()}`;
+  const config = normalizeAgentConfig(rawConfig);
+
+  try {
+    const proc = spawnPythonProcess('anomaly_monitor.py', [
+      'run',
+      '--run-id',
+      runId,
+      '--config-json',
+      JSON.stringify(config),
+    ]);
+
+    activeAgentRun = {
+      runId,
+      process: proc,
+      status: 'starting',
+      startedAt: new Date().toISOString(),
+      metrics: {
+        cycleMs: 0,
+        candidates: 0,
+        triaged: 0,
+        emitted: 0,
+        timestamp: new Date().toISOString(),
+      },
+      stdoutBuffer: '',
+      config,
+    };
+
+    proc.stdout.on('data', (data) => {
+      handleAgentStdoutChunk(data.toString());
+    });
+
+    proc.stderr.on('data', (data) => {
+      const text = data.toString().trim();
+      if (!text) return;
+      routeAgentMessage('agent-error', {
+        runId,
+        code: 'worker_stderr',
+        message: text,
+        recoverable: true,
+        timestamp: new Date().toISOString(),
+      });
+    });
+
+    proc.on('close', (code) => {
+      const hadActive = activeAgentRun && activeAgentRun.runId === runId;
+      if (hadActive) {
+        routeAgentMessage('agent-complete', {
+          runId,
+          success: code === 0,
+          reason: code === 0 ? 'completed' : 'worker_exit_error',
+          stoppedAt: new Date().toISOString(),
+        });
+        activeAgentRun = null;
+      }
+    });
+
+    proc.on('error', (err) => {
+      routeAgentMessage('agent-error', {
+        runId,
+        code: 'worker_spawn_error',
+        message: err.message,
+        recoverable: false,
+        timestamp: new Date().toISOString(),
+      });
+      activeAgentRun = null;
+    });
+
+    return { success: true, runId, startedAt: activeAgentRun.startedAt, config };
+  } catch (error) {
+    activeAgentRun = null;
+    return { success: false, error: error.message, runId };
+  }
+});
+
+ipcMain.handle('agents:status', async (event, runId) => {
+  if (activeAgentRun && (!runId || runId === activeAgentRun.runId)) {
+    return {
+      success: true,
+      runId: activeAgentRun.runId,
+      status: activeAgentRun.status,
+      metrics: activeAgentRun.metrics,
+      lastHeartbeatAt: activeAgentRun.metrics.timestamp,
+      startedAt: activeAgentRun.startedAt,
+      config: activeAgentRun.config,
+      active: true,
+    };
+  }
+
+  if (!runId) {
+    return { success: true, active: false, status: 'idle' };
+  }
+
+  try {
+    const output = await runPythonScript('anomaly_monitor.py', ['status', '--run-id', runId]);
+    const parsed = JSON.parse(output || '{}');
+    return parsed;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('agents:stop', async (event, runId = null) => {
+  if (!activeAgentRun) {
+    return { success: false, error: 'No active agent run' };
+  }
+  if (runId && runId !== activeAgentRun.runId) {
+    return { success: false, error: `Requested run ${runId} does not match active run ${activeAgentRun.runId}` };
+  }
+  return stopActiveAgent('stopped_by_user');
+});
+
+ipcMain.handle('agents:list-events', async (event, filters = {}) => {
+  const args = ['list-events'];
+  if (filters.limit) args.push('--limit', String(filters.limit));
+  if (filters.state) args.push('--state', String(filters.state));
+  if (filters.severity) args.push('--severity', String(filters.severity));
+  if (filters.runId) args.push('--run-id', String(filters.runId));
+
+  try {
+    const output = await runPythonScript('anomaly_monitor.py', args);
+    return JSON.parse(output || '{"success":true,"events":[]}');
+  } catch (error) {
+    return { success: false, error: error.message, events: [] };
+  }
+});
+
+ipcMain.handle('agents:get-event', async (event, eventId) => {
+  try {
+    const output = await runPythonScript('anomaly_monitor.py', ['get-event', '--event-id', String(eventId)]);
+    return JSON.parse(output || '{}');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('agents:ack-event', async (event, eventId, note = '') => {
+  try {
+    const args = ['ack-event', '--event-id', String(eventId)];
+    if (note) args.push('--note', String(note));
+    const output = await runPythonScript('anomaly_monitor.py', args);
+    return JSON.parse(output || '{}');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('agents:cleanup', async (event, retentionDays = 14) => {
+  try {
+    const output = await runPythonScript('anomaly_monitor.py', [
+      'cleanup',
+      '--retention-days',
+      String(retentionDays),
+    ]);
+    return JSON.parse(output || '{}');
   } catch (error) {
     return { success: false, error: error.message };
   }

@@ -36,6 +36,13 @@
           </svg>
           <span class="nav-label">Assist</span>
         </button>
+        <button class="nav-btn" data-tab="agents" title="Long-Running Agents">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 5h7v7H4zM13 5h7v7h-7zM4 14h7v7H4z"/>
+            <path d="M16.5 14.5l1.5 1.5 3-3"/>
+          </svg>
+          <span class="nav-label">Agents</span>
+        </button>
         <button class="nav-btn" data-tab="database" title="Database">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <ellipse cx="12" cy="5" rx="9" ry="3"/>
@@ -532,6 +539,91 @@
         </div>
       </section>
 
+      <!-- Agents Tab -->
+      <section class="tab-content" id="tab-agents">
+        <header class="tab-header">
+          <h2>Long-Running Agents</h2>
+          <p>Continuously monitor live process data and triage anomalies with ontology context</p>
+        </header>
+
+        <div class="agents-topbar">
+          <div class="agents-run-controls">
+            <button class="btn btn-primary" id="btn-agents-start">Start Monitoring</button>
+            <button class="btn btn-secondary" id="btn-agents-stop" disabled>Stop</button>
+            <button class="btn btn-ghost" id="btn-agents-refresh">Refresh Events</button>
+            <button class="btn btn-ghost" id="btn-agents-cleanup">Cleanup Old</button>
+          </div>
+          <div class="agents-run-status">
+            <span class="status-chip" id="agents-status-chip">Idle</span>
+            <span class="agents-status-text" id="agents-status-text">No active run</span>
+          </div>
+        </div>
+
+        <div class="agents-config-row">
+          <label>Poll (ms)</label>
+          <input class="input input-sm" id="agents-config-poll-ms" type="number" min="5000" step="1000" value="15000">
+          <label>History (min)</label>
+          <input class="input input-sm" id="agents-config-history-min" type="number" min="10" step="10" value="360">
+          <label>Min Points</label>
+          <input class="input input-sm" id="agents-config-min-points" type="number" min="10" step="5" value="30">
+          <label>Max LLM/Cycle</label>
+          <input class="input input-sm" id="agents-config-max-llm" type="number" min="0" step="1" value="5">
+          <label>Z</label>
+          <input class="input input-sm" id="agents-config-threshold-z" type="number" min="0.5" step="0.5" value="3">
+          <label>MAD</label>
+          <input class="input input-sm" id="agents-config-threshold-mad" type="number" min="0.5" step="0.5" value="3.5">
+          <label>Stale (sec)</label>
+          <input class="input input-sm" id="agents-config-staleness-sec" type="number" min="10" step="10" value="120">
+        </div>
+
+        <div class="agents-metrics-row">
+          <div class="metric-card"><span class="metric-label">Cycle (ms)</span><span class="metric-value" id="agents-metric-cycle">0</span></div>
+          <div class="metric-card"><span class="metric-label">Candidates</span><span class="metric-value" id="agents-metric-candidates">0</span></div>
+          <div class="metric-card"><span class="metric-label">Triaged</span><span class="metric-value" id="agents-metric-triaged">0</span></div>
+          <div class="metric-card"><span class="metric-label">Emitted</span><span class="metric-value" id="agents-metric-emitted">0</span></div>
+          <div class="metric-card"><span class="metric-label">Last heartbeat</span><span class="metric-value" id="agents-metric-heartbeat">n/a</span></div>
+        </div>
+
+        <div class="agents-main">
+          <aside class="agents-feed-panel">
+            <div class="agents-feed-header">
+              <h3>Anomaly Feed</h3>
+              <div class="agents-feed-filters">
+                <select class="input input-sm" id="agents-filter-state">
+                  <option value="">All states</option>
+                  <option value="open">Open</option>
+                  <option value="acknowledged">Acknowledged</option>
+                </select>
+                <select class="input input-sm" id="agents-filter-severity">
+                  <option value="">All severity</option>
+                  <option value="critical">Critical</option>
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+                <input class="input input-sm" id="agents-filter-search" placeholder="Search tag/equipment">
+              </div>
+            </div>
+            <div class="agents-event-list" id="agents-event-list">
+              <div class="agents-empty">No anomaly events yet.</div>
+            </div>
+          </aside>
+
+          <section class="agents-detail-panel">
+            <div class="agents-detail-header">
+              <h3>Event Details</h3>
+              <div class="agents-detail-actions">
+                <button class="btn btn-sm btn-secondary" id="btn-agents-open-graph" disabled>Open in Graph</button>
+                <button class="btn btn-sm btn-ghost" id="btn-agents-ack" disabled>Acknowledge</button>
+              </div>
+            </div>
+            <div class="agents-detail-content" id="agents-event-detail">
+              <p class="text-muted">Select an anomaly event from the feed.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+
       <!-- Database Tab -->
       <section class="tab-content" id="tab-database">
         <header class="tab-header">
@@ -630,6 +722,7 @@
                   <option value="siemens-hmi">Siemens HMI</option>
                   <option value="mes">MES Layer</option>
                   <option value="troubleshooting">Troubleshooting</option>
+                  <option value="anomaly">Anomalies</option>
                   <option value="flows">Flows</option>
                 </select>
               </div>

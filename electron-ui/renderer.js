@@ -3536,6 +3536,381 @@ btnSaveDbCreds?.addEventListener('click', async () => {
     btnSaveDbCreds.disabled = false;
   }
 });
+// Agents Tab - Long-running monitoring
+// ============================================
+
+const agentsState = {
+  runId: null,
+  status: 'idle',
+  events: [],
+  selectedEventId: null,
+  listenersReady: false,
+};
+
+function getAgentsElements() {
+  return {
+    btnStart: document.getElementById('btn-agents-start'),
+    btnStop: document.getElementById('btn-agents-stop'),
+    btnRefresh: document.getElementById('btn-agents-refresh'),
+    btnCleanup: document.getElementById('btn-agents-cleanup'),
+    btnOpenGraph: document.getElementById('btn-agents-open-graph'),
+    btnAck: document.getElementById('btn-agents-ack'),
+    statusChip: document.getElementById('agents-status-chip'),
+    statusText: document.getElementById('agents-status-text'),
+    list: document.getElementById('agents-event-list'),
+    detail: document.getElementById('agents-event-detail'),
+    filterState: document.getElementById('agents-filter-state'),
+    filterSeverity: document.getElementById('agents-filter-severity'),
+    filterSearch: document.getElementById('agents-filter-search'),
+    metricCycle: document.getElementById('agents-metric-cycle'),
+    metricCandidates: document.getElementById('agents-metric-candidates'),
+    metricTriaged: document.getElementById('agents-metric-triaged'),
+    metricEmitted: document.getElementById('agents-metric-emitted'),
+    metricHeartbeat: document.getElementById('agents-metric-heartbeat'),
+    cfgPoll: document.getElementById('agents-config-poll-ms'),
+    cfgHist: document.getElementById('agents-config-history-min'),
+    cfgPoints: document.getElementById('agents-config-min-points'),
+    cfgMaxLlm: document.getElementById('agents-config-max-llm'),
+    cfgZ: document.getElementById('agents-config-threshold-z'),
+    cfgMad: document.getElementById('agents-config-threshold-mad'),
+    cfgStale: document.getElementById('agents-config-staleness-sec'),
+  };
+}
+
+function getAgentsConfigFromUI() {
+  const el = getAgentsElements();
+  return {
+    pollIntervalMs: Number(el.cfgPoll?.value || 15000),
+    historyWindowMinutes: Number(el.cfgHist?.value || 360),
+    minHistoryPoints: Number(el.cfgPoints?.value || 30),
+    maxLlmTriagesPerCycle: Number(el.cfgMaxLlm?.value || 5),
+    thresholds: {
+      z: Number(el.cfgZ?.value || 3),
+      mad: Number(el.cfgMad?.value || 3.5),
+      stalenessSec: Number(el.cfgStale?.value || 120),
+    },
+  };
+}
+
+function formatAgentTime(ts) {
+  if (!ts) return 'n/a';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return String(ts);
+  return d.toLocaleString();
+}
+
+function updateAgentStatusUi(status, text) {
+  const el = getAgentsElements();
+  if (!el.statusChip || !el.statusText) return;
+  el.statusChip.className = 'status-chip';
+  const normalized = (status || 'idle').toLowerCase();
+  if (normalized === 'running') el.statusChip.classList.add('running');
+  if (normalized === 'failed' || normalized === 'error') el.statusChip.classList.add('error');
+  el.statusChip.textContent = normalized;
+  el.statusText.textContent = text || normalized;
+  if (el.btnStart) el.btnStart.disabled = normalized === 'running' || normalized === 'starting';
+  if (el.btnStop) el.btnStop.disabled = !(normalized === 'running' || normalized === 'starting' || normalized === 'stopping');
+}
+
+function updateAgentMetrics(metrics = {}, heartbeatTs = null) {
+  const el = getAgentsElements();
+  if (el.metricCycle) el.metricCycle.textContent = String(metrics.cycleMs ?? metrics.lastCycleMs ?? 0);
+  if (el.metricCandidates) el.metricCandidates.textContent = String(metrics.candidates ?? metrics.lastCandidates ?? 0);
+  if (el.metricTriaged) el.metricTriaged.textContent = String(metrics.triaged ?? metrics.lastTriaged ?? 0);
+  if (el.metricEmitted) el.metricEmitted.textContent = String(metrics.emitted ?? metrics.lastEmitted ?? 0);
+  if (el.metricHeartbeat) el.metricHeartbeat.textContent = formatAgentTime(heartbeatTs || metrics.timestamp);
+}
+
+function getFilteredAgentEvents() {
+  const el = getAgentsElements();
+  const state = (el.filterState?.value || '').toLowerCase();
+  const severity = (el.filterSeverity?.value || '').toLowerCase();
+  const search = (el.filterSearch?.value || '').trim().toLowerCase();
+  return agentsState.events.filter((event) => {
+    if (state && String(event.state || '').toLowerCase() !== state) return false;
+    if (severity && String(event.severity || '').toLowerCase() !== severity) return false;
+    if (search) {
+      const haystack = [
+        event.summary,
+        event.source_tag,
+        event.tag_name,
+        ...(event.equipment || []),
+        ...(event.tags || []),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
+  });
+}
+
+function renderAgentEventList() {
+  const el = getAgentsElements();
+  if (!el.list) return;
+  const events = getFilteredAgentEvents();
+  if (!events.length) {
+    el.list.innerHTML = '<div class="agents-empty">No anomaly events match the current filters.</div>';
+    return;
+  }
+  el.list.innerHTML = events
+    .map((event) => {
+      const active = event.event_id === agentsState.selectedEventId ? ' active' : '';
+      const sev = String(event.severity || 'low').toLowerCase();
+      const equipment = (event.equipment || []).slice(0, 2).join(', ');
+      return `
+        <div class="agents-event-card${active}" data-event-id="${escapeHtml(event.event_id || '')}">
+          <div class="agents-event-line-top">
+            <span class="agents-severity sev-${escapeHtml(sev)}">${escapeHtml(sev)}</span>
+            <span class="agents-event-time">${escapeHtml(formatAgentTime(event.created_at))}</span>
+          </div>
+          <div class="agents-event-summary">${escapeHtml(event.summary || 'Untitled anomaly')}</div>
+          <div class="agents-event-meta">${escapeHtml(event.tag_name || event.source_tag || '')}${equipment ? ` • ${escapeHtml(equipment)}` : ''}</div>
+        </div>
+      `;
+    })
+    .join('');
+
+  el.list.querySelectorAll('.agents-event-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      const eventId = card.getAttribute('data-event-id');
+      if (!eventId) return;
+      selectAgentEvent(eventId);
+    });
+  });
+}
+
+function resolveAgentGraphTarget(event) {
+  const equipment = (event.equipment || []).find(Boolean);
+  if (equipment) return { name: equipment, type: 'Equipment' };
+  const tagName = event.tag_name || (event.tags || []).find(Boolean) || event.source_tag;
+  if (tagName) return { name: tagName, type: 'ScadaTag' };
+  return null;
+}
+
+function renderAgentEventDetails(event) {
+  const el = getAgentsElements();
+  if (!el.detail) return;
+  if (!event) {
+    el.detail.innerHTML = '<p class="text-muted">Select an anomaly event from the feed.</p>';
+    if (el.btnOpenGraph) el.btnOpenGraph.disabled = true;
+    if (el.btnAck) el.btnAck.disabled = true;
+    return;
+  }
+
+  let checks = [];
+  let causes = [];
+  let safety = [];
+  try { checks = JSON.parse(event.recommended_checks_json || '[]'); } catch (e) {}
+  try { causes = JSON.parse(event.probable_causes_json || '[]'); } catch (e) {}
+  try { safety = JSON.parse(event.safety_notes_json || '[]'); } catch (e) {}
+
+  el.detail.innerHTML = `
+    <div class="agents-detail-grid">
+      <div class="agents-detail-item"><span class="agents-detail-label">Event ID</span><span class="agents-detail-value">${escapeHtml(event.event_id || '')}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">State</span><span class="agents-detail-value">${escapeHtml(event.state || '')}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">Severity</span><span class="agents-detail-value">${escapeHtml(event.severity || '')}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">Confidence</span><span class="agents-detail-value">${escapeHtml(String(event.confidence ?? ''))}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">Category</span><span class="agents-detail-value">${escapeHtml(event.category || '')}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">Timestamp</span><span class="agents-detail-value">${escapeHtml(formatAgentTime(event.created_at))}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">Source Tag</span><span class="agents-detail-value">${escapeHtml(event.source_tag || '')}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">Tag Name</span><span class="agents-detail-value">${escapeHtml(event.tag_name || '')}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">z-score</span><span class="agents-detail-value">${escapeHtml(String(event.z_score ?? '0'))}</span></div>
+      <div class="agents-detail-item"><span class="agents-detail-label">MAD score</span><span class="agents-detail-value">${escapeHtml(String(event.mad_score ?? '0'))}</span></div>
+    </div>
+    <div>
+      <div class="agents-detail-label">Summary</div>
+      <div>${escapeHtml(event.summary || '')}</div>
+    </div>
+    <div>
+      <div class="agents-detail-label">Explanation</div>
+      <div>${escapeHtml(event.explanation || '')}</div>
+    </div>
+    <div>
+      <div class="agents-detail-label">Probable Causes</div>
+      <ul class="agents-list">${(causes || []).map((x) => `<li>${escapeHtml(String(x))}</li>`).join('') || '<li>n/a</li>'}</ul>
+    </div>
+    <div>
+      <div class="agents-detail-label">Verification Checks</div>
+      <ul class="agents-list">${(checks || []).map((x) => `<li>${escapeHtml(String(x))}</li>`).join('') || '<li>n/a</li>'}</ul>
+    </div>
+    <div>
+      <div class="agents-detail-label">Safety Notes</div>
+      <ul class="agents-list">${(safety || []).map((x) => `<li>${escapeHtml(String(x))}</li>`).join('') || '<li>n/a</li>'}</ul>
+    </div>
+  `;
+
+  if (el.btnOpenGraph) el.btnOpenGraph.disabled = !resolveAgentGraphTarget(event);
+  if (el.btnAck) el.btnAck.disabled = event.state === 'acknowledged';
+}
+
+async function selectAgentEvent(eventId) {
+  agentsState.selectedEventId = eventId;
+  const existing = agentsState.events.find((e) => e.event_id === eventId);
+  if (existing && existing.explanation && existing.recommended_checks_json) {
+    renderAgentEventList();
+    renderAgentEventDetails(existing);
+    return;
+  }
+  const detailResult = await window.api.agentsGetEvent(eventId);
+  if (detailResult.success && detailResult.event) {
+    const idx = agentsState.events.findIndex((e) => e.event_id === eventId);
+    if (idx >= 0) {
+      agentsState.events[idx] = { ...agentsState.events[idx], ...detailResult.event };
+    } else {
+      agentsState.events.unshift(detailResult.event);
+    }
+    renderAgentEventList();
+    renderAgentEventDetails(detailResult.event);
+  }
+}
+
+async function loadAgentEvents() {
+  const el = getAgentsElements();
+  const result = await window.api.agentsListEvents({
+    limit: 200,
+    state: el.filterState?.value || undefined,
+    severity: el.filterSeverity?.value || undefined,
+    runId: agentsState.runId || undefined,
+  });
+  if (!result.success) return;
+  agentsState.events = Array.isArray(result.events) ? result.events : [];
+  renderAgentEventList();
+
+  if (agentsState.selectedEventId) {
+    const selected = agentsState.events.find((e) => e.event_id === agentsState.selectedEventId);
+    renderAgentEventDetails(selected || null);
+  }
+}
+
+async function refreshAgentStatus() {
+  const status = await window.api.agentsStatus(agentsState.runId || undefined);
+  if (!status.success) {
+    updateAgentStatusUi('error', status.error || 'Failed to fetch status');
+    return;
+  }
+  if (status.active) {
+    agentsState.runId = status.runId || agentsState.runId;
+    agentsState.status = status.status || 'running';
+    updateAgentStatusUi(agentsState.status, `Run ${agentsState.runId}`);
+    updateAgentMetrics(status.metrics || {}, status.lastHeartbeatAt);
+  } else {
+    agentsState.status = 'idle';
+    updateAgentStatusUi('idle', 'No active run');
+  }
+}
+
+async function startAgentsMonitoring() {
+  const config = getAgentsConfigFromUI();
+  const result = await window.api.agentsStart(config);
+  if (!result.success) {
+    updateAgentStatusUi('error', result.error || 'Failed to start monitoring');
+    return;
+  }
+  agentsState.runId = result.runId;
+  agentsState.status = 'running';
+  updateAgentStatusUi('running', `Run ${result.runId}`);
+  await loadAgentEvents();
+}
+
+async function stopAgentsMonitoring() {
+  const result = await window.api.agentsStop(agentsState.runId || undefined);
+  if (!result.success) {
+    updateAgentStatusUi('error', result.error || 'Failed to stop monitoring');
+    return;
+  }
+  agentsState.status = 'stopped';
+  updateAgentStatusUi('stopped', 'Monitoring stopped');
+}
+
+async function acknowledgeSelectedAgentEvent() {
+  if (!agentsState.selectedEventId) return;
+  const result = await window.api.agentsAckEvent(agentsState.selectedEventId, '');
+  if (!result.success) return;
+  await loadAgentEvents();
+  const selected = agentsState.events.find((e) => e.event_id === agentsState.selectedEventId);
+  renderAgentEventDetails(selected || null);
+}
+
+function upsertRealtimeAgentEvent(payload) {
+  if (!payload || !payload.eventId) return;
+  const idx = agentsState.events.findIndex((e) => e.event_id === payload.eventId);
+  const next = {
+    event_id: payload.eventId,
+    severity: payload.severity || 'medium',
+    summary: payload.summary || 'Anomaly detected',
+    category: payload.category || 'deviation',
+    created_at: payload.createdAt || new Date().toISOString(),
+    source_tag: payload.entityRefs?.sourceTag || payload.entityRefs?.tag || '',
+    tag_name: payload.entityRefs?.tag || '',
+    state: 'open',
+  };
+  if (idx >= 0) {
+    agentsState.events[idx] = { ...agentsState.events[idx], ...next };
+  } else {
+    agentsState.events.unshift(next);
+  }
+  renderAgentEventList();
+}
+
+function ensureAgentListeners() {
+  if (agentsState.listenersReady) return;
+  agentsState.listenersReady = true;
+
+  window.api.onAgentStatus((payload) => {
+    if (!payload) return;
+    if (payload.runId) agentsState.runId = payload.runId;
+    agentsState.status = payload.state || agentsState.status;
+    updateAgentStatusUi(agentsState.status, `Run ${agentsState.runId || 'n/a'}`);
+    updateAgentMetrics(payload, payload.timestamp);
+  });
+
+  window.api.onAgentEvent((payload) => {
+    upsertRealtimeAgentEvent(payload);
+  });
+
+  window.api.onAgentError((payload) => {
+    if (!payload) return;
+    updateAgentStatusUi('error', payload.message || 'Agent runtime error');
+  });
+
+  window.api.onAgentComplete((payload) => {
+    if (!payload) return;
+    agentsState.status = payload.success ? 'stopped' : 'failed';
+    updateAgentStatusUi(agentsState.status, payload.reason || 'Run complete');
+    refreshAgentStatus();
+  });
+}
+
+function initAgentsTab() {
+  ensureAgentListeners();
+  const el = getAgentsElements();
+  if (!el.btnStart) return;
+  if (!el.btnStart.dataset.bound) {
+    el.btnStart.dataset.bound = '1';
+    el.btnStart.addEventListener('click', startAgentsMonitoring);
+    el.btnStop?.addEventListener('click', stopAgentsMonitoring);
+    el.btnRefresh?.addEventListener('click', loadAgentEvents);
+    el.btnCleanup?.addEventListener('click', async () => {
+      await window.api.agentsCleanup(14);
+      await loadAgentEvents();
+    });
+    el.btnAck?.addEventListener('click', acknowledgeSelectedAgentEvent);
+    el.btnOpenGraph?.addEventListener('click', () => {
+      const event = agentsState.events.find((e) => e.event_id === agentsState.selectedEventId);
+      if (!event) return;
+      const target = resolveAgentGraphTarget(event);
+      if (!target) return;
+      openGraphModal(target.name, target.type, event.summary || target.name);
+    });
+    el.filterState?.addEventListener('change', loadAgentEvents);
+    el.filterSeverity?.addEventListener('change', loadAgentEvents);
+    el.filterSearch?.addEventListener('input', renderAgentEventList);
+  }
+  refreshAgentStatus();
+  loadAgentEvents();
+}
 
 // Initialize graph tab when it's first shown
 navButtons.forEach(btn => {
@@ -3558,6 +3933,9 @@ navButtons.forEach(btn => {
       loadSettings();
       loadDbConnections();
     }
+    if (btn.dataset.tab === 'agents') {
+      setTimeout(initAgentsTab, 100);
+    }
   });
 });
 
@@ -3569,5 +3947,6 @@ setTimeout(() => {
   loadTiaProjects();
   loadSettings();
   loadDbConnections();
+  ensureAgentListeners();
 }, 500);
 

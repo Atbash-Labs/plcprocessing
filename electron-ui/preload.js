@@ -70,6 +70,15 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   testIgnitionConnection: (options) => ipcRenderer.invoke('test-ignition-connection', options),
+
+  // Long-running agents monitoring
+  agentsStart: (config) => ipcRenderer.invoke('agents:start', config),
+  agentsStatus: (runId) => ipcRenderer.invoke('agents:status', runId),
+  agentsStop: (runId) => ipcRenderer.invoke('agents:stop', runId),
+  agentsListEvents: (filters) => ipcRenderer.invoke('agents:list-events', filters),
+  agentsGetEvent: (eventId) => ipcRenderer.invoke('agents:get-event', eventId),
+  agentsAckEvent: (eventId, note) => ipcRenderer.invoke('agents:ack-event', eventId, note),
+  agentsCleanup: (retentionDays) => ipcRenderer.invoke('agents:cleanup', retentionDays),
   
   // Database connections
   getDbConnections: () => ipcRenderer.invoke('get-db-connections'),
@@ -91,6 +100,26 @@ contextBridge.exposeInMainWorld('api', {
     const handler = (event, data) => callback(data);
     ipcRenderer.on('stream-complete', handler);
     return () => ipcRenderer.removeListener('stream-complete', handler);
+  },
+  onAgentStatus: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('agent-status', handler);
+    return () => ipcRenderer.removeListener('agent-status', handler);
+  },
+  onAgentEvent: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('agent-event', handler);
+    return () => ipcRenderer.removeListener('agent-event', handler);
+  },
+  onAgentError: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('agent-error', handler);
+    return () => ipcRenderer.removeListener('agent-error', handler);
+  },
+  onAgentComplete: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('agent-complete', handler);
+    return () => ipcRenderer.removeListener('agent-complete', handler);
   }
 });
 

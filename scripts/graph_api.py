@@ -77,6 +77,8 @@ class GraphAPI:
         "processdeviation": "mes",
         "functionallocation": "mes",
         "vendor": "mes",
+        "agentrun": "anomaly",
+        "anomalyevent": "anomaly",
     }
 
     # Color palette for node types
@@ -91,6 +93,7 @@ class GraphAPI:
         "flows": "#E91E63",
         "overview": "#607D8B",
         "mes": "#00897B",
+        "anomaly": "#F44336",
         "other": "#9E9E9E",
     }
 
@@ -252,9 +255,11 @@ class GraphAPI:
                     WHERE center.name = $node_id 
                        OR center.name ENDS WITH $node_id
                        OR center.name CONTAINS $node_id
+                       OR center.event_id = $node_id
+                       OR center.run_id = $node_id
                     RETURN elementId(center) as id,
                            labels(center)[0] as type,
-                           center.name as label,
+                           coalesce(center.name, center.event_id, center.run_id, center.symptom, center.phrase, 'unknown') as label,
                            properties(center) as props
                     LIMIT 1
                 """
@@ -264,9 +269,11 @@ class GraphAPI:
                     WHERE center.name = $node_id 
                        OR center.name ENDS WITH $node_id
                        OR center.name CONTAINS $node_id
+                       OR center.event_id = $node_id
+                       OR center.run_id = $node_id
                     RETURN elementId(center) as id,
                            labels(center)[0] as type,
-                           center.name as label,
+                           coalesce(center.name, center.event_id, center.run_id, center.symptom, center.phrase, 'unknown') as label,
                            properties(center) as props
                     LIMIT 1
                 """

@@ -9,7 +9,11 @@ import json
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional fallback for minimal envs
+    def load_dotenv(*_args, **_kwargs):
+        return False
 from neo4j import GraphDatabase, Driver, Session
 
 
@@ -147,6 +151,8 @@ class OntologyGraph:
                 "CREATE CONSTRAINT project_name IF NOT EXISTS FOR (p:Project) REQUIRE p.name IS UNIQUE",
                 "CREATE CONSTRAINT script_name IF NOT EXISTS FOR (s:Script) REQUIRE s.name IS UNIQUE",
                 "CREATE CONSTRAINT namedquery_name IF NOT EXISTS FOR (q:NamedQuery) REQUIRE q.name IS UNIQUE",
+                "CREATE CONSTRAINT agentrun_id IF NOT EXISTS FOR (r:AgentRun) REQUIRE r.run_id IS UNIQUE",
+                "CREATE CONSTRAINT anomalyevent_id IF NOT EXISTS FOR (e:AnomalyEvent) REQUIRE e.event_id IS UNIQUE",
             ]
 
             # Regular indexes
@@ -186,6 +192,11 @@ class OntologyGraph:
                 "CREATE INDEX hmitextlist_name IF NOT EXISTS FOR (htl:HMITextList) ON (htl.name)",
                 "CREATE INDEX plctagtable_name IF NOT EXISTS FOR (pt:PLCTagTable) ON (pt.name)",
                 "CREATE INDEX plctag_name IF NOT EXISTS FOR (ptg:PLCTag) ON (ptg.name)",
+                # Agent monitoring indexes
+                "CREATE INDEX anomalyevent_created IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.created_at)",
+                "CREATE INDEX anomalyevent_state IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.state)",
+                "CREATE INDEX anomalyevent_severity IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.severity)",
+                "CREATE INDEX anomalyevent_dedup_key IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.dedup_key)",
             ]
 
             for constraint in constraints:
@@ -201,6 +212,95 @@ class OntologyGraph:
                 except Exception as e:
                     if "already exists" not in str(e).lower():
                         print(f"[WARNING] Index error: {e}")
+
+    def init_agent_monitoring_schema(self) -> None:
+        """Ensure agent monitoring labels and indexes exist."""
+        self.create_indexes()
+
+    def list_anomaly_events(
+        self,
+        limit: int = 100,
+        state: Optional[str] = None,
+        severity: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List persisted anomaly events for UI feeds."""
+        with self.session() as session:
+            clauses = []
+            params: Dict[str, Any] = {"limit": max(1, min(limit, 500))}
+            if state:
+                clauses.append("e.state = $state")
+                params["state"] = state
+            if severity:
+                clauses.append("e.severity = $severity")
+                params["severity"] = severity
+            if run_id:
+                clauses.append("e.run_id = $run_id")
+                params["run_id"] = run_id
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            query = f"""
+                MATCH (e:AnomalyEvent)
+                {where}
+                OPTIONAL MATCH (e)-[:OBSERVED_ON]->(t:ScadaTag)
+                OPTIONAL MATCH (e)-[:AFFECTS]->(eq:Equipment)
+                RETURN e, collect(DISTINCT t.name) AS tags, collect(DISTINCT eq.name) AS equipment
+                ORDER BY e.created_at DESC
+                LIMIT $limit
+            """
+            result = session.run(query, **params)
+            events: List[Dict[str, Any]] = []
+            for record in result:
+                node = record["e"]
+                props = dict(node)
+                props["tags"] = [x for x in record["tags"] if x]
+                props["equipment"] = [x for x in record["equipment"] if x]
+                events.append(props)
+            return events
+
+    def get_anomaly_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Get one anomaly event with linked context labels."""
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (e:AnomalyEvent {event_id: $event_id})
+                OPTIONAL MATCH (e)-[:OBSERVED_ON]->(t:ScadaTag)
+                OPTIONAL MATCH (e)-[:AFFECTS]->(eq:Equipment)
+                OPTIONAL MATCH (e)-[r:RELATED_TO]->(n)
+                RETURN e,
+                       collect(DISTINCT t.name) AS tags,
+                       collect(DISTINCT eq.name) AS equipment,
+                       collect(DISTINCT {type: type(r), label: labels(n)[0], name: coalesce(n.name, n.symptom, n.phrase)}) AS related
+                LIMIT 1
+                """,
+                event_id=event_id,
+            )
+            record = result.single()
+            if not record:
+                return None
+            data = dict(record["e"])
+            data["tags"] = [x for x in record["tags"] if x]
+            data["equipment"] = [x for x in record["equipment"] if x]
+            data["related"] = [
+                x for x in record["related"] if x and x.get("name")
+            ]
+            return data
+
+    def cleanup_anomaly_events(self, retention_days: int = 14) -> int:
+        """Delete old anomaly events outside retention window."""
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (e:AnomalyEvent)
+                WHERE e.created_at IS NOT NULL
+                  AND datetime(e.created_at) < datetime() - duration({days: $days})
+                WITH collect(e) AS old_events
+                FOREACH (n IN old_events | DETACH DELETE n)
+                RETURN size(old_events) AS deleted
+                """,
+                days=max(1, retention_days),
+            )
+            record = result.single()
+            return int(record["deleted"]) if record else 0
 
     def clear_all(self) -> None:
         """Clear all nodes and relationships. USE WITH CAUTION."""
@@ -4192,12 +4292,22 @@ def main():
             "tia-projects",
             "tia-project-resources",
             "db-connections",
+            "init-agent-schema",
+            "list-anomaly-events",
+            "get-anomaly-event",
+            "cleanup-anomaly-events",
         ],
         help="Command to execute",
     )
     parser.add_argument("--file", "-f", help="JSON file for import/export")
     parser.add_argument("--query", "-q", help="Query string for search")
     parser.add_argument("--project", "-p", help="Project name for project-resources")
+    parser.add_argument("--event-id", help="Event ID for get-anomaly-event")
+    parser.add_argument("--state", help="Filter anomaly events by state")
+    parser.add_argument("--severity", help="Filter anomaly events by severity")
+    parser.add_argument("--run-id", help="Filter anomaly events by run_id")
+    parser.add_argument("--limit", type=int, default=100, help="Limit results for list commands")
+    parser.add_argument("--retention-days", type=int, default=14, help="Retention window in days")
     parser.add_argument("--json", action="store_true", help="Output in JSON format")
     parser.add_argument(
         "--enrichment-status",
@@ -4437,7 +4547,43 @@ def main():
                         f"  {c['name']} ({c['database_type']}) "
                         f"- {c['url']} [{enabled}]"
                     )
+        elif args.command == "init-agent-schema":
+            graph.init_agent_monitoring_schema()
+            print("[OK] Initialized agent monitoring schema")
 
+        elif args.command == "list-anomaly-events":
+            events = graph.list_anomaly_events(
+                limit=args.limit,
+                state=args.state,
+                severity=args.severity,
+                run_id=args.run_id,
+            )
+            if args.json:
+                print(json_module.dumps(events))
+            else:
+                print(f"Anomaly events: {len(events)}")
+                for event in events:
+                    print(
+                        f"- {event.get('event_id')} {event.get('severity')} "
+                        f"{event.get('summary', '')[:80]}"
+                    )
+
+        elif args.command == "get-anomaly-event":
+            if not args.event_id:
+                print("[ERROR] --event-id required for get-anomaly-event")
+                return
+            event = graph.get_anomaly_event(args.event_id)
+            if args.json:
+                print(json_module.dumps(event or {}))
+            else:
+                if not event:
+                    print(f"[ERROR] Event not found: {args.event_id}")
+                    return
+                print(json_module.dumps(event, indent=2))
+
+        elif args.command == "cleanup-anomaly-events":
+            deleted = graph.cleanup_anomaly_events(args.retention_days)
+            print(f"[OK] Deleted {deleted} anomaly events older than {args.retention_days} days")
 
 if __name__ == "__main__":
     main()
