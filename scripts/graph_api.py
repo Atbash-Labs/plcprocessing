@@ -77,6 +77,8 @@ class GraphAPI:
         "processdeviation": "mes",
         "functionallocation": "mes",
         "vendor": "mes",
+        "agentrun": "anomaly",
+        "anomalyevent": "anomaly",
     }
 
     # Color palette for node types
@@ -91,6 +93,7 @@ class GraphAPI:
         "flows": "#E91E63",
         "overview": "#607D8B",
         "mes": "#00897B",
+        "anomaly": "#EF4444",
         "other": "#9E9E9E",
     }
 

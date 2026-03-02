@@ -186,7 +186,20 @@ class OntologyGraph:
                 "CREATE INDEX hmitextlist_name IF NOT EXISTS FOR (htl:HMITextList) ON (htl.name)",
                 "CREATE INDEX plctagtable_name IF NOT EXISTS FOR (pt:PLCTagTable) ON (pt.name)",
                 "CREATE INDEX plctag_name IF NOT EXISTS FOR (ptg:PLCTag) ON (ptg.name)",
+                # Agent monitoring indexes
+                "CREATE INDEX agentrun_status IF NOT EXISTS FOR (r:AgentRun) ON (r.status)",
+                "CREATE INDEX anomalyevent_created IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.created_at)",
+                "CREATE INDEX anomalyevent_state IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.state)",
+                "CREATE INDEX anomalyevent_severity IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.severity)",
+                "CREATE INDEX anomalyevent_dedup IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.dedup_key)",
             ]
+
+            # Agent monitoring constraints
+            agent_constraints = [
+                "CREATE CONSTRAINT agentrun_id IF NOT EXISTS FOR (r:AgentRun) REQUIRE r.run_id IS UNIQUE",
+                "CREATE CONSTRAINT anomalyevent_id IF NOT EXISTS FOR (e:AnomalyEvent) REQUIRE e.event_id IS UNIQUE",
+            ]
+            constraints.extend(agent_constraints)
 
             for constraint in constraints:
                 try:

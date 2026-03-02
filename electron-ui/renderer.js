@@ -3389,6 +3389,405 @@ navButtons.forEach(btn => {
   });
 });
 
+// ============================================
+// Agents Monitor Tab
+// ============================================
+
+const agentsState = {
+  runId: null,
+  running: false,
+  events: [],
+  selectedEventId: null,
+  filter: 'all',
+  cleanups: [],
+};
+
+// --- Controls ---
+
+const btnAgentStart = document.getElementById('btn-agent-start');
+const btnAgentStop = document.getElementById('btn-agent-stop');
+const btnAgentConfig = document.getElementById('btn-agent-config');
+const agentStatusPill = document.getElementById('agent-status-pill');
+const agentStatusText = document.getElementById('agent-status-text');
+const agentHeartbeat = document.getElementById('agent-heartbeat');
+const agentsConfigPanel = document.getElementById('agents-config-panel');
+const agentsFeedList = document.getElementById('agents-feed-list');
+const agentsEmptyState = document.getElementById('agents-empty-state');
+const agentsDetailContent = document.getElementById('agents-detail-content');
+const agentsDetailPlaceholder = document.querySelector('.agents-detail-placeholder');
+
+// Toggle config panel
+btnAgentConfig?.addEventListener('click', () => {
+  const panel = agentsConfigPanel;
+  if (panel) {
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  }
+});
+
+// Build config from UI inputs
+function getAgentConfig() {
+  return {
+    pollIntervalMs: parseInt(document.getElementById('agent-cfg-interval')?.value || '15000', 10),
+    historyWindowMinutes: parseInt(document.getElementById('agent-cfg-history')?.value || '360', 10),
+    maxLlmTriagesPerCycle: parseInt(document.getElementById('agent-cfg-llm-max')?.value || '5', 10),
+    thresholds: {
+      z: parseFloat(document.getElementById('agent-cfg-z')?.value || '3.0'),
+      mad: parseFloat(document.getElementById('agent-cfg-mad')?.value || '3.5'),
+    },
+    scope: {
+      tagRegex: document.getElementById('agent-cfg-tag-regex')?.value || undefined,
+    },
+  };
+}
+
+// Start monitor
+btnAgentStart?.addEventListener('click', async () => {
+  if (agentsState.running) return;
+
+  btnAgentStart.disabled = true;
+  setAgentStatus('starting', 'Starting...');
+
+  // Clear old events from feed
+  agentsState.events = [];
+  agentsState.selectedEventId = null;
+  renderAgentFeed();
+  hideAgentDetail();
+
+  const config = getAgentConfig();
+
+  // Attach stream listeners
+  agentsState.cleanups.forEach(fn => fn());
+  agentsState.cleanups = [];
+
+  agentsState.cleanups.push(window.api.onAgentStatus((data) => {
+    if (data.type === 'debug') return; // skip debug messages
+    if (data.state === 'running') {
+      agentsState.running = true;
+      agentsState.runId = data.runId;
+      setAgentStatus('running', 'Running');
+      btnAgentStart.disabled = true;
+      btnAgentStop.disabled = false;
+    }
+    if (data.cycleCount != null) {
+      agentHeartbeat.textContent = `Cycle #${data.cycleCount}`;
+      if (data.cycleMs) {
+        agentHeartbeat.textContent += ` (${data.cycleMs}ms)`;
+      }
+    }
+  }));
+
+  agentsState.cleanups.push(window.api.onAgentEvent((data) => {
+    addAgentEvent(data);
+  }));
+
+  agentsState.cleanups.push(window.api.onAgentError((data) => {
+    if (!data.recoverable) {
+      setAgentStatus('error', 'Error');
+    } else {
+      setAgentStatus('degraded', 'Degraded');
+    }
+    console.error('[Agent Error]', data.message);
+  }));
+
+  agentsState.cleanups.push(window.api.onAgentComplete((data) => {
+    agentsState.running = false;
+    setAgentStatus('idle', 'Idle');
+    btnAgentStart.disabled = false;
+    btnAgentStop.disabled = true;
+    agentHeartbeat.textContent = data.reason === 'completed' ? 'Stopped' : `Stopped (${data.reason})`;
+  }));
+
+  try {
+    const result = await window.api.agentsStart(config);
+    if (result.success) {
+      agentsState.runId = result.runId;
+      agentsState.running = true;
+      setAgentStatus('running', 'Running');
+      btnAgentStop.disabled = false;
+    } else {
+      setAgentStatus('error', 'Failed');
+      btnAgentStart.disabled = false;
+      console.error('[Agent] Start failed:', result.error);
+    }
+  } catch (error) {
+    setAgentStatus('error', 'Error');
+    btnAgentStart.disabled = false;
+    console.error('[Agent] Start error:', error);
+  }
+});
+
+// Stop monitor
+btnAgentStop?.addEventListener('click', async () => {
+  if (!agentsState.running) return;
+
+  btnAgentStop.disabled = true;
+  setAgentStatus('idle', 'Stopping...');
+
+  try {
+    await window.api.agentsStop(agentsState.runId);
+  } catch (error) {
+    console.error('[Agent] Stop error:', error);
+  }
+
+  agentsState.running = false;
+  setAgentStatus('idle', 'Idle');
+  btnAgentStart.disabled = false;
+  btnAgentStop.disabled = true;
+
+  // Cleanup listeners
+  agentsState.cleanups.forEach(fn => fn());
+  agentsState.cleanups = [];
+});
+
+function setAgentStatus(state, text) {
+  if (agentStatusPill) {
+    agentStatusPill.className = 'agents-status-pill ' + state;
+  }
+  if (agentStatusText) {
+    agentStatusText.textContent = text;
+  }
+}
+
+// --- Event Feed ---
+
+function addAgentEvent(eventData) {
+  // Add to front of events array
+  agentsState.events.unshift(eventData);
+
+  // Limit to 200 events in memory
+  if (agentsState.events.length > 200) {
+    agentsState.events = agentsState.events.slice(0, 200);
+  }
+
+  renderAgentFeed();
+}
+
+function renderAgentFeed() {
+  if (!agentsFeedList) return;
+
+  const filtered = agentsState.events.filter(ev => {
+    if (agentsState.filter === 'all') return true;
+    if (agentsState.filter === 'critical') return ev.severity === 'critical';
+    if (agentsState.filter === 'high') return ev.severity === 'high' || ev.severity === 'critical';
+    if (agentsState.filter === 'open') return true; // V1: all events are "open"
+    return true;
+  });
+
+  if (filtered.length === 0) {
+    if (agentsEmptyState) agentsEmptyState.style.display = 'flex';
+    // Remove existing event cards
+    agentsFeedList.querySelectorAll('.agent-event-card').forEach(el => el.remove());
+    return;
+  }
+
+  if (agentsEmptyState) agentsEmptyState.style.display = 'none';
+
+  // Remove existing event cards
+  agentsFeedList.querySelectorAll('.agent-event-card').forEach(el => el.remove());
+
+  for (const ev of filtered) {
+    const card = createEventCard(ev);
+    agentsFeedList.appendChild(card);
+  }
+}
+
+function createEventCard(ev) {
+  const card = document.createElement('div');
+  card.className = 'agent-event-card';
+  if (ev.eventId === agentsState.selectedEventId) {
+    card.classList.add('selected');
+  }
+  card.dataset.eventId = ev.eventId;
+
+  // Format time
+  const time = ev.createdAt ? formatAgentTime(ev.createdAt) : '';
+
+  // Build meta tags
+  let metaHtml = '';
+  if (ev.category) {
+    metaHtml += `<span class="tag category-tag">${ev.category}</span>`;
+  }
+  if (ev.equipment) {
+    metaHtml += `<span class="tag">${ev.equipment}</span>`;
+  }
+  if (ev.safetyRelevant) {
+    metaHtml += `<span class="tag safety-tag">Safety</span>`;
+  }
+
+  card.innerHTML = `
+    <div class="agent-event-card-header">
+      <span class="severity-badge ${ev.severity || 'low'}">${ev.severity || 'low'}</span>
+      <span class="agent-event-card-time">${time}</span>
+    </div>
+    <div class="agent-event-card-summary">${escapeHtml(ev.summary || 'Anomaly detected')}</div>
+    <div class="agent-event-card-meta">${metaHtml}</div>
+  `;
+
+  card.addEventListener('click', () => {
+    selectAgentEvent(ev);
+  });
+
+  return card;
+}
+
+function formatAgentTime(isoStr) {
+  try {
+    const d = new Date(isoStr);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
+function selectAgentEvent(ev) {
+  agentsState.selectedEventId = ev.eventId;
+
+  // Update selection in feed
+  agentsFeedList?.querySelectorAll('.agent-event-card').forEach(card => {
+    card.classList.toggle('selected', card.dataset.eventId === ev.eventId);
+  });
+
+  showAgentDetail(ev);
+}
+
+// --- Detail Panel ---
+
+function showAgentDetail(ev) {
+  if (agentsDetailPlaceholder) agentsDetailPlaceholder.style.display = 'none';
+  if (agentsDetailContent) agentsDetailContent.style.display = 'block';
+
+  // Header
+  const headerEl = document.getElementById('agents-detail-header');
+  if (headerEl) {
+    headerEl.innerHTML = `
+      <h3>${escapeHtml(ev.summary || 'Anomaly Event')}</h3>
+      <div class="detail-meta">
+        <span class="severity-badge ${ev.severity || 'low'}">${ev.severity || 'low'}</span>
+        ${ev.category ? `<span class="tag category-tag">${ev.category}</span>` : ''}
+        ${ev.sourceTag ? `<span class="tag">${ev.sourceTag}</span>` : ''}
+        ${ev.safetyRelevant ? `<span class="tag safety-tag">Safety Relevant</span>` : ''}
+        ${ev.llmAvailable === false ? `<span class="tag">Deterministic Only</span>` : ''}
+      </div>
+    `;
+  }
+
+  // Scores
+  const scoresEl = document.getElementById('agents-detail-scores');
+  if (scoresEl) {
+    const zClass = ev.zScore != null && Math.abs(ev.zScore) >= 3 ? 'anomalous' : '';
+    const madClass = ev.madScore != null && Math.abs(ev.madScore) >= 3.5 ? 'anomalous' : '';
+
+    scoresEl.innerHTML = `
+      <div class="score-card">
+        <div class="score-card-label">Z-Score</div>
+        <div class="score-card-value ${zClass}">${ev.zScore != null ? ev.zScore.toFixed(2) : 'N/A'}</div>
+      </div>
+      <div class="score-card">
+        <div class="score-card-label">MAD Score</div>
+        <div class="score-card-value ${madClass}">${ev.madScore != null ? ev.madScore.toFixed(2) : 'N/A'}</div>
+      </div>
+      <div class="score-card">
+        <div class="score-card-label">Urgency</div>
+        <div class="score-card-value ${ev.urgency === 'critical' ? 'anomalous' : ev.urgency === 'high' ? 'warning' : ''}">${ev.urgency || 'low'}</div>
+      </div>
+    `;
+  }
+
+  // Explanation
+  const explEl = document.getElementById('agents-detail-explanation');
+  if (explEl) {
+    explEl.innerHTML = `
+      <h4>Triage Explanation</h4>
+      <div class="explanation-text">${escapeHtml(ev.explanation || 'No explanation available')}</div>
+    `;
+  }
+
+  // Recommended checks
+  const checksEl = document.getElementById('agents-detail-checks');
+  if (checksEl) {
+    const checks = ev.checks || [];
+    if (checks.length > 0) {
+      checksEl.innerHTML = `
+        <h4>Recommended Checks</h4>
+        <ul>
+          ${checks.map(c => `<li>${escapeHtml(c)}</li>`).join('')}
+        </ul>
+      `;
+    } else {
+      checksEl.innerHTML = '';
+    }
+  }
+
+  // Store event data for actions
+  agentsState.selectedEvent = ev;
+}
+
+function hideAgentDetail() {
+  if (agentsDetailPlaceholder) agentsDetailPlaceholder.style.display = 'flex';
+  if (agentsDetailContent) agentsDetailContent.style.display = 'none';
+  agentsState.selectedEvent = null;
+}
+
+// --- Detail Actions ---
+
+document.getElementById('btn-agent-open-graph')?.addEventListener('click', () => {
+  const ev = agentsState.selectedEvent;
+  if (!ev) return;
+
+  // Open in graph modal: prefer equipment, fall back to tag
+  const nodeName = ev.equipment || ev.sourceTag;
+  const nodeType = ev.equipment ? 'Equipment' : 'ScadaTag';
+  if (nodeName && typeof openGraphModal === 'function') {
+    openGraphModal(nodeName, nodeType, nodeName);
+  }
+});
+
+document.getElementById('btn-agent-find-neighbors')?.addEventListener('click', () => {
+  const ev = agentsState.selectedEvent;
+  if (!ev) return;
+
+  const nodeName = ev.equipment || ev.sourceTag;
+  const nodeType = ev.equipment ? 'Equipment' : 'ScadaTag';
+  if (nodeName && typeof openGraphModal === 'function') {
+    openGraphModal(nodeName, nodeType, nodeName);
+  }
+});
+
+document.getElementById('btn-agent-copy-context')?.addEventListener('click', () => {
+  const ev = agentsState.selectedEvent;
+  if (!ev) return;
+
+  const context = {
+    summary: ev.summary,
+    severity: ev.severity,
+    category: ev.category,
+    sourceTag: ev.sourceTag,
+    equipment: ev.equipment,
+    zScore: ev.zScore,
+    madScore: ev.madScore,
+    urgency: ev.urgency,
+    explanation: ev.explanation,
+    checks: ev.checks,
+    safetyRelevant: ev.safetyRelevant,
+    createdAt: ev.createdAt,
+  };
+
+  navigator.clipboard.writeText(JSON.stringify(context, null, 2)).catch(() => {
+    console.warn('Clipboard write failed');
+  });
+});
+
+// --- Filter Chips ---
+
+document.querySelectorAll('.agents-feed-filters .filter-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('.agents-feed-filters .filter-chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    agentsState.filter = chip.dataset.filter;
+    renderAgentFeed();
+  });
+});
+
 // Check connection and load stats on startup
 setTimeout(() => {
   updateStats();

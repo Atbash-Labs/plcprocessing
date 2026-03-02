@@ -1289,3 +1289,226 @@ ipcMain.handle('test-ignition-connection', async (event, options) => {
     });
   });
 });
+
+// ============================================
+// Agents Monitoring IPC Handlers
+// ============================================
+
+// Track the active agent monitor process
+let activeAgentProcess = null;
+let activeAgentRunId = null;
+
+ipcMain.handle('agents:start', async (event, config = {}) => {
+  // Only allow one active run at a time
+  if (activeAgentProcess) {
+    return { success: false, error: 'A monitoring run is already active' };
+  }
+
+  try {
+    return new Promise((resolve) => {
+      const proc = spawnPythonProcess('anomaly_monitor.py', ['start']);
+
+      // Send config to stdin
+      proc.stdin.write(JSON.stringify(config));
+      proc.stdin.end();
+
+      activeAgentProcess = proc;
+      let resolved = false;
+
+      proc.stdout.on('data', (data) => {
+        const lines = data.toString().split('\n').filter(l => l.trim());
+        for (const line of lines) {
+          try {
+            const msg = JSON.parse(line);
+            const msgType = msg.type;
+
+            if (msgType === 'status') {
+              if (!resolved && msg.runId) {
+                activeAgentRunId = msg.runId;
+                resolved = true;
+                resolve({
+                  success: true,
+                  runId: msg.runId,
+                  startedAt: msg.ts,
+                });
+              }
+              if (mainWindow) {
+                mainWindow.webContents.send('agent-status', msg);
+              }
+            } else if (msgType === 'event') {
+              if (mainWindow) {
+                mainWindow.webContents.send('agent-event', msg);
+              }
+            } else if (msgType === 'error') {
+              if (mainWindow) {
+                mainWindow.webContents.send('agent-error', msg);
+              }
+              // Resolve with error if not yet resolved and non-recoverable
+              if (!resolved && !msg.recoverable) {
+                resolved = true;
+                resolve({ success: false, error: msg.message });
+              }
+            } else if (msgType === 'complete') {
+              if (mainWindow) {
+                mainWindow.webContents.send('agent-complete', msg);
+              }
+            }
+          } catch (e) {
+            // Non-JSON line, ignore
+          }
+        }
+      });
+
+      proc.stderr.on('data', (data) => {
+        // Debug output from monitor - forward to agent-status for debugging
+        const text = data.toString();
+        if (mainWindow && text.includes('[DEBUG]')) {
+          mainWindow.webContents.send('agent-status', {
+            type: 'debug',
+            text: text.trim(),
+          });
+        }
+      });
+
+      proc.on('close', (code) => {
+        activeAgentProcess = null;
+        const runId = activeAgentRunId;
+        activeAgentRunId = null;
+
+        if (mainWindow) {
+          mainWindow.webContents.send('agent-complete', {
+            runId,
+            success: code === 0,
+            reason: code === 0 ? 'completed' : `exit_code_${code}`,
+            stoppedAt: new Date().toISOString(),
+          });
+        }
+
+        if (!resolved) {
+          resolved = true;
+          resolve({
+            success: code === 0,
+            runId,
+            error: code !== 0 ? `Process exited with code ${code}` : undefined,
+          });
+        }
+      });
+
+      proc.on('error', (err) => {
+        activeAgentProcess = null;
+        activeAgentRunId = null;
+        if (!resolved) {
+          resolved = true;
+          resolve({ success: false, error: err.message });
+        }
+      });
+
+      // Timeout: if no response within 15s, resolve with error
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          resolve({ success: false, error: 'Monitor start timed out' });
+        }
+      }, 15000);
+    });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('agents:status', async (event, runId) => {
+  if (!activeAgentProcess || activeAgentRunId !== runId) {
+    return { success: true, status: 'stopped', runId };
+  }
+  return {
+    success: true,
+    status: 'running',
+    runId: activeAgentRunId,
+  };
+});
+
+ipcMain.handle('agents:stop', async (event, runId) => {
+  if (!activeAgentProcess) {
+    return { success: true, runId, stoppedAt: new Date().toISOString() };
+  }
+
+  return new Promise((resolve) => {
+    const proc = activeAgentProcess;
+
+    // Give it 5s to clean up, then force kill
+    const forceKillTimeout = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch (e) {
+        // Already dead
+      }
+    }, 5000);
+
+    proc.on('close', () => {
+      clearTimeout(forceKillTimeout);
+      resolve({
+        success: true,
+        runId: runId || activeAgentRunId,
+        stoppedAt: new Date().toISOString(),
+      });
+    });
+
+    // Send SIGTERM for graceful shutdown
+    try {
+      proc.kill('SIGTERM');
+    } catch (e) {
+      clearTimeout(forceKillTimeout);
+      activeAgentProcess = null;
+      activeAgentRunId = null;
+      resolve({
+        success: true,
+        runId: runId || activeAgentRunId,
+        stoppedAt: new Date().toISOString(),
+      });
+    }
+  });
+});
+
+ipcMain.handle('agents:list-events', async (event, filters = {}) => {
+  try {
+    return new Promise((resolve) => {
+      const proc = spawnPythonProcess('anomaly_monitor.py', ['list-events']);
+
+      proc.stdin.write(JSON.stringify(filters));
+      proc.stdin.end();
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => { stdout += data.toString(); });
+      proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          try {
+            resolve(JSON.parse(stdout));
+          } catch (e) {
+            resolve({ success: false, error: 'Failed to parse events response' });
+          }
+        } else {
+          resolve({ success: false, error: stderr || 'Failed to list events' });
+        }
+      });
+
+      proc.on('error', (err) => {
+        resolve({ success: false, error: err.message });
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('agents:get-event', async (event, eventId) => {
+  try {
+    const output = await runPythonScript('anomaly_monitor.py', ['get-event', '--event-id', eventId]);
+    return JSON.parse(output);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
