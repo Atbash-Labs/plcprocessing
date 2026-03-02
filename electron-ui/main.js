@@ -255,6 +255,8 @@ function sendToRenderer(channel, payload, context = '') {
   if (!canSendToRenderer()) {
     if (isAppShuttingDown) {
       console.info(`[Shutdown] Dropped renderer message ${channel}${context ? ` (${context})` : ''}`);
+    } else {
+      console.warn(`[IPC] Renderer unavailable for ${channel}${context ? ` (${context})` : ''}`);
     }
     return false;
   }
@@ -268,7 +270,10 @@ function sendToRenderer(channel, payload, context = '') {
 }
 
 function routeAgentMessage(channel, payload) {
-  sendToRenderer(channel, payload, 'agent-stream');
+  const ok = sendToRenderer(channel, payload, 'agent-stream');
+  if (!ok) {
+    console.warn(`[Agent IPC] Failed to route message on ${channel}`);
+  }
 }
 
 function parseAgentLine(line) {
@@ -309,7 +314,12 @@ function handleAgentStdoutChunk(text) {
   activeAgentRun.stdoutBuffer = lines.pop() || '';
   for (const line of lines) {
     const parsed = parseAgentLine(line);
-    if (!parsed) continue;
+    if (!parsed) {
+      if (line.trim().startsWith('[AGENT')) {
+        console.warn('[Agent stream] Unparsed line:', line.slice(0, 300));
+      }
+      continue;
+    }
     if (parsed.channel === 'agent-status' && parsed.payload) {
       activeAgentRun.status = parsed.payload.state || activeAgentRun.status;
       activeAgentRun.metrics = {
@@ -1615,6 +1625,7 @@ ipcMain.handle('agents:start', async (event, rawConfig = {}) => {
     proc.stderr.on('data', (data) => {
       const text = data.toString().trim();
       if (!text) return;
+      console.warn('[Agent stderr]', text.slice(0, 500));
       routeAgentMessage('agent-error', {
         runId,
         code: 'worker_stderr',

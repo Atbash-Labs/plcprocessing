@@ -3838,11 +3838,14 @@ async function refreshAgentStatus() {
 
 async function startAgentsMonitoring() {
   const config = getAgentsConfigFromUI();
+  console.warn('[Agents start requested]', config);
   const result = await window.api.agentsStart(config);
   if (!result.success) {
+    console.error('[Agents start failed]', result);
     updateAgentStatusUi('error', result.error || 'Failed to start monitoring');
     return;
   }
+  console.warn('[Agents started]', result);
   agentsState.runId = result.runId;
   agentsState.status = 'running';
   updateAgentStatusUi('running', `Run ${result.runId}`);
@@ -3901,6 +3904,7 @@ function ensureAgentListeners() {
 
   window.api.onAgentStatus((payload) => {
     if (!payload) return;
+    console.warn('[Agents status]', payload);
     if (payload.runId) agentsState.runId = payload.runId;
     agentsState.status = payload.state || agentsState.status;
     updateAgentStatusUi(agentsState.status, `Run ${agentsState.runId || 'n/a'}`);
@@ -3917,16 +3921,19 @@ function ensureAgentListeners() {
   });
 
   window.api.onAgentEvent((payload) => {
+    console.warn('[Agents event]', payload);
     upsertRealtimeAgentEvent(payload);
   });
 
   window.api.onAgentError((payload) => {
     if (!payload) return;
+    console.error('[Agents error]', payload);
     updateAgentStatusUi('error', payload.message || 'Agent runtime error');
   });
 
   window.api.onAgentComplete((payload) => {
     if (!payload) return;
+    console.warn('[Agents complete]', payload);
     agentsState.status = payload.success ? 'stopped' : 'failed';
     updateAgentStatusUi(agentsState.status, payload.reason || 'Run complete');
     refreshAgentStatus();
