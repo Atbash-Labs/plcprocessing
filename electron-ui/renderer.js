@@ -3909,15 +3909,20 @@ function ensureAgentListeners() {
     agentsState.status = payload.state || agentsState.status;
     updateAgentStatusUi(agentsState.status, `Run ${agentsState.runId || 'n/a'}`);
     updateAgentMetrics(payload, payload.timestamp);
-    if (payload.diagnostics) {
-      console.info('[Agents diagnostics]', payload.diagnostics);
-      if (Array.isArray(payload.diagnostics.toolCalls) && payload.diagnostics.toolCalls.length) {
-        console.info('[Agents tool calls]', payload.diagnostics.toolCalls);
-      }
-      if (Array.isArray(payload.diagnostics.staleSamples) && payload.diagnostics.staleSamples.length) {
-        console.info('[Agents stale samples]', payload.diagnostics.staleSamples);
-      }
-    }
+    const diagnostics = payload.diagnostics || {};
+    console.warn('[Agents diagnostics]', diagnostics);
+    console.warn('[Agents diagnostics summary]', {
+      monitoredTags: diagnostics.monitoredTags ?? null,
+      linkedTags: diagnostics.linkedTags ?? null,
+      validLiveCount: diagnostics.validLiveCount ?? null,
+      staleFilteredCount: diagnostics.staleFilteredCount ?? null,
+      missingTimestampCount: diagnostics.missingTimestampCount ?? null,
+      inferredTimestampCount: diagnostics.inferredTimestampCount ?? null,
+      detectedSubsystemCount: diagnostics.detectedSubsystemCount ?? null,
+      candidateSubsystemCount: diagnostics.candidateSubsystemCount ?? null,
+    });
+    console.warn('[Agents tool calls]', Array.isArray(diagnostics.toolCalls) ? diagnostics.toolCalls : []);
+    console.warn('[Agents stale samples]', Array.isArray(diagnostics.staleSamples) ? diagnostics.staleSamples : []);
   });
 
   window.api.onAgentEvent((payload) => {
