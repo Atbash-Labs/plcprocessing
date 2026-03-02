@@ -5,6 +5,7 @@ const { spawn } = require('child_process');
 
 let mainWindow;
 let activeAgentRun = null;
+let isAppShuttingDown = false;
 
 // ---------------------------------------------------------------------------
 // Python backend configuration  (works in both dev and packaged modes)
@@ -89,6 +90,10 @@ function createWindow() {
   });
 
   mainWindow.loadFile('index.html');
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
   
   // Open DevTools in development
   if (process.argv.includes('--dev')) {
@@ -105,11 +110,15 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  isAppShuttingDown = true;
+  console.info('[Shutdown] before-quit triggered');
   if (activeAgentRun && activeAgentRun.process && !activeAgentRun.process.killed) {
     try {
+      console.info(`[Shutdown] Stopping active agent run ${activeAgentRun.runId}`);
       activeAgentRun.process.kill('SIGTERM');
     } catch (err) {
       // Ignore termination errors during shutdown.
+      console.warn('[Shutdown] Failed to terminate active agent process:', err.message);
     }
   }
 });
@@ -135,27 +144,27 @@ function runPythonScript(scriptName, args = [], options = {}) {
       stdout += text;
       
       // Send streaming output to renderer if enabled
-      if (streaming && mainWindow) {
+      if (streaming) {
         // Parse and emit tool calls separately
         const lines = text.split('\n');
         for (const line of lines) {
           if (line.startsWith('[TOOL]')) {
-            mainWindow.webContents.send('tool-call', {
+            sendToRenderer('tool-call', {
               streamId,
               tool: line.replace('[TOOL]', '').trim()
-            });
+            }, 'runPythonScript stdout tool');
           } else if (line.startsWith('[DEBUG]')) {
-            mainWindow.webContents.send('stream-output', {
+            sendToRenderer('stream-output', {
               streamId,
               text: line,
               type: 'debug'
-            });
+            }, 'runPythonScript stdout debug');
           } else if (line.trim()) {
-            mainWindow.webContents.send('stream-output', {
+            sendToRenderer('stream-output', {
               streamId,
               text: line,
               type: 'output'
-            });
+            }, 'runPythonScript stdout output');
           }
         }
       }
@@ -166,21 +175,21 @@ function runPythonScript(scriptName, args = [], options = {}) {
       stderr += text;
       
       // Stream stderr too (useful for verbose output)
-      if (streaming && mainWindow) {
-        mainWindow.webContents.send('stream-output', {
+      if (streaming) {
+        sendToRenderer('stream-output', {
           streamId,
           text,
           type: 'stderr'
-        });
+        }, 'runPythonScript stderr');
       }
     });
 
     pythonProcess.on('close', (code) => {
-      if (streaming && mainWindow) {
-        mainWindow.webContents.send('stream-complete', {
+      if (streaming) {
+        sendToRenderer('stream-complete', {
           streamId,
           success: code === 0
-        });
+        }, 'runPythonScript close');
       }
       
       if (code === 0) {
@@ -233,10 +242,33 @@ function normalizeAgentConfig(config = {}) {
   };
 }
 
-function routeAgentMessage(channel, payload) {
-  if (mainWindow) {
-    mainWindow.webContents.send(channel, payload);
+function canSendToRenderer() {
+  if (!mainWindow) return false;
+  if (typeof mainWindow.isDestroyed === 'function' && mainWindow.isDestroyed()) return false;
+  const wc = mainWindow.webContents;
+  if (!wc) return false;
+  if (typeof wc.isDestroyed === 'function' && wc.isDestroyed()) return false;
+  return true;
+}
+
+function sendToRenderer(channel, payload, context = '') {
+  if (!canSendToRenderer()) {
+    if (isAppShuttingDown) {
+      console.info(`[Shutdown] Dropped renderer message ${channel}${context ? ` (${context})` : ''}`);
+    }
+    return false;
   }
+  try {
+    mainWindow.webContents.send(channel, payload);
+    return true;
+  } catch (err) {
+    console.warn(`[IPC] Failed sending ${channel}${context ? ` (${context})` : ''}: ${err.message}`);
+    return false;
+  }
+}
+
+function routeAgentMessage(channel, payload) {
+  sendToRenderer(channel, payload, 'agent-stream');
 }
 
 function parseAgentLine(line) {
@@ -566,22 +598,22 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
         stderr += text;
         
         // Stream tool calls, debug info, and Claude response from stderr to frontend
-        if (mainWindow) {
+        if (canSendToRenderer()) {
           // Check for special prefixes first (they appear on their own lines)
           if (text.includes('[TOOL]') || text.includes('[DEBUG]') || text.includes('[INFO]')) {
             const lines = text.split('\n');
             for (const line of lines) {
               if (line.startsWith('[TOOL]')) {
-                mainWindow.webContents.send('tool-call', {
+                sendToRenderer('tool-call', {
                   streamId,
                   tool: line.replace('[TOOL]', '').trim()
-                });
+                }, 'troubleshoot stderr tool');
               } else if (line.startsWith('[DEBUG]') || line.startsWith('[INFO]')) {
-                mainWindow.webContents.send('stream-output', {
+                sendToRenderer('stream-output', {
                   streamId,
                   text: line,
                   type: 'debug'
-                });
+                }, 'troubleshoot stderr debug');
               }
             }
           } else if (text.includes('[STREAM]')) {
@@ -589,29 +621,29 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
             const streamStart = text.indexOf('[STREAM]');
             const afterStream = text.substring(streamStart + 8); // 8 = length of '[STREAM]'
             if (afterStream) {
-              mainWindow.webContents.send('stream-output', {
+              sendToRenderer('stream-output', {
                 streamId,
                 text: afterStream,
                 type: 'claude-stream'
-              });
+              }, 'troubleshoot stderr stream-start');
             }
           } else if (text && !text.startsWith('[')) {
             // Continuation of Claude streaming (no prefix)
-            mainWindow.webContents.send('stream-output', {
+            sendToRenderer('stream-output', {
               streamId,
               text: text,
               type: 'claude-stream'
-            });
+            }, 'troubleshoot stderr stream-cont');
           }
         }
       });
       
       proc.on('close', (code) => {
-        if (mainWindow) {
-          mainWindow.webContents.send('stream-complete', {
+        if (canSendToRenderer()) {
+          sendToRenderer('stream-complete', {
             streamId,
             success: code === 0
-          });
+          }, 'troubleshoot close');
         }
         
         if (code === 0) {
@@ -1164,25 +1196,25 @@ ipcMain.handle('graph:ai-propose', async (event, description) => {
         stderr += text;
         
         // Stream tool calls to frontend
-        if (mainWindow && text.includes('[TOOL]')) {
+        if (canSendToRenderer() && text.includes('[TOOL]')) {
           const lines = text.split('\n');
           for (const line of lines) {
             if (line.startsWith('[TOOL]')) {
-              mainWindow.webContents.send('tool-call', {
+              sendToRenderer('tool-call', {
                 streamId,
                 tool: line.replace('[TOOL]', '').trim()
-              });
+              }, 'ai-propose stderr tool');
             }
           }
         }
       });
       
       proc.on('close', (code) => {
-        if (mainWindow) {
-          mainWindow.webContents.send('stream-complete', {
+        if (canSendToRenderer()) {
+          sendToRenderer('stream-complete', {
             streamId,
             success: code === 0
-          });
+          }, 'ai-propose close');
         }
         
         if (code === 0) {

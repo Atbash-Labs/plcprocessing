@@ -1006,6 +1006,28 @@ class AnomalyMonitor:
             }
         )
         live_values = self.api.read_tags(tag_paths)
+        tool_calls: List[Dict[str, Any]] = []
+        tool_calls.append({
+            "tool": "read_tags",
+            "request": {
+                "count": len(tag_paths),
+                "samplePaths": tag_paths[:8],
+            },
+            "result": {
+                "count": len(live_values),
+                "errorCount": sum(1 for tv in live_values if tv.error),
+                "qualityGoodCount": sum(1 for tv in live_values if is_quality_good(tv.quality)),
+                "sample": [
+                    {
+                        "path": tv.path,
+                        "quality": tv.quality,
+                        "timestamp": tv.timestamp,
+                        "error": tv.error,
+                    }
+                    for tv in live_values[:5]
+                ],
+            },
+        })
         candidates: List[Dict[str, Any]] = []
         now = datetime.now(timezone.utc)
         live_error_count = 0
@@ -1033,6 +1055,7 @@ class AnomalyMonitor:
         near_shift_count = 0
         near_shift_linked = 0
         near_shift_unlinked = 0
+        stale_samples: List[Dict[str, Any]] = []
         subsystem_shift_signals: Dict[str, Dict[str, Any]] = {}
 
         def _update_subsystem_signal(
@@ -1088,15 +1111,39 @@ class AnomalyMonitor:
                 else:
                     quality_filtered_unlinked += 1
                 continue
-            if is_stale(tv.timestamp, int(thresholds.get("stalenessSec", 120)), now=now):
+            parsed_ts = parse_timestamp(tv.timestamp)
+            age_sec = (now - parsed_ts).total_seconds() if parsed_ts is not None else None
+            stale_threshold_sec = int(thresholds.get("stalenessSec", 120))
+            if is_stale(tv.timestamp, stale_threshold_sec, now=now):
                 stale_filtered_count += 1
                 if is_linked:
                     stale_filtered_linked += 1
                 else:
                     stale_filtered_unlinked += 1
+                if len(stale_samples) < 8:
+                    stale_samples.append({
+                        "path": tv.path,
+                        "timestampRaw": tv.timestamp,
+                        "timestampParsedUtc": parsed_ts.isoformat() if parsed_ts else None,
+                        "ageSec": round(age_sec, 3) if age_sec is not None else None,
+                        "thresholdSec": stale_threshold_sec,
+                        "reason": "timestamp_parse_failed" if parsed_ts is None else "age_exceeds_threshold",
+                    })
                 continue
 
             history, history_error = self.fetch_history_values(tv.path)
+            if len(tool_calls) < 18:
+                tool_calls.append({
+                    "tool": "query_tag_history",
+                    "request": {
+                        "tagPath": tv.path,
+                        "historyWindowMinutes": int(self.config.get("historyWindowMinutes", 360)),
+                    },
+                    "result": {
+                        "historyPoints": len(history),
+                        "error": history_error,
+                    },
+                })
             if history_error:
                 history_error_count += 1
                 if is_linked:
@@ -1418,6 +1465,9 @@ class AnomalyMonitor:
             "nearShiftCount": near_shift_count,
             "nearShiftLinked": near_shift_linked,
             "nearShiftUnlinked": near_shift_unlinked,
+            "stalenessThresholdSec": int(thresholds.get("stalenessSec", 120)),
+            "staleSamples": stale_samples,
+            "timestampParseNote": "Naive timestamps are treated as local time by parse_timestamp().",
             "detectedSubsystemCount": len(detected_subsystems),
             "detectedSubsystems": detected_subsystems[:10],
             "candidateSubsystemCount": len(candidate_subsystem_counts),
@@ -1427,6 +1477,7 @@ class AnomalyMonitor:
             "maxLlmTriagesPerSubsystem": max_triage_per_subsystem,
             "llmTriagedCount": llm_total,
             "dedupSuppressedCount": dedup_suppressed_count,
+            "toolCalls": tool_calls,
         }
         metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
         return metrics

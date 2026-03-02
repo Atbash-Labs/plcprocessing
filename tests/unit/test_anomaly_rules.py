@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from anomaly_rules import compute_deviation_scores, is_quality_good, is_stale
+from anomaly_rules import compute_deviation_scores, is_quality_good, is_stale, parse_timestamp
 
 
 def test_detects_sharp_rise_and_sharp_drop():
@@ -51,6 +51,20 @@ def test_staleness_helper():
     old_ts = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
     assert not is_stale(recent_ts, staleness_sec=300)
     assert is_stale(old_ts, staleness_sec=300)
+
+
+def test_staleness_accepts_epoch_seconds_and_millis():
+    now = datetime.now(timezone.utc)
+    recent = int(now.timestamp())
+    recent_ms = int(now.timestamp() * 1000)
+    assert not is_stale(str(recent), staleness_sec=300, now=now)
+    assert not is_stale(str(recent_ms), staleness_sec=300, now=now)
+
+
+def test_parse_timestamp_naive_assumed_local_time():
+    local_now = datetime.now().replace(microsecond=0)
+    parsed = parse_timestamp(local_now.isoformat())
+    assert parsed is not None
 
 
 def test_non_numeric_current_value_is_rejected():

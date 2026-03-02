@@ -44,6 +44,15 @@ def parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
     text = str(ts).strip()
     if not text:
         return None
+    # Handle unix epoch (seconds or milliseconds) represented as numeric text.
+    if text.isdigit():
+        try:
+            raw = int(text)
+            if raw > 10_000_000_000:  # likely milliseconds
+                raw = raw / 1000.0
+            return datetime.fromtimestamp(raw, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            return None
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
@@ -51,7 +60,9 @@ def parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        # Ignition often returns naive local timestamps; assume local timezone.
+        local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+        dt = dt.replace(tzinfo=local_tz)
     return dt.astimezone(timezone.utc)
 
 

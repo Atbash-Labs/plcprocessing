@@ -3907,6 +3907,12 @@ function ensureAgentListeners() {
     updateAgentMetrics(payload, payload.timestamp);
     if (payload.diagnostics) {
       console.info('[Agents diagnostics]', payload.diagnostics);
+      if (Array.isArray(payload.diagnostics.toolCalls) && payload.diagnostics.toolCalls.length) {
+        console.info('[Agents tool calls]', payload.diagnostics.toolCalls);
+      }
+      if (Array.isArray(payload.diagnostics.staleSamples) && payload.diagnostics.staleSamples.length) {
+        console.info('[Agents stale samples]', payload.diagnostics.staleSamples);
+      }
     }
   });
 
