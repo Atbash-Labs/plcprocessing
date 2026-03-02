@@ -3580,7 +3580,7 @@ function getAgentsElements() {
 function getAgentsConfigFromUI() {
   const el = getAgentsElements();
   return {
-    pollIntervalMs: Number(el.cfgPoll?.value || 15000),
+    pollIntervalMs: Number(el.cfgPoll?.value || 1000),
     historyWindowMinutes: Number(el.cfgHist?.value || 360),
     minHistoryPoints: Number(el.cfgPoints?.value || 30),
     maxCandidatesPerSubsystem: 8,

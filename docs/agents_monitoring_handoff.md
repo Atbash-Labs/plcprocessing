@@ -93,7 +93,7 @@ python3 scripts/anomaly_monitor.py replay-fixtures --fixture-file scripts/fixtur
 ### Monitor worker manual run
 
 ```bash
-python3 scripts/anomaly_monitor.py run --run-id demo-run --config-json '{"pollIntervalMs":15000}'
+python3 scripts/anomaly_monitor.py run --run-id demo-run --config-json '{"pollIntervalMs":1000}'
 ```
 
 ### Event operations

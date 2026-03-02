@@ -238,7 +238,7 @@ def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     raw = dict(config or {})
     thresholds = raw.get("thresholds", {}) if isinstance(raw.get("thresholds"), dict) else {}
     defaults = {
-        "pollIntervalMs": 15000,
+        "pollIntervalMs": 1000,
         "historyWindowMinutes": 360,
         "minHistoryPoints": 30,
         "maxMonitoredTags": 200,
@@ -1607,7 +1607,7 @@ class AnomalyMonitor:
             "timestamp": utc_now_iso(),
         })
 
-        poll_ms = int(self.config.get("pollIntervalMs", 15000))
+        poll_ms = int(self.config.get("pollIntervalMs", 1000))
         cleanup_every = max(1, int(self.config.get("cleanupEveryCycles", 40)))
         exit_code = 0
         reason = "stopped"

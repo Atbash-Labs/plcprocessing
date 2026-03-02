@@ -209,7 +209,7 @@ function normalizeAgentConfig(config = {}) {
   const thresholds = (config && typeof config.thresholds === 'object' && config.thresholds) || {};
   const scope = (config && typeof config.scope === 'object' && config.scope) || {};
   return {
-    pollIntervalMs: Math.max(5000, Number(config.pollIntervalMs || 15000)),
+    pollIntervalMs: Math.max(1000, Number(config.pollIntervalMs || 1000)),
     historyWindowMinutes: Math.max(10, Number(config.historyWindowMinutes || 360)),
     minHistoryPoints: Math.max(10, Number(config.minHistoryPoints || 30)),
     maxMonitoredTags: Math.max(10, Number(config.maxMonitoredTags || 200)),
