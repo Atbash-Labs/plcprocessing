@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld('api', {
   agentsListEvents: (filters) => ipcRenderer.invoke('agents:list-events', filters),
   agentsGetEvent: (eventId) => ipcRenderer.invoke('agents:get-event', eventId),
   agentsAckEvent: (eventId, note) => ipcRenderer.invoke('agents:ack-event', eventId, note),
+  agentsClearEvent: (eventId, note) => ipcRenderer.invoke('agents:clear-event', eventId, note),
   agentsCleanup: (retentionDays) => ipcRenderer.invoke('agents:cleanup', retentionDays),
   
   // Database connections

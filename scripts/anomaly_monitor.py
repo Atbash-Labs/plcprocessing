@@ -615,7 +615,7 @@ class AnomalyMonitor:
     # -----------------------------
     def run_cycle(self) -> Dict[str, Any]:
         cycle_start = time.time()
-        metrics = {"candidates": 0, "triaged": 0, "emitted": 0, "cycleMs": 0}
+        metrics = {"candidates": 0, "triaged": 0, "emitted": 0, "cycleMs": 0, "diagnostics": {}}
         thresholds = self.config.get("thresholds", {})
         min_history = int(self.config.get("minHistoryPoints", 30))
 
@@ -652,6 +652,10 @@ class AnomalyMonitor:
         history_error_count = 0
         history_error_samples: List[str] = []
         valid_live_count = 0
+        quality_filtered_count = 0
+        stale_filtered_count = 0
+        insufficient_history_count = 0
+        low_history_candidate_count = 0
 
         for tv in live_values:
             if tv.error:
@@ -662,8 +666,10 @@ class AnomalyMonitor:
             valid_live_count += 1
             if not is_quality_good(tv.quality):
                 # quality gate: only emit quality anomalies if this persists via triage.
+                quality_filtered_count += 1
                 continue
             if is_stale(tv.timestamp, int(thresholds.get("stalenessSec", 120)), now=now):
+                stale_filtered_count += 1
                 continue
 
             history, history_error = self.fetch_history_values(tv.path)
@@ -673,6 +679,39 @@ class AnomalyMonitor:
                     history_error_samples.append(f"{tv.path}: {history_error}")
                 continue
             if len(history) < min_history:
+                insufficient_history_count += 1
+                # Low-history fallback: still score dramatic shifts when at least a
+                # small baseline exists, otherwise simulator users see no events.
+                if len(history) >= 5:
+                    prev_val = self._prev_values.get(tv.path)
+                    deterministic = compute_deviation_scores(
+                        current_value=tv.value,
+                        history_values=history,
+                        prev_value=prev_val,
+                        thresholds=thresholds,
+                    )
+                    curr_num = safe_float(tv.value)
+                    if curr_num is not None:
+                        self._prev_values[tv.path] = curr_num
+
+                    if deterministic.get("candidate"):
+                        deterministic["reasons"] = list(deterministic.get("reasons", [])) + ["low_history_override"]
+                        deterministic["history_quality"] = "low"
+                        context = self.get_context(tv.path)
+                        candidates.append(
+                            {
+                                "context": context,
+                                "deterministic": deterministic,
+                                "live_sample": {
+                                    "path": tv.path,
+                                    "value": tv.value,
+                                    "quality": tv.quality,
+                                    "timestamp": tv.timestamp,
+                                    "data_type": tv.data_type,
+                                },
+                            }
+                        )
+                        low_history_candidate_count += 1
                 continue
 
             prev_val = self._prev_values.get(tv.path)
@@ -744,6 +783,28 @@ class AnomalyMonitor:
             if emitted:
                 metrics["emitted"] += 1
 
+        if valid_live_count > 0 and stale_filtered_count >= max(1, int(valid_live_count * 0.8)):
+            emitted = self.emit_provider_failure_event(
+                "live_timestamp_stale",
+                f"Most live samples were stale ({stale_filtered_count}/{valid_live_count}).",
+                severity="medium",
+                category="quality-issue",
+                details={"staleCount": stale_filtered_count, "validLiveCount": valid_live_count},
+            )
+            if emitted:
+                metrics["emitted"] += 1
+
+        if valid_live_count > 0 and quality_filtered_count >= max(1, int(valid_live_count * 0.8)):
+            emitted = self.emit_provider_failure_event(
+                "live_quality_bad",
+                f"Most live samples had non-good quality ({quality_filtered_count}/{valid_live_count}).",
+                severity="medium",
+                category="quality-issue",
+                details={"qualityFilteredCount": quality_filtered_count, "validLiveCount": valid_live_count},
+            )
+            if emitted:
+                metrics["emitted"] += 1
+
         metrics["candidates"] = len(candidates)
         max_candidates = int(self.config.get("maxCandidatesPerCycle", 25))
         max_triage = int(self.config.get("maxLlmTriagesPerCycle", 5))
@@ -781,6 +842,16 @@ class AnomalyMonitor:
                 metrics["emitted"] += 1
                 self._emit_persisted_event(persisted)
 
+        metrics["diagnostics"] = {
+            "monitoredTags": len(tag_paths),
+            "validLiveCount": valid_live_count,
+            "liveErrorCount": live_error_count,
+            "qualityFilteredCount": quality_filtered_count,
+            "staleFilteredCount": stale_filtered_count,
+            "historyErrorCount": history_error_count,
+            "insufficientHistoryCount": insufficient_history_count,
+            "lowHistoryCandidateCount": low_history_candidate_count,
+        }
         metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
         return metrics
 
@@ -819,6 +890,7 @@ class AnomalyMonitor:
                     "candidates": metrics["candidates"],
                     "triaged": metrics["triaged"],
                     "emitted": metrics["emitted"],
+                    "diagnostics": metrics.get("diagnostics", {}),
                     "timestamp": utc_now_iso(),
                 })
                 if self._cycle_count % cleanup_every == 0:
@@ -879,6 +951,25 @@ class AnomalyMonitor:
                 SET e.state = 'acknowledged',
                     e.acknowledged_at = datetime(),
                     e.ack_note = $note,
+                    e.updated_at = datetime()
+                RETURN count(e) AS cnt
+                """,
+                event_id=event_id,
+                note=note or "",
+            )
+            record = result.single()
+            if not record or record["cnt"] == 0:
+                return {"success": False, "error": f"Event not found: {event_id}"}
+        return {"success": True, "eventId": event_id}
+
+    def clear_event(self, event_id: str, note: Optional[str]) -> Dict[str, Any]:
+        with self.graph.session() as session:
+            result = session.run(
+                """
+                MATCH (e:AnomalyEvent {event_id: $event_id})
+                SET e.state = 'cleared',
+                    e.cleared_at = datetime(),
+                    e.clear_note = $note,
                     e.updated_at = datetime()
                 RETURN count(e) AS cnt
                 """,
@@ -990,6 +1081,10 @@ def main() -> int:
     p_ack.add_argument("--event-id", required=True)
     p_ack.add_argument("--note")
 
+    p_clear = sub.add_parser("clear-event", help="Clear one acknowledged anomaly event")
+    p_clear.add_argument("--event-id", required=True)
+    p_clear.add_argument("--note")
+
     p_cleanup = sub.add_parser("cleanup", help="Delete old anomaly events")
     p_cleanup.add_argument("--retention-days", type=int, default=14)
 
@@ -1036,6 +1131,10 @@ def main() -> int:
 
     if args.command == "ack-event":
         print(json.dumps(monitor.ack_event(args.event_id, args.note), default=str))
+        return 0
+
+    if args.command == "clear-event":
+        print(json.dumps(monitor.clear_event(args.event_id, args.note), default=str))
         return 0
 
     if args.command == "cleanup":

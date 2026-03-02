@@ -3742,7 +3742,19 @@ function renderAgentEventDetails(event) {
   `;
 
   if (el.btnOpenGraph) el.btnOpenGraph.disabled = !resolveAgentGraphTarget(event);
-  if (el.btnAck) el.btnAck.disabled = event.state === 'acknowledged';
+  if (el.btnAck) {
+    const state = String(event.state || '').toLowerCase();
+    if (state === 'acknowledged') {
+      el.btnAck.textContent = 'Clear';
+      el.btnAck.disabled = false;
+    } else if (state === 'cleared') {
+      el.btnAck.textContent = 'Cleared';
+      el.btnAck.disabled = true;
+    } else {
+      el.btnAck.textContent = 'Acknowledge';
+      el.btnAck.disabled = false;
+    }
+  }
 }
 
 async function selectAgentEvent(eventId) {
@@ -3826,11 +3838,15 @@ async function stopAgentsMonitoring() {
 
 async function acknowledgeSelectedAgentEvent() {
   if (!agentsState.selectedEventId) return;
-  const result = await window.api.agentsAckEvent(agentsState.selectedEventId, '');
+  const selected = agentsState.events.find((e) => e.event_id === agentsState.selectedEventId);
+  const state = String(selected?.state || '').toLowerCase();
+  const result = state === 'acknowledged'
+    ? await window.api.agentsClearEvent(agentsState.selectedEventId, '')
+    : await window.api.agentsAckEvent(agentsState.selectedEventId, '');
   if (!result.success) return;
   await loadAgentEvents();
-  const selected = agentsState.events.find((e) => e.event_id === agentsState.selectedEventId);
-  renderAgentEventDetails(selected || null);
+  const refreshed = agentsState.events.find((e) => e.event_id === agentsState.selectedEventId);
+  renderAgentEventDetails(refreshed || null);
 }
 
 function upsertRealtimeAgentEvent(payload) {
@@ -3864,6 +3880,9 @@ function ensureAgentListeners() {
     agentsState.status = payload.state || agentsState.status;
     updateAgentStatusUi(agentsState.status, `Run ${agentsState.runId || 'n/a'}`);
     updateAgentMetrics(payload, payload.timestamp);
+    if (payload.diagnostics) {
+      console.debug('[Agents diagnostics]', payload.diagnostics);
+    }
   });
 
   window.api.onAgentEvent((payload) => {

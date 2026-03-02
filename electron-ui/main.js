@@ -1687,6 +1687,17 @@ ipcMain.handle('agents:ack-event', async (event, eventId, note = '') => {
   }
 });
 
+ipcMain.handle('agents:clear-event', async (event, eventId, note = '') => {
+  try {
+    const args = ['clear-event', '--event-id', String(eventId)];
+    if (note) args.push('--note', String(note));
+    const output = await runPythonScript('anomaly_monitor.py', args);
+    return JSON.parse(output || '{}');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('agents:cleanup', async (event, retentionDays = 14) => {
   try {
     const output = await runPythonScript('anomaly_monitor.py', [
