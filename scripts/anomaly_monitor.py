@@ -860,6 +860,10 @@ class AnomalyMonitor:
 
         tag_paths = [t["path"] for t in tags]
         tag_lookup = {t["path"]: t for t in tags}
+        linked_tag_count = sum(
+            1 for t in tags if (t.get("views") or t.get("equipment"))
+        )
+        unlinked_tag_count = max(0, len(tags) - linked_tag_count)
         detected_subsystems = sorted(
             {
                 (t.get("primary_subsystem") or _subsystem_ref("global", "all")).get("id", "global:all")
@@ -879,13 +883,64 @@ class AnomalyMonitor:
         insufficient_history_count = 0
         low_history_candidate_count = 0
         candidate_subsystem_counts: Dict[str, int] = {}
+        live_error_linked = 0
+        live_error_unlinked = 0
+        history_error_linked = 0
+        history_error_unlinked = 0
+        quality_filtered_linked = 0
+        quality_filtered_unlinked = 0
+        stale_filtered_linked = 0
+        stale_filtered_unlinked = 0
+        evaluated_linked = 0
+        evaluated_unlinked = 0
+        candidate_linked = 0
+        candidate_unlinked = 0
+        near_shift_count = 0
+        near_shift_linked = 0
+        near_shift_unlinked = 0
+        subsystem_shift_signals: Dict[str, Dict[str, Any]] = {}
+
+        def _update_subsystem_signal(
+            subsystem_ref: Dict[str, str], deterministic: Dict[str, Any], tag_path: str
+        ) -> None:
+            sub_id = subsystem_ref.get("id", "global:all")
+            abs_z = abs(float(deterministic.get("z_score", 0.0)))
+            z = float(deterministic.get("z_score", 0.0))
+            bucket = subsystem_shift_signals.setdefault(
+                sub_id,
+                {
+                    "subsystemId": sub_id,
+                    "subsystemType": subsystem_ref.get("type", "global"),
+                    "subsystemName": subsystem_ref.get("name", "all"),
+                    "evaluated": 0,
+                    "candidate": 0,
+                    "nearShift": 0,
+                    "sumAbsZ": 0.0,
+                    "sumZ": 0.0,
+                    "maxAbsZ": 0.0,
+                    "sampleTag": tag_path,
+                },
+            )
+            bucket["evaluated"] += 1
+            bucket["sumAbsZ"] += abs_z
+            bucket["sumZ"] += z
+            if abs_z >= 1.5:
+                bucket["nearShift"] += 1
+            if abs_z > bucket["maxAbsZ"]:
+                bucket["maxAbsZ"] = abs_z
+                bucket["sampleTag"] = tag_path
 
         for tv in live_values:
             tag_meta = tag_lookup.get(tv.path, {"path": tv.path, "name": tv.path})
             subsystem = tag_meta.get("primary_subsystem") or _subsystem_ref("global", "all")
+            is_linked = bool(tag_meta.get("views") or tag_meta.get("equipment"))
 
             if tv.error:
                 live_error_count += 1
+                if is_linked:
+                    live_error_linked += 1
+                else:
+                    live_error_unlinked += 1
                 if len(live_error_samples) < 5:
                     live_error_samples.append(f"{tv.path}: {tv.error}")
                 continue
@@ -893,14 +948,26 @@ class AnomalyMonitor:
             if not is_quality_good(tv.quality):
                 # quality gate: only emit quality anomalies if this persists via triage.
                 quality_filtered_count += 1
+                if is_linked:
+                    quality_filtered_linked += 1
+                else:
+                    quality_filtered_unlinked += 1
                 continue
             if is_stale(tv.timestamp, int(thresholds.get("stalenessSec", 120)), now=now):
                 stale_filtered_count += 1
+                if is_linked:
+                    stale_filtered_linked += 1
+                else:
+                    stale_filtered_unlinked += 1
                 continue
 
             history, history_error = self.fetch_history_values(tv.path)
             if history_error:
                 history_error_count += 1
+                if is_linked:
+                    history_error_linked += 1
+                else:
+                    history_error_unlinked += 1
                 if len(history_error_samples) < 5:
                     history_error_samples.append(f"{tv.path}: {history_error}")
                 continue
@@ -920,7 +987,39 @@ class AnomalyMonitor:
                     if curr_num is not None:
                         self._prev_values[tv.path] = curr_num
 
+                    _update_subsystem_signal(subsystem, deterministic, tv.path)
+                    if is_linked:
+                        evaluated_linked += 1
+                    else:
+                        evaluated_unlinked += 1
+                    if abs(float(deterministic.get("z_score", 0.0))) >= 1.5:
+                        near_shift_count += 1
+                        if is_linked:
+                            near_shift_linked += 1
+                        else:
+                            near_shift_unlinked += 1
+
                     if deterministic.get("candidate"):
+                        sub_bucket = subsystem_shift_signals.setdefault(
+                            subsystem.get("id", "global:all"),
+                            {
+                                "subsystemId": subsystem.get("id", "global:all"),
+                                "subsystemType": subsystem.get("type", "global"),
+                                "subsystemName": subsystem.get("name", "all"),
+                                "evaluated": 0,
+                                "candidate": 0,
+                                "nearShift": 0,
+                                "sumAbsZ": 0.0,
+                                "sumZ": 0.0,
+                                "maxAbsZ": 0.0,
+                                "sampleTag": tv.path,
+                            },
+                        )
+                        sub_bucket["candidate"] += 1
+                        if is_linked:
+                            candidate_linked += 1
+                        else:
+                            candidate_unlinked += 1
                         deterministic["reasons"] = list(deterministic.get("reasons", [])) + ["low_history_override"]
                         deterministic["history_quality"] = "low"
                         context = self.get_context(tv.path)
@@ -956,7 +1055,39 @@ class AnomalyMonitor:
             if curr_num is not None:
                 self._prev_values[tv.path] = curr_num
 
+            _update_subsystem_signal(subsystem, deterministic, tv.path)
+            if is_linked:
+                evaluated_linked += 1
+            else:
+                evaluated_unlinked += 1
+            if abs(float(deterministic.get("z_score", 0.0))) >= 1.5:
+                near_shift_count += 1
+                if is_linked:
+                    near_shift_linked += 1
+                else:
+                    near_shift_unlinked += 1
+
             if deterministic.get("candidate"):
+                sub_bucket = subsystem_shift_signals.setdefault(
+                    subsystem.get("id", "global:all"),
+                    {
+                        "subsystemId": subsystem.get("id", "global:all"),
+                        "subsystemType": subsystem.get("type", "global"),
+                        "subsystemName": subsystem.get("name", "all"),
+                        "evaluated": 0,
+                        "candidate": 0,
+                        "nearShift": 0,
+                        "sumAbsZ": 0.0,
+                        "sumZ": 0.0,
+                        "maxAbsZ": 0.0,
+                        "sampleTag": tv.path,
+                    },
+                )
+                sub_bucket["candidate"] += 1
+                if is_linked:
+                    candidate_linked += 1
+                else:
+                    candidate_unlinked += 1
                 context = self.get_context(tv.path)
                 context["subsystem"] = subsystem
                 context["subsystems"] = tag_meta.get("subsystems") or [subsystem]
@@ -1056,6 +1187,7 @@ class AnomalyMonitor:
 
         llm_total = 0
         llm_per_subsystem: Dict[str, int] = {}
+        dedup_suppressed_count = 0
 
         for candidate in shortlisted:
             subsystem = candidate.get("subsystem") or _subsystem_ref("global", "all")
@@ -1100,26 +1232,66 @@ class AnomalyMonitor:
             if persisted:
                 metrics["emitted"] += 1
                 self._emit_persisted_event(persisted)
+            else:
+                dedup_suppressed_count += 1
 
         top_candidates_by_subsystem = dict(
             sorted(candidate_subsystem_counts.items(), key=lambda item: item[1], reverse=True)[:10]
         )
+        top_shift_signals = sorted(
+            subsystem_shift_signals.values(),
+            key=lambda item: (
+                int(item.get("candidate", 0)),
+                float(item.get("maxAbsZ", 0.0)),
+                int(item.get("nearShift", 0)),
+                int(item.get("evaluated", 0)),
+            ),
+            reverse=True,
+        )[:8]
+        for item in top_shift_signals:
+            evaluated = max(1, int(item.get("evaluated", 0)))
+            item["avgAbsZ"] = round(float(item.get("sumAbsZ", 0.0)) / evaluated, 3)
+            item["avgZ"] = round(float(item.get("sumZ", 0.0)) / evaluated, 3)
+            item["shiftRatio"] = round(float(item.get("nearShift", 0)) / evaluated, 3)
+            item["candidateRatio"] = round(float(item.get("candidate", 0)) / evaluated, 3)
+            item.pop("sumAbsZ", None)
+            item.pop("sumZ", None)
+
         metrics["diagnostics"] = {
             "monitoredTags": len(tag_paths),
+            "linkedTags": linked_tag_count,
+            "unlinkedTags": unlinked_tag_count,
             "validLiveCount": valid_live_count,
             "liveErrorCount": live_error_count,
+            "liveErrorLinked": live_error_linked,
+            "liveErrorUnlinked": live_error_unlinked,
             "qualityFilteredCount": quality_filtered_count,
+            "qualityFilteredLinked": quality_filtered_linked,
+            "qualityFilteredUnlinked": quality_filtered_unlinked,
             "staleFilteredCount": stale_filtered_count,
+            "staleFilteredLinked": stale_filtered_linked,
+            "staleFilteredUnlinked": stale_filtered_unlinked,
             "historyErrorCount": history_error_count,
+            "historyErrorLinked": history_error_linked,
+            "historyErrorUnlinked": history_error_unlinked,
             "insufficientHistoryCount": insufficient_history_count,
             "lowHistoryCandidateCount": low_history_candidate_count,
+            "evaluatedLinked": evaluated_linked,
+            "evaluatedUnlinked": evaluated_unlinked,
+            "candidateLinked": candidate_linked,
+            "candidateUnlinked": candidate_unlinked,
+            "nearShiftCount": near_shift_count,
+            "nearShiftLinked": near_shift_linked,
+            "nearShiftUnlinked": near_shift_unlinked,
             "detectedSubsystemCount": len(detected_subsystems),
             "detectedSubsystems": detected_subsystems[:10],
             "candidateSubsystemCount": len(candidate_subsystem_counts),
             "candidateBySubsystem": top_candidates_by_subsystem,
+            "subsystemShiftSignals": top_shift_signals,
             "maxCandidatesPerSubsystem": max_candidates_per_subsystem,
             "maxLlmTriagesPerSubsystem": max_triage_per_subsystem,
             "llmTriagedCount": llm_total,
+            "dedupSuppressedCount": dedup_suppressed_count,
         }
         metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
         return metrics
