@@ -65,6 +65,58 @@ def _preview_value(value: Any, max_len: int = 120) -> Any:
     return text[: max_len - 3] + "..."
 
 
+def make_default_diagnostics(
+    *,
+    staleness_threshold_sec: int = 120,
+    phase: str = "initializing",
+    reason: str = "",
+) -> Dict[str, Any]:
+    return {
+        "phase": phase,
+        "reason": reason,
+        "monitoredTags": 0,
+        "linkedTags": 0,
+        "unlinkedTags": 0,
+        "validLiveCount": 0,
+        "missingTimestampCount": 0,
+        "inferredTimestampCount": 0,
+        "liveErrorCount": 0,
+        "liveErrorLinked": 0,
+        "liveErrorUnlinked": 0,
+        "qualityFilteredCount": 0,
+        "qualityFilteredLinked": 0,
+        "qualityFilteredUnlinked": 0,
+        "staleFilteredCount": 0,
+        "staleFilteredLinked": 0,
+        "staleFilteredUnlinked": 0,
+        "historyErrorCount": 0,
+        "historyErrorLinked": 0,
+        "historyErrorUnlinked": 0,
+        "insufficientHistoryCount": 0,
+        "lowHistoryCandidateCount": 0,
+        "evaluatedLinked": 0,
+        "evaluatedUnlinked": 0,
+        "candidateLinked": 0,
+        "candidateUnlinked": 0,
+        "nearShiftCount": 0,
+        "nearShiftLinked": 0,
+        "nearShiftUnlinked": 0,
+        "stalenessThresholdSec": staleness_threshold_sec,
+        "staleSamples": [],
+        "timestampParseNote": "Naive timestamps are treated as local time by parse_timestamp().",
+        "detectedSubsystemCount": 0,
+        "detectedSubsystems": [],
+        "candidateSubsystemCount": 0,
+        "candidateBySubsystem": {},
+        "subsystemShiftSignals": [],
+        "maxCandidatesPerSubsystem": 0,
+        "maxLlmTriagesPerSubsystem": 0,
+        "llmTriagedCount": 0,
+        "dedupSuppressedCount": 0,
+        "toolCalls": [],
+    }
+
+
 def _canonical_subsystem_type(kind: Any) -> str:
     value = str(kind or "").strip().lower()
     if value in {"view", "views"}:
@@ -970,8 +1022,19 @@ class AnomalyMonitor:
     # -----------------------------
     def run_cycle(self) -> Dict[str, Any]:
         cycle_start = time.time()
-        metrics = {"candidates": 0, "triaged": 0, "emitted": 0, "cycleMs": 0, "diagnostics": {}}
         thresholds = self.config.get("thresholds", {})
+        stale_threshold_sec = int(thresholds.get("stalenessSec", 120))
+        metrics = {
+            "candidates": 0,
+            "triaged": 0,
+            "emitted": 0,
+            "cycleMs": 0,
+            "diagnostics": make_default_diagnostics(
+                staleness_threshold_sec=stale_threshold_sec,
+                phase="cycle_start",
+                reason="cycle_initialized",
+            ),
+        }
         min_history = int(self.config.get("minHistoryPoints", 30))
         max_candidates_total = max(1, int(self.config.get("maxCandidatesPerCycle", 25)))
         max_candidates_per_subsystem = max(1, int(self.config.get("maxCandidatesPerSubsystem", 8)))
@@ -987,6 +1050,8 @@ class AnomalyMonitor:
             )
             if emitted:
                 metrics["emitted"] += 1
+            metrics["diagnostics"]["phase"] = "cycle_early_exit"
+            metrics["diagnostics"]["reason"] = "ignition_not_configured"
             metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
             return metrics
 
@@ -999,6 +1064,8 @@ class AnomalyMonitor:
                 "recoverable": True,
                 "timestamp": utc_now_iso(),
             })
+            metrics["diagnostics"]["phase"] = "cycle_early_exit"
+            metrics["diagnostics"]["reason"] = "no_tags_found"
             metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
             return metrics
 
@@ -1468,6 +1535,11 @@ class AnomalyMonitor:
             item.pop("sumZ", None)
 
         metrics["diagnostics"] = {
+            **make_default_diagnostics(
+                staleness_threshold_sec=int(thresholds.get("stalenessSec", 120)),
+                phase="cycle_complete",
+                reason="ok",
+            ),
             "monitoredTags": len(tag_paths),
             "linkedTags": linked_tag_count,
             "unlinkedTags": unlinked_tag_count,
@@ -1519,6 +1591,11 @@ class AnomalyMonitor:
     def run_forever(self) -> int:
         self.init_schema()
         self.upsert_run("running")
+        startup_diag = make_default_diagnostics(
+            staleness_threshold_sec=int(self.config.get("thresholds", {}).get("stalenessSec", 120)),
+            phase="startup",
+            reason="worker_started",
+        )
         emit("AGENT_STATUS", {
             "runId": self.run_id,
             "state": "running",
@@ -1526,6 +1603,7 @@ class AnomalyMonitor:
             "candidates": 0,
             "triaged": 0,
             "emitted": 0,
+            "diagnostics": startup_diag,
             "timestamp": utc_now_iso(),
         })
 
@@ -1553,6 +1631,12 @@ class AnomalyMonitor:
                 if self._cycle_count % cleanup_every == 0:
                     deleted = self.cleanup_retention()
                     if deleted > 0:
+                        cleanup_diag = make_default_diagnostics(
+                            staleness_threshold_sec=int(self.config.get("thresholds", {}).get("stalenessSec", 120)),
+                            phase="retention_cleanup",
+                            reason="cleanup_complete",
+                        )
+                        cleanup_diag["emittedCleanupCount"] = deleted
                         emit("AGENT_STATUS", {
                             "runId": self.run_id,
                             "state": "retention_cleanup",
@@ -1560,6 +1644,7 @@ class AnomalyMonitor:
                             "candidates": 0,
                             "triaged": 0,
                             "emitted": deleted,
+                            "diagnostics": cleanup_diag,
                             "timestamp": utc_now_iso(),
                         })
             except Exception as exc:
@@ -1570,6 +1655,22 @@ class AnomalyMonitor:
                     "code": "cycle_error",
                     "message": str(exc),
                     "recoverable": True,
+                    "timestamp": utc_now_iso(),
+                })
+                error_diag = make_default_diagnostics(
+                    staleness_threshold_sec=int(self.config.get("thresholds", {}).get("stalenessSec", 120)),
+                    phase="cycle_error",
+                    reason="exception",
+                )
+                error_diag["errorMessage"] = str(exc)
+                emit("AGENT_STATUS", {
+                    "runId": self.run_id,
+                    "state": "running",
+                    "cycleMs": int((time.time() - cycle_started) * 1000),
+                    "candidates": 0,
+                    "triaged": 0,
+                    "emitted": 0,
+                    "diagnostics": error_diag,
                     "timestamp": utc_now_iso(),
                 })
 

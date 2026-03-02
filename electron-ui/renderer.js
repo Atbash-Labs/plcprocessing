@@ -3912,6 +3912,8 @@ function ensureAgentListeners() {
     const diagnostics = payload.diagnostics || {};
     console.warn('[Agents diagnostics]', diagnostics);
     console.warn('[Agents diagnostics summary]', {
+      phase: diagnostics.phase ?? null,
+      reason: diagnostics.reason ?? null,
       monitoredTags: diagnostics.monitoredTags ?? null,
       linkedTags: diagnostics.linkedTags ?? null,
       validLiveCount: diagnostics.validLiveCount ?? null,
