@@ -104,6 +104,31 @@ def infer_tag_group(tag_path: Optional[str], folder_name: Optional[str] = None) 
     return parts[0]
 
 
+def _last_segment_from_tag_path(tag_path: Optional[str]) -> str:
+    raw = str(tag_path or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("[") and "]" in raw:
+        raw = raw.split("]", 1)[1]
+    raw = raw.strip("/")
+    if not raw:
+        return ""
+    parts = [p.strip() for p in raw.split("/") if p.strip()]
+    return parts[-1] if parts else raw
+
+
+def _looks_like_live_tag_path(value: Optional[str]) -> bool:
+    path = str(value or "").strip()
+    if not path:
+        return False
+    # Typical Ignition path shape: [provider]Folder/Tag or Folder/Tag
+    if path.startswith("[") and "]" in path:
+        return True
+    if "/" in path and not any(ch in path for ch in "{}()"):
+        return True
+    return False
+
+
 def derive_subsystems_for_tag(
     tag_meta: Dict[str, Any],
     subsystem_mode: str = "auto",
@@ -171,6 +196,7 @@ def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "subsystemMode": "auto",
             "subsystemPriority": list(DEFAULT_SUBSYSTEM_PRIORITY),
             "subsystemInclude": [],
+            "includeUnlinkedTags": False,
         },
         "thresholds": {
             "z": 3.0,
@@ -207,6 +233,7 @@ def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         for x in scope_cfg.get("subsystemInclude", [])
         if str(x).strip()
     ]
+    scope_cfg["includeUnlinkedTags"] = bool(scope_cfg.get("includeUnlinkedTags", False))
     return cfg
 
 
@@ -316,36 +343,118 @@ class AnomalyMonitor:
             for x in (scope.get("subsystemInclude") or [])
             if str(x).strip()
         }
+        include_unlinked = bool(scope.get("includeUnlinkedTags", False))
+        tag_map: Dict[str, Dict[str, Any]] = {}
+
+        def upsert_tag(
+            *,
+            tag_path: str,
+            tag_name: str,
+            folder_name: str = "",
+            views: Optional[List[str]] = None,
+            equipment: Optional[List[str]] = None,
+            source: str = "unknown",
+        ) -> None:
+            path = str(tag_path or "").strip()
+            if not path:
+                return
+            entry = tag_map.setdefault(
+                path,
+                {
+                    "path": path,
+                    "name": str(tag_name or _last_segment_from_tag_path(path) or path),
+                    "folder_name": str(folder_name or ""),
+                    "views": [],
+                    "equipment": [],
+                    "source": source,
+                    "bound_to_view": False,
+                },
+            )
+            if source == "view_binding":
+                entry["bound_to_view"] = True
+                entry["source"] = source
+            if folder_name and not entry.get("folder_name"):
+                entry["folder_name"] = str(folder_name)
+            if tag_name and (
+                not entry.get("name")
+                or entry.get("name") == entry.get("path")
+                or entry.get("name") == _last_segment_from_tag_path(entry.get("path"))
+            ):
+                entry["name"] = str(tag_name)
+            for view_name in views or []:
+                v = str(view_name or "").strip()
+                if v and v not in entry["views"]:
+                    entry["views"].append(v)
+            for eq_name in equipment or []:
+                eq = str(eq_name or "").strip()
+                if eq and eq not in entry["equipment"]:
+                    entry["equipment"].append(eq)
 
         with self.graph.session() as session:
-            result = session.run(
+            bound_result = session.run(
+                """
+                MATCH (v:View)-[:HAS_COMPONENT]->(c:ViewComponent)-[r:BINDS_TO]->(n)
+                WHERE r.tag_path IS NOT NULL
+                  AND trim(r.tag_path) <> ''
+                  AND toLower(coalesce(r.binding_type, 'tag')) = 'tag'
+                OPTIONAL MATCH (eq:Equipment)-[*1..2]-(n)
+                RETURN DISTINCT trim(r.tag_path) AS tag_path,
+                                coalesce(n.name, '') AS tag_name,
+                                collect(DISTINCT v.name) AS views,
+                                collect(DISTINCT eq.name) AS equipment
+                LIMIT $limit
+                """,
+                limit=max_tags * 4,
+            )
+            for r in bound_result:
+                path = str(r["tag_path"] or "").strip()
+                if not _looks_like_live_tag_path(path):
+                    continue
+                upsert_tag(
+                    tag_path=path,
+                    tag_name=str(r["tag_name"] or _last_segment_from_tag_path(path)),
+                    folder_name=infer_tag_group(path) or "",
+                    views=[x for x in (r["views"] or []) if x],
+                    equipment=[x for x in (r["equipment"] or []) if x],
+                    source="view_binding",
+                )
+
+            scada_result = session.run(
                 """
                 MATCH (t:ScadaTag)
-                WHERE coalesce(t.opc_item_path, t.name) IS NOT NULL
-                  AND coalesce(t.opc_item_path, t.name) <> ''
+                WHERE t.opc_item_path IS NOT NULL
+                  AND trim(t.opc_item_path) <> ''
                 OPTIONAL MATCH (c:ViewComponent)-[:BINDS_TO]->(t)
                 OPTIONAL MATCH (v:View)-[:HAS_COMPONENT]->(c)
                 OPTIONAL MATCH (eq:Equipment)-[*1..2]-(t)
-                RETURN DISTINCT coalesce(t.opc_item_path, t.name) AS tag_path,
+                RETURN DISTINCT trim(t.opc_item_path) AS tag_path,
                                 coalesce(t.name, t.opc_item_path) AS tag_name,
                                 coalesce(t.folder_name, '') AS folder_name,
                                 collect(DISTINCT v.name) AS views,
                                 collect(DISTINCT eq.name) AS equipment
                 LIMIT $limit
                 """,
-                limit=max_tags * 3,
+                limit=max_tags * 6,
             )
-            tags = [
-                {
-                    "path": r["tag_path"],
-                    "name": r["tag_name"],
-                    "folder_name": r["folder_name"] or "",
-                    "views": [x for x in (r["views"] or []) if x],
-                    "equipment": [x for x in (r["equipment"] or []) if x],
-                }
-                for r in result
-                if r["tag_path"]
-            ]
+            for r in scada_result:
+                path = str(r["tag_path"] or "").strip()
+                if not _looks_like_live_tag_path(path):
+                    continue
+                upsert_tag(
+                    tag_path=path,
+                    tag_name=str(r["tag_name"] or _last_segment_from_tag_path(path)),
+                    folder_name=str(r["folder_name"] or ""),
+                    views=[x for x in (r["views"] or []) if x],
+                    equipment=[x for x in (r["equipment"] or []) if x],
+                    source="scada_tag",
+                )
+
+        tags = list(tag_map.values())
+
+        if not include_unlinked:
+            linked = [t for t in tags if (t.get("views") or t.get("equipment") or t.get("bound_to_view"))]
+            if linked:
+                tags = linked
 
         if tag_regex:
             import re
@@ -368,6 +477,14 @@ class AnomalyMonitor:
                 or t["path"].lower() in equipment_tags
                 or any(str(eq).strip().lower() in equipment_tags for eq in t.get("equipment", []))
             ]
+
+        tags.sort(
+            key=lambda t: (
+                0 if t.get("bound_to_view") else 1,
+                0 if (t.get("views") or t.get("equipment")) else 1,
+                str(t.get("path", "")),
+            )
+        )
 
         for tag in tags:
             subsystems, primary = derive_subsystems_for_tag(
@@ -477,11 +594,29 @@ class AnomalyMonitor:
                 tag=tag_path,
             )
             record = result.single()
+            fallback_views: List[str] = []
+            fallback_equipment: List[str] = []
+            fallback_result = session.run(
+                """
+                MATCH (v:View)-[:HAS_COMPONENT]->(vc:ViewComponent)-[r:BINDS_TO]->(n)
+                WHERE r.tag_path = $tag
+                OPTIONAL MATCH (eq:Equipment)-[*1..2]-(n)
+                RETURN collect(DISTINCT v.name) AS views,
+                       collect(DISTINCT eq.name) AS equipment
+                LIMIT 1
+                """,
+                tag=tag_path,
+            ).single()
+            if fallback_result:
+                fallback_views = [x for x in (fallback_result["views"] or []) if x]
+                fallback_equipment = [x for x in (fallback_result["equipment"] or []) if x]
+
             if not record:
                 return {
                     "tag_path": tag_path,
-                    "views": [],
-                    "equipment": [],
+                    "tag_name": _last_segment_from_tag_path(tag_path) or tag_path,
+                    "views": fallback_views,
+                    "equipment": fallback_equipment,
                     "group": infer_tag_group(tag_path),
                     "symptoms": [],
                     "causes": [],
@@ -491,9 +626,9 @@ class AnomalyMonitor:
             node = record["t"]
             return {
                 "tag_path": tag_path,
-                "tag_name": node.get("name") if node else tag_path,
-                "views": [x for x in record["views"] if x],
-                "equipment": [x for x in record["equipment"] if x],
+                "tag_name": node.get("name") if node else (_last_segment_from_tag_path(tag_path) or tag_path),
+                "views": sorted(set([x for x in record["views"] if x] + fallback_views)),
+                "equipment": sorted(set([x for x in record["equipment"] if x] + fallback_equipment)),
                 "group": infer_tag_group(tag_path, node.get("folder_name") if node else None),
                 "symptoms": [x for x in record["symptoms"] if x],
                 "causes": [x for x in record["causes"] if x],

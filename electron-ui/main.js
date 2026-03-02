@@ -228,6 +228,7 @@ function normalizeAgentConfig(config = {}) {
         ? scope.subsystemPriority.map(String)
         : ['view', 'equipment', 'group', 'global'],
       subsystemInclude: Array.isArray(scope.subsystemInclude) ? scope.subsystemInclude.map(String) : [],
+      includeUnlinkedTags: Boolean(scope.includeUnlinkedTags),
     },
   };
 }

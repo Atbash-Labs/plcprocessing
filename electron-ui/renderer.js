@@ -3594,6 +3594,7 @@ function getAgentsConfigFromUI() {
     scope: {
       subsystemMode: 'auto',
       subsystemPriority: ['view', 'equipment', 'group', 'global'],
+      includeUnlinkedTags: false,
     },
   };
 }

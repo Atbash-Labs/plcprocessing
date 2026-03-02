@@ -1,4 +1,9 @@
-from anomaly_monitor import derive_subsystems_for_tag, infer_tag_group
+from anomaly_monitor import (
+    _last_segment_from_tag_path,
+    _looks_like_live_tag_path,
+    derive_subsystems_for_tag,
+    infer_tag_group,
+)
 
 
 def test_infer_tag_group_prefers_folder_name():
@@ -54,3 +59,16 @@ def test_derive_subsystems_falls_back_to_global_when_no_ontology_links():
     )
     assert len(subsystems) == 1
     assert primary["id"] == "global:all"
+
+
+def test_tag_path_helpers_identify_live_paths():
+    assert _looks_like_live_tag_path("[default]Line/Pump/Speed")
+    assert _looks_like_live_tag_path("Line/Pump/Speed")
+    assert not _looks_like_live_tag_path("SimpleTagNameOnly")
+    assert not _looks_like_live_tag_path("{../props.value}")
+
+
+def test_last_segment_from_tag_path():
+    assert _last_segment_from_tag_path("[default]Line/Pump/Speed") == "Speed"
+    assert _last_segment_from_tag_path("Line/Pump/Speed") == "Speed"
+    assert _last_segment_from_tag_path("Speed") == "Speed"
