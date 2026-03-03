@@ -244,11 +244,13 @@ def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "maxMonitoredTags": 200,
         "maxCandidatesPerCycle": 25,
         "maxCandidatesPerSubsystem": 8,
-        "maxLlmTriagesPerCycle": 5,
-        "maxLlmTriagesPerSubsystem": 2,
+        "maxLlmTriagesPerCycle": 0,
+        "maxLlmTriagesPerSubsystem": 0,
         "dedupCooldownMinutes": 10,
         "retentionDays": 14,
         "cleanupEveryCycles": 40,
+        "historyCacheTtlSec": 30,
+        "tagCacheTtlSec": 60,
         "runMode": "live",
         "scope": {
             "project": None,
@@ -337,6 +339,9 @@ class AnomalyMonitor:
         self._running = True
         self._cycle_count = 0
         self._prev_values: Dict[str, float] = {}
+        self._history_cache: Dict[str, Dict[str, Any]] = {}
+        self._tag_cache: Optional[Dict[str, Any]] = None
+        self._tag_cache_at: float = 0.0
 
     # -----------------------------
     # Schema / run lifecycle
@@ -389,6 +394,17 @@ class AnomalyMonitor:
     # Tag and context collection
     # -----------------------------
     def get_monitored_tags(self) -> List[Dict[str, Any]]:
+        ttl = float(self.config.get("tagCacheTtlSec", 60))
+        now = time.time()
+        if self._tag_cache is not None and ttl > 0 and (now - self._tag_cache_at) < ttl:
+            return self._tag_cache
+
+        result = self._fetch_monitored_tags()
+        self._tag_cache = result
+        self._tag_cache_at = time.time()
+        return result
+
+    def _fetch_monitored_tags(self) -> List[Dict[str, Any]]:
         max_tags = int(self.config.get("maxMonitoredTags", 200))
         scope = self.config.get("scope", {})
         tag_regex = scope.get("tagRegex")
@@ -589,6 +605,12 @@ class AnomalyMonitor:
             if not rows and "tagHistory" in history_data and isinstance(history_data["tagHistory"], list):
                 rows = history_data["tagHistory"]
 
+        prefixed = self.api._ensure_provider_prefix(tag_path) if hasattr(self, "api") else tag_path
+        stripped = tag_path
+        if stripped.startswith("[") and "]" in stripped:
+            stripped = stripped[stripped.index("]") + 1:]
+        path_variants = {tag_path, prefixed, stripped}
+
         for row in rows:
             if isinstance(row, (int, float, str)):
                 val = safe_float(row)
@@ -600,21 +622,28 @@ class AnomalyMonitor:
             candidate = None
             if "value" in row:
                 candidate = row.get("value")
-            elif tag_path in row:
-                candidate = row.get(tag_path)
             else:
-                # Wide format often has timestamp + one tag column.
-                for k, v in row.items():
-                    if k.lower() in {"timestamp", "ts", "t", "time"}:
-                        continue
-                    candidate = v
-                    break
+                matched_key = next((k for k in path_variants if k in row), None)
+                if matched_key:
+                    candidate = row.get(matched_key)
+                elif len(row) <= 2:
+                    for k, v in row.items():
+                        if k.lower() in {"timestamp", "ts", "t", "time"}:
+                            continue
+                        candidate = v
+                        break
             val = safe_float(candidate)
             if val is not None:
                 values.append(val)
         return values
 
     def fetch_history_values(self, tag_path: str) -> tuple[List[float], Optional[str]]:
+        ttl = float(self.config.get("historyCacheTtlSec", 30))
+        now = time.time()
+        cached = self._history_cache.get(tag_path)
+        if cached and ttl > 0 and (now - cached["fetched_at"]) < ttl:
+            return list(cached["values"]), cached.get("error")
+
         minutes = int(self.config.get("historyWindowMinutes", 360))
         end_dt = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(minutes=minutes)
@@ -627,8 +656,61 @@ class AnomalyMonitor:
             return_format="Wide",
         )
         if isinstance(data, dict) and data.get("error"):
-            return [], str(data.get("error"))
-        return self._extract_history_values(data, tag_path), None
+            err = str(data.get("error"))
+            self._history_cache[tag_path] = {"values": [], "error": err, "fetched_at": now}
+            return [], err
+        values = self._extract_history_values(data, tag_path)
+        self._history_cache[tag_path] = {"values": values, "error": None, "fetched_at": now}
+        return values, None
+
+    def fetch_history_batch(self, tag_paths: List[str]) -> Dict[str, Tuple[List[float], Optional[str]]]:
+        """Fetch history for many tags, using cache and batched API calls."""
+        ttl = float(self.config.get("historyCacheTtlSec", 30))
+        now = time.time()
+        results: Dict[str, Tuple[List[float], Optional[str]]] = {}
+        uncached: List[str] = []
+
+        for path in tag_paths:
+            cached = self._history_cache.get(path)
+            if cached and ttl > 0 and (now - cached["fetched_at"]) < ttl:
+                results[path] = (list(cached["values"]), cached.get("error"))
+            else:
+                uncached.append(path)
+
+        if not uncached:
+            return results
+
+        minutes = int(self.config.get("historyWindowMinutes", 360))
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(minutes=minutes)
+        return_size = max(100, int(self.config.get("minHistoryPoints", 30)) * 4)
+        batch_size = 20
+
+        for i in range(0, len(uncached), batch_size):
+            batch = uncached[i : i + batch_size]
+            data = self.api.query_tag_history(
+                batch,
+                start_dt.isoformat(),
+                end_dt.isoformat(),
+                return_size=return_size,
+                aggregation_mode="Average",
+                return_format="Wide",
+            )
+            fetch_ts = time.time()
+
+            if isinstance(data, dict) and data.get("error"):
+                err = str(data.get("error"))
+                for path in batch:
+                    results[path] = ([], err)
+                    self._history_cache[path] = {"values": [], "error": err, "fetched_at": fetch_ts}
+                continue
+
+            for path in batch:
+                values = self._extract_history_values(data, path)
+                results[path] = (values, None)
+                self._history_cache[path] = {"values": values, "error": None, "fetched_at": fetch_ts}
+
+        return results
 
     def get_context(self, tag_path: str) -> Dict[str, Any]:
         with self.graph.session() as session:
@@ -648,7 +730,7 @@ class AnomalyMonitor:
                        collect(DISTINCT eq.name) AS equipment,
                        collect(DISTINCT s.symptom) AS symptoms,
                        collect(DISTINCT fc.cause) AS causes,
-                       collect(DISTINCT p.pattern_name) AS patterns,
+                       collect(DISTINCT p.name) AS patterns,
                        collect(DISTINCT se.name) AS safety
                 LIMIT 1
                 """,
@@ -1024,8 +1106,6 @@ class AnomalyMonitor:
         cycle_start = time.time()
         thresholds = self.config.get("thresholds", {})
         stale_threshold_sec = int(thresholds.get("stalenessSec", 120))
-        progress_emit_interval_tags = max(5, int(self.config.get("progressEveryTags", 10)))
-        progress_emit_interval_sec = max(1, int(self.config.get("progressEverySec", 2)))
         metrics = {
             "candidates": 0,
             "triaged": 0,
@@ -1083,6 +1163,24 @@ class AnomalyMonitor:
                 for t in tags
             }
         )
+
+        subsystem_tag_map: Dict[str, Dict[str, Any]] = {}
+        for t in tags:
+            sub = t.get("primary_subsystem") or _subsystem_ref("global", "all")
+            sub_id = sub.get("id", "global:all")
+            bucket = subsystem_tag_map.setdefault(sub_id, {
+                "type": sub.get("type", "global"),
+                "name": sub.get("name", "all"),
+                "tags": [],
+            })
+            bucket["tags"].append({
+                "path": t["path"],
+                "name": t.get("name", t["path"]),
+                "views": t.get("views", []),
+                "equipment": t.get("equipment", []),
+                "allSubsystems": [s.get("id") for s in (t.get("subsystems") or [])],
+            })
+
         live_values = self.api.read_tags(tag_paths)
         tool_calls: List[Dict[str, Any]] = []
         tool_calls.append({
@@ -1154,7 +1252,7 @@ class AnomalyMonitor:
         total_live_count = len(live_values)
         last_progress_emit = 0.0
 
-        def emit_cycle_progress(reason: str, current_tag: str = "") -> None:
+        def emit_cycle_progress(reason: str, current_tag: str = "", include_tag_map: bool = False) -> None:
             nonlocal last_progress_emit
             diag = make_default_diagnostics(
                 staleness_threshold_sec=stale_threshold_sec,
@@ -1170,9 +1268,14 @@ class AnomalyMonitor:
                 "qualityFilteredCount": quality_filtered_count,
                 "staleFilteredCount": stale_filtered_count,
                 "historyErrorCount": history_error_count,
+                "monitoredTags": len(tags),
                 "linkedTags": linked_tag_count,
                 "unlinkedTags": unlinked_tag_count,
+                "detectedSubsystemCount": len(detected_subsystems),
+                "detectedSubsystems": detected_subsystems[:10],
             })
+            if include_tag_map:
+                diag["subsystemTagMap"] = subsystem_tag_map
             emit("AGENT_STATUS", {
                 "runId": self.run_id,
                 "state": "running",
@@ -1185,14 +1288,16 @@ class AnomalyMonitor:
             })
             last_progress_emit = time.time()
 
-        emit_cycle_progress("cycle_started")
+        emit_cycle_progress("cycle_started", include_tag_map=True)
 
         def _update_subsystem_signal(
-            subsystem_ref: Dict[str, str], deterministic: Dict[str, Any], tag_path: str
+            subsystem_ref: Dict[str, str], deterministic: Dict[str, Any],
+            tag_path: str, live_value: Any = None,
         ) -> None:
             sub_id = subsystem_ref.get("id", "global:all")
             abs_z = abs(float(deterministic.get("z_score", 0.0)))
             z = float(deterministic.get("z_score", 0.0))
+            mad = float(deterministic.get("mad_score", 0.0))
             bucket = subsystem_shift_signals.setdefault(
                 sub_id,
                 {
@@ -1206,6 +1311,7 @@ class AnomalyMonitor:
                     "sumZ": 0.0,
                     "maxAbsZ": 0.0,
                     "sampleTag": tag_path,
+                    "_tagEntries": [],
                 },
             )
             bucket["evaluated"] += 1
@@ -1216,20 +1322,28 @@ class AnomalyMonitor:
             if abs_z > bucket["maxAbsZ"]:
                 bucket["maxAbsZ"] = abs_z
                 bucket["sampleTag"] = tag_path
+            tag_name = tag_path.rsplit("/", 1)[-1] if "/" in str(tag_path) else str(tag_path)
+            bucket["_tagEntries"].append({
+                "path": str(tag_path),
+                "name": tag_name,
+                "z": round(z, 3),
+                "absZ": round(abs_z, 3),
+                "mad": round(mad, 3),
+                "value": live_value,
+            })
 
-        for tv in live_values:
+        # ---- Phase 1: Filter live values (no I/O) ----
+        TagEntry = Tuple[Any, Dict[str, Any], Dict[str, str], bool]  # (tv, tag_meta, subsystem, is_linked)
+        tags_for_history: List[TagEntry] = []
+
+        for idx, tv in enumerate(live_values):
             processed_live_count += 1
-            tag_meta = tag_lookup.get(tv.path, {"path": tv.path, "name": tv.path})
+            tag_meta = (
+                tags[idx] if idx < len(tags)
+                else tag_lookup.get(tv.path, {"path": tv.path, "name": tv.path})
+            )
             subsystem = tag_meta.get("primary_subsystem") or _subsystem_ref("global", "all")
             is_linked = bool(tag_meta.get("views") or tag_meta.get("equipment"))
-
-            now_progress = time.time()
-            if (
-                processed_live_count == 1
-                or processed_live_count % progress_emit_interval_tags == 0
-                or (now_progress - last_progress_emit) >= progress_emit_interval_sec
-            ):
-                emit_cycle_progress("processing_live_tags", current_tag=tv.path)
 
             if tv.error:
                 live_error_count += 1
@@ -1246,7 +1360,6 @@ class AnomalyMonitor:
             if isinstance(tv.config, dict) and bool(tv.config.get("timestamp_inferred")):
                 inferred_timestamp_count += 1
             if not is_quality_good(tv.quality):
-                # quality gate: only emit quality anomalies if this persists via triage.
                 quality_filtered_count += 1
                 if is_linked:
                     quality_filtered_linked += 1
@@ -1255,7 +1368,6 @@ class AnomalyMonitor:
                 continue
             parsed_ts = parse_timestamp(tv.timestamp)
             age_sec = (now - parsed_ts).total_seconds() if parsed_ts is not None else None
-            stale_threshold_sec = int(thresholds.get("stalenessSec", 120))
             if is_stale(tv.timestamp, stale_threshold_sec, now=now):
                 stale_filtered_count += 1
                 if is_linked:
@@ -1273,7 +1385,27 @@ class AnomalyMonitor:
                     })
                 continue
 
-            history, history_error = self.fetch_history_values(tv.path)
+            tags_for_history.append((tv, tag_meta, subsystem, is_linked))
+
+        emit_cycle_progress(
+            "filtering_complete",
+            current_tag=f"{len(tags_for_history)} tags passed filters",
+        )
+
+        # ---- Phase 2: Batched history fetch ----
+        history_fetch_start = time.time()
+        history_paths = [tv.path for tv, _, _, _ in tags_for_history]
+        history_results = self.fetch_history_batch(history_paths) if history_paths else {}
+        history_fetch_elapsed = time.time() - history_fetch_start
+        emit_cycle_progress(
+            "history_complete",
+            current_tag=f"{len(history_results)} in {round(history_fetch_elapsed, 1)}s",
+        )
+
+        # ---- Phase 3: Score and build candidates using pre-fetched history ----
+        for tv, tag_meta, subsystem, is_linked in tags_for_history:
+            history, history_error = history_results.get(tv.path, ([], "No history result"))
+
             if len(tool_calls) < 18:
                 tool_calls.append({
                     "tool": "query_tag_history",
@@ -1297,8 +1429,6 @@ class AnomalyMonitor:
                 continue
             if len(history) < min_history:
                 insufficient_history_count += 1
-                # Low-history fallback: still score dramatic shifts when at least a
-                # small baseline exists, otherwise simulator users see no events.
                 if len(history) >= 5:
                     prev_val = self._prev_values.get(tv.path)
                     deterministic = compute_deviation_scores(
@@ -1311,7 +1441,7 @@ class AnomalyMonitor:
                     if curr_num is not None:
                         self._prev_values[tv.path] = curr_num
 
-                    _update_subsystem_signal(subsystem, deterministic, tv.path)
+                    _update_subsystem_signal(subsystem, deterministic, tv.path, live_value=tv.value)
                     if is_linked:
                         evaluated_linked += 1
                     else:
@@ -1337,6 +1467,7 @@ class AnomalyMonitor:
                                 "sumZ": 0.0,
                                 "maxAbsZ": 0.0,
                                 "sampleTag": tv.path,
+                                "_tagEntries": [],
                             },
                         )
                         sub_bucket["candidate"] += 1
@@ -1379,7 +1510,7 @@ class AnomalyMonitor:
             if curr_num is not None:
                 self._prev_values[tv.path] = curr_num
 
-            _update_subsystem_signal(subsystem, deterministic, tv.path)
+            _update_subsystem_signal(subsystem, deterministic, tv.path, live_value=tv.value)
             if is_linked:
                 evaluated_linked += 1
             else:
@@ -1405,6 +1536,7 @@ class AnomalyMonitor:
                         "sumZ": 0.0,
                         "maxAbsZ": 0.0,
                         "sampleTag": tv.path,
+                        "_tagEntries": [],
                     },
                 )
                 sub_bucket["candidate"] += 1
@@ -1431,6 +1563,8 @@ class AnomalyMonitor:
                 )
                 sub_id = subsystem.get("id", "global:all")
                 candidate_subsystem_counts[sub_id] = candidate_subsystem_counts.get(sub_id, 0) + 1
+
+        emit_cycle_progress("scoring_complete")
 
         if live_values and live_error_count == len(live_values):
             emitted = self.emit_provider_failure_event(
@@ -1513,9 +1647,16 @@ class AnomalyMonitor:
         llm_per_subsystem: Dict[str, int] = {}
         dedup_suppressed_count = 0
 
-        for candidate in shortlisted:
+        if shortlisted:
+            emit_cycle_progress(
+                "triage_started",
+                current_tag=f"{len(shortlisted)} candidates to process",
+            )
+
+        for ci, candidate in enumerate(shortlisted):
             subsystem = candidate.get("subsystem") or _subsystem_ref("global", "all")
             sub_id = subsystem.get("id", "global:all")
+            tag_name = candidate["context"].get("tag_name", candidate["context"].get("tag_path", "?"))
             use_llm = (
                 llm_total < max_triage_total
                 and llm_per_subsystem.get(sub_id, 0) < max_triage_per_subsystem
@@ -1538,7 +1679,7 @@ class AnomalyMonitor:
                     "verification_checks": [],
                     "probable_causes": [],
                     "safety_notes": [],
-                    "rationale": "Triaged in deterministic-only mode due per-cycle/per-subsystem LLM caps.",
+                    "rationale": "Deterministic-only triage (LLM triage disabled or cap reached).",
                     "related_entities": [],
                 }
             )
@@ -1559,6 +1700,12 @@ class AnomalyMonitor:
             else:
                 dedup_suppressed_count += 1
 
+            if (ci + 1) % 5 == 0 or ci == len(shortlisted) - 1:
+                emit_cycle_progress(
+                    "triaging",
+                    current_tag=f"{ci + 1}/{len(shortlisted)} ({tag_name})",
+                )
+
         top_candidates_by_subsystem = dict(
             sorted(candidate_subsystem_counts.items(), key=lambda item: item[1], reverse=True)[:10]
         )
@@ -1571,7 +1718,8 @@ class AnomalyMonitor:
                 int(item.get("evaluated", 0)),
             ),
             reverse=True,
-        )[:8]
+        )
+        sparkline_size = 20
         for item in top_shift_signals:
             evaluated = max(1, int(item.get("evaluated", 0)))
             item["avgAbsZ"] = round(float(item.get("sumAbsZ", 0.0)) / evaluated, 3)
@@ -1580,6 +1728,22 @@ class AnomalyMonitor:
             item["candidateRatio"] = round(float(item.get("candidate", 0)) / evaluated, 3)
             item.pop("sumAbsZ", None)
             item.pop("sumZ", None)
+            raw_tags = item.pop("_tagEntries", [])
+            sorted_tags = sorted(raw_tags, key=lambda t: t.get("absZ", 0.0), reverse=True)
+            tag_signals = []
+            for t in sorted_tags:
+                entry = {k: v for k, v in t.items() if k != "absZ"}
+                cached_hist = self._history_cache.get(t.get("path", ""))
+                if cached_hist and cached_hist.get("values"):
+                    vals = cached_hist["values"]
+                    entry["avg"] = round(sum(vals) / len(vals), 2)
+                    if len(vals) <= sparkline_size:
+                        entry["sparkline"] = [round(v, 2) for v in vals]
+                    else:
+                        step = len(vals) / sparkline_size
+                        entry["sparkline"] = [round(vals[int(i * step)], 2) for i in range(sparkline_size)]
+                tag_signals.append(entry)
+            item["tagSignals"] = tag_signals
 
         metrics["diagnostics"] = {
             **make_default_diagnostics(
@@ -1619,6 +1783,7 @@ class AnomalyMonitor:
             "timestampParseNote": "Naive timestamps are treated as local time by parse_timestamp().",
             "detectedSubsystemCount": len(detected_subsystems),
             "detectedSubsystems": detected_subsystems[:10],
+            "subsystemTagMap": subsystem_tag_map,
             "candidateSubsystemCount": len(candidate_subsystem_counts),
             "candidateBySubsystem": top_candidates_by_subsystem,
             "subsystemShiftSignals": top_shift_signals,
@@ -1786,6 +1951,74 @@ class AnomalyMonitor:
                 return {"success": False, "error": f"Event not found: {event_id}"}
         return {"success": True, "eventId": event_id}
 
+    def deep_analyze(self, event_id: str) -> Dict[str, Any]:
+        """Run LLM triage on an existing event and update it in-place."""
+        event = self.graph.get_anomaly_event(event_id)
+        if not event:
+            return {"success": False, "error": f"Event not found: {event_id}"}
+
+        tag_path = event.get("source_tag") or event.get("tag_name", "")
+        if not tag_path:
+            return {"success": False, "error": "Event has no source_tag"}
+
+        context = self.get_context(tag_path)
+        context["subsystem"] = {
+            "id": event.get("subsystem_id", "global:all"),
+            "type": event.get("subsystem_type", "global"),
+            "name": event.get("subsystem_name", "all"),
+        }
+
+        deterministic = {
+            "candidate": True,
+            "z_score": float(event.get("z_score", 0)),
+            "mad_score": float(event.get("mad_score", 0)),
+            "delta_rate": float(event.get("delta_rate", 0)),
+            "window_volatility": float(event.get("window_volatility", 0)),
+            "reasons": json.loads(event.get("deterministic_reasons_json", "[]")),
+            "category": event.get("category", "deviation"),
+        }
+
+        live_sample = {
+            "value": event.get("live_value"),
+            "quality": event.get("live_quality"),
+            "timestamp": event.get("live_timestamp"),
+        }
+
+        if not self.llm:
+            return {"success": False, "error": "LLM client not configured"}
+
+        triage = self.run_llm_triage(context, deterministic, live_sample)
+
+        severity = self._severity_from_scores(deterministic, triage)
+        with self.graph.session() as session:
+            session.run(
+                """
+                MATCH (e:AnomalyEvent {event_id: $event_id})
+                SET e.summary = $summary,
+                    e.explanation = $explanation,
+                    e.severity = $severity,
+                    e.confidence = $confidence,
+                    e.recommended_checks_json = $checks,
+                    e.probable_causes_json = $causes,
+                    e.safety_notes_json = $safety,
+                    e.updated_at = $updated_at,
+                    e.llm_triaged = true
+                RETURN e
+                """,
+                event_id=event_id,
+                summary=triage.get("summary", ""),
+                explanation=triage.get("rationale", ""),
+                severity=severity,
+                confidence=float(max(0.0, min(1.0, triage.get("confidence", 0.5)))),
+                checks=json.dumps(triage.get("verification_checks", []), default=str),
+                causes=json.dumps(triage.get("probable_causes", []), default=str),
+                safety=json.dumps(triage.get("safety_notes", []), default=str),
+                updated_at=utc_now_iso(),
+            )
+
+        updated_event = self.graph.get_anomaly_event(event_id)
+        return {"success": True, "event": updated_event}
+
     def get_status(self, run_id: str) -> Dict[str, Any]:
         with self.graph.session() as session:
             result = session.run(
@@ -1890,6 +2123,9 @@ def main() -> int:
     p_clear.add_argument("--event-id", required=True)
     p_clear.add_argument("--note")
 
+    p_deep = sub.add_parser("deep-analyze", help="Run LLM triage on an existing event")
+    p_deep.add_argument("--event-id", required=True)
+
     p_cleanup = sub.add_parser("cleanup", help="Delete old anomaly events")
     p_cleanup.add_argument("--retention-days", type=int, default=14)
 
@@ -1940,6 +2176,10 @@ def main() -> int:
 
     if args.command == "clear-event":
         print(json.dumps(monitor.clear_event(args.event_id, args.note), default=str))
+        return 0
+
+    if args.command == "deep-analyze":
+        print(json.dumps(monitor.deep_analyze(args.event_id), default=str))
         return 0
 
     if args.command == "cleanup":

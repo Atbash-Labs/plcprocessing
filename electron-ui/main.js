@@ -1749,6 +1749,19 @@ ipcMain.handle('agents:clear-event', async (event, eventId, note = '') => {
   }
 });
 
+ipcMain.handle('agents:deep-analyze', async (event, eventId) => {
+  try {
+    const output = await runPythonScript('anomaly_monitor.py', [
+      'deep-analyze',
+      '--event-id',
+      String(eventId),
+    ]);
+    return JSON.parse(output || '{}');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('agents:cleanup', async (event, retentionDays = 14) => {
   try {
     const output = await runPythonScript('anomaly_monitor.py', [
