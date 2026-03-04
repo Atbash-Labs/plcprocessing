@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Sample Rockwell L5X Full-Project File — Conveyor System Controller
+  Format: Logic Designer XML (.L5X)
+  Controller: ControlLogix 5580
+-->
+<RSLogix5000Content SchemaRevision="1.0" SoftwareRevision="35.00"
+                    TargetName="ConveyorSystem" TargetType="Controller"
+                    ContainsContext="true" Owner="EngineeringDept"
+                    ExportDate="Mon Feb 16 12:00:00 2026"
+                    ExportOptions="References NoRawData L5KData DecoratedData Context Dependencies ForceProtectedEncoding AllProjDocTrans">
+  <Controller Use="Target" Name="ConveyorSystem"
+              ProcessorType="1756-L85E" MajorRev="35" MinorRev="11"
+              TimeSlice="20" ShareUnusedTimeSlice="1"
+              ProjectCreationDate="Mon Jan 05 08:00:00 2026"
+              LastModifiedDate="Sun Feb 15 16:30:00 2026"
+              SFCExecutionControl="CurrentActive" SFCRestartPosition="MostRecent"
+              SFCLastScan="DontScan"
+              Description="Conveyor System Controller — 3-zone transport with sorting">
+
+    <DataTypes>
+      <DataType Name="ConveyorZoneData" Family="NoFamily" Class="User">
+        <Description>Data structure for a single conveyor zone</Description>
+        <Members>
+          <Member Name="Running" DataType="BOOL" Dimension="0" Radix="Decimal"
+                  ExternalAccess="Read/Write">
+            <Description>Zone motor running</Description>
+          </Member>
+          <Member Name="Faulted" DataType="BOOL" Dimension="0" Radix="Decimal">
+            <Description>Zone fault active</Description>
+          </Member>
+          <Member Name="Speed_SP" DataType="REAL" Dimension="0" Radix="Float">
+            <Description>Speed setpoint in FPM</Description>
+          </Member>
+          <Member Name="Speed_PV" DataType="REAL" Dimension="0" Radix="Float">
+            <Description>Actual speed in FPM</Description>
+          </Member>
+          <Member Name="ItemPresent" DataType="BOOL" Dimension="0" Radix="Decimal">
+            <Description>Photoeye detects item on zone</Description>
+          </Member>
+          <Member Name="ItemCount" DataType="DINT" Dimension="0" Radix="Decimal">
+            <Description>Items counted through zone</Description>
+          </Member>
+          <Member Name="JamDetected" DataType="BOOL" Dimension="0" Radix="Decimal">
+            <Description>Jam condition detected</Description>
+          </Member>
+          <Member Name="MotorCurrent" DataType="REAL" Dimension="0" Radix="Float">
+            <Description>Motor current in Amps</Description>
+          </Member>
+          <Member Name="MotorTemp" DataType="REAL" Dimension="0" Radix="Float">
+            <Description>Motor temperature in deg C</Description>
+          </Member>
+        </Members>
+      </DataType>
+
+      <DataType Name="SortDestination" Family="NoFamily" Class="User">
+        <Description>Sorting diverter destination configuration</Description>
+        <Members>
+          <Member Name="DiverterActive" DataType="BOOL" Dimension="0" Radix="Decimal">
+            <Description>Diverter solenoid energized</Description>
+          </Member>
+          <Member Name="TargetBarcode" DataType="STRING" Dimension="0">
+            <Description>Barcode prefix for this destination</Description>
+          </Member>
+          <Member Name="DivertCount" DataType="DINT" Dimension="0" Radix="Decimal">
+            <Description>Items diverted to this destination</Description>
+          </Member>
+          <Member Name="LaneFullSensor" DataType="BOOL" Dimension="0" Radix="Decimal">
+            <Description>Downstream lane full sensor</Description>
+          </Member>
+        </Members>
+      </DataType>
+    </DataTypes>
+
+    <AddOnInstructionDefinitions>
+      <AddOnInstructionDefinition Name="ConveyorZoneCtrl"
+                                  Revision="2.0" Vendor="ConveyorTech"
+                                  ExecutePrescan="false" ExecutePostscan="false"
+                                  ExecuteEnableInFalse="false">
+        <Description>Controls a single conveyor zone with jam detection and speed regulation</Description>
+
+        <Parameters>
+          <Parameter Name="EnableIn" TagType="Base" DataType="BOOL" Usage="Input" Radix="Decimal" Required="false" Visible="false" />
+          <Parameter Name="EnableOut" TagType="Base" DataType="BOOL" Usage="Output" Radix="Decimal" Required="false" Visible="false" />
+          <Parameter Name="i_RunEnable" TagType="Base" DataType="BOOL" Usage="Input" Radix="Decimal" Required="true" Visible="true">
+            <Description>Zone run enable from upstream logic</Description>
+          </Parameter>
+          <Parameter Name="i_SpeedSP" TagType="Base" DataType="REAL" Usage="Input" Radix="Float" Required="true" Visible="true">
+            <Description>Speed setpoint in feet per minute</Description>
+          </Parameter>
+          <Parameter Name="i_PhotoEye" TagType="Base" DataType="BOOL" Usage="Input" Radix="Decimal" Required="true" Visible="true">
+            <Description>Zone photoeye sensor (TRUE = item present)</Description>
+          </Parameter>
+          <Parameter Name="i_MotorFault" TagType="Base" DataType="BOOL" Usage="Input" Radix="Decimal" Required="true" Visible="true">
+            <Description>Drive fault feedback</Description>
+          </Parameter>
+          <Parameter Name="i_SpeedFeedback" TagType="Base" DataType="REAL" Usage="Input" Radix="Float" Required="true" Visible="true">
+            <Description>Actual speed feedback from drive</Description>
+          </Parameter>
+          <Parameter Name="i_MotorCurrent" TagType="Base" DataType="REAL" Usage="Input" Radix="Float" Required="false" Visible="true">
+            <Description>Motor current feedback</Description>
+          </Parameter>
+          <Parameter Name="i_EStop" TagType="Base" DataType="BOOL" Usage="Input" Radix="Decimal" Required="true" Visible="true">
+            <Description>Emergency stop</Description>
+          </Parameter>
+          <Parameter Name="o_RunCmd" TagType="Base" DataType="BOOL" Usage="Output" Radix="Decimal" Required="false" Visible="true">
+            <Description>Run command to drive</Description>
+          </Parameter>
+          <Parameter Name="o_SpeedRef" TagType="Base" DataType="REAL" Usage="Output" Radix="Float" Required="false" Visible="true">
+            <Description>Speed reference to drive</Description>
+          </Parameter>
+          <Parameter Name="o_Running" TagType="Base" DataType="BOOL" Usage="Output" Radix="Decimal" Required="false" Visible="true">
+            <Description>Zone running status</Description>
+          </Parameter>
+          <Parameter Name="o_Faulted" TagType="Base" DataType="BOOL" Usage="Output" Radix="Decimal" Required="false" Visible="true">
+            <Description>Zone fault status</Description>
+          </Parameter>
+          <Parameter Name="o_JamDetected" TagType="Base" DataType="BOOL" Usage="Output" Radix="Decimal" Required="false" Visible="true">
+            <Description>Jam condition detected</Description>
+          </Parameter>
+          <Parameter Name="io_ZoneData" TagType="Base" DataType="ConveyorZoneData" Usage="InOut" Required="true" Visible="true">
+            <Description>Zone data structure for HMI</Description>
+          </Parameter>
+        </Parameters>
+
+        <LocalTags>
+          <LocalTag Name="TON_JamTimer" DataType="TIMER" ExternalAccess="None">
+            <Description>Jam detection timer — PE blocked too long with motor running</Description>
+          </LocalTag>
+          <LocalTag Name="TON_StartDelay" DataType="TIMER" ExternalAccess="None">
+            <Description>Anti-cycling start delay</Description>
+          </LocalTag>
+          <LocalTag Name="JamTimeout" DataType="DINT" ExternalAccess="None">
+            <Description>Jam timeout in ms</Description>
+            <DefaultData>
+              <DataValue DataType="DINT" Radix="Decimal" Value="30000"/>
+            </DefaultData>
+          </LocalTag>
+          <LocalTag Name="FaultLatch" DataType="BOOL" ExternalAccess="None" />
+        </LocalTags>
+
+        <Routines>
+          <Routine Name="Logic" Type="RLL">
+            <RLLContent>
+              <Rung Number="0" Type="N">
+                <Comment>Start delay — prevent rapid cycling</Comment>
+                <Text>XIC(i_RunEnable)XIO(FaultLatch)XIO(i_EStop)TON(TON_StartDelay,?,2000,?);</Text>
+              </Rung>
+              <Rung Number="1" Type="N">
+                <Comment>Run command to drive</Comment>
+                <Text>XIC(TON_StartDelay.DN)OTE(o_RunCmd);</Text>
+              </Rung>
+              <Rung Number="2" Type="N">
+                <Comment>Speed reference — ramp to setpoint when running</Comment>
+                <Text>XIC(o_RunCmd)MOV(i_SpeedSP,o_SpeedRef);</Text>
+              </Rung>
+              <Rung Number="3" Type="N">
+                <Comment>Zero speed when stopped</Comment>
+                <Text>XIO(o_RunCmd)MOV(0,o_SpeedRef);</Text>
+              </Rung>
+              <Rung Number="4" Type="N">
+                <Comment>Jam detection — photoeye blocked while running for too long</Comment>
+                <Text>XIC(o_RunCmd)XIC(i_PhotoEye)TON(TON_JamTimer,?,JamTimeout,?);</Text>
+              </Rung>
+              <Rung Number="5" Type="N">
+                <Comment>Jam detected — latch fault</Comment>
+                <Text>XIC(TON_JamTimer.DN)OTL(FaultLatch);</Text>
+              </Rung>
+              <Rung Number="6" Type="N">
+                <Comment>Motor fault — latch fault</Comment>
+                <Text>XIC(i_MotorFault)OTL(FaultLatch);</Text>
+              </Rung>
+              <Rung Number="7" Type="N">
+                <Comment>Status outputs</Comment>
+                <Text>[XIC(o_RunCmd),XIC(i_SpeedFeedback)]OTE(o_Running);</Text>
+              </Rung>
+              <Rung Number="8" Type="N">
+                <Text>XIC(FaultLatch)OTE(o_Faulted);</Text>
+              </Rung>
+              <Rung Number="9" Type="N">
+                <Text>XIC(TON_JamTimer.DN)OTE(o_JamDetected);</Text>
+              </Rung>
+              <Rung Number="10" Type="N">
+                <Comment>Update HMI zone data</Comment>
+                <Text>MOV(o_Running,io_ZoneData.Running)MOV(o_Faulted,io_ZoneData.Faulted)MOV(i_SpeedSP,io_ZoneData.Speed_SP)MOV(i_SpeedFeedback,io_ZoneData.Speed_PV)MOV(i_PhotoEye,io_ZoneData.ItemPresent)MOV(o_JamDetected,io_ZoneData.JamDetected)MOV(i_MotorCurrent,io_ZoneData.MotorCurrent);</Text>
+              </Rung>
+            </RLLContent>
+          </Routine>
+        </Routines>
+      </AddOnInstructionDefinition>
+    </AddOnInstructionDefinitions>
+
+    <Tags>
+      <Tag Name="Zone1" TagType="Base" DataType="ConveyorZoneData" Radix="NullType" ExternalAccess="Read/Write">
+        <Description>Infeed conveyor zone</Description>
+      </Tag>
+      <Tag Name="Zone2" TagType="Base" DataType="ConveyorZoneData" Radix="NullType" ExternalAccess="Read/Write">
+        <Description>Accumulation zone</Description>
+      </Tag>
+      <Tag Name="Zone3" TagType="Base" DataType="ConveyorZoneData" Radix="NullType" ExternalAccess="Read/Write">
+        <Description>Sort/divert zone</Description>
+      </Tag>
+      <Tag Name="Diverter1" TagType="Base" DataType="SortDestination" Radix="NullType" ExternalAccess="Read/Write">
+        <Description>Left diverter lane</Description>
+      </Tag>
+      <Tag Name="Diverter2" TagType="Base" DataType="SortDestination" Radix="NullType" ExternalAccess="Read/Write">
+        <Description>Right diverter lane</Description>
+      </Tag>
+      <Tag Name="SystemRunEnable" TagType="Base" DataType="BOOL" Radix="Decimal" ExternalAccess="Read/Write">
+        <Description>Master conveyor system run enable</Description>
+      </Tag>
+      <Tag Name="EStopActive" TagType="Base" DataType="BOOL" Radix="Decimal" ExternalAccess="Read Only">
+        <Description>Emergency stop circuit status</Description>
+      </Tag>
+      <Tag Name="DefaultSpeed" TagType="Base" DataType="REAL" Radix="Float" ExternalAccess="Read/Write">
+        <Description>Default conveyor speed in FPM</Description>
+      </Tag>
+      <Tag Name="TotalItemCount" TagType="Base" DataType="DINT" Radix="Decimal" ExternalAccess="Read Only">
+        <Description>Total items processed since last reset</Description>
+      </Tag>
+    </Tags>
+
+    <Programs>
+      <Program Name="ConveyorMain" TestEdits="false" Disabled="false"
+               MainRoutineName="MainRoutine">
+        <Description>Main conveyor control program — manages all zones and sorting</Description>
+        <Tags>
+          <Tag Name="ZoneCtrl1" TagType="Base" DataType="ConveyorZoneCtrl" Radix="NullType">
+            <Description>Zone 1 controller instance</Description>
+          </Tag>
+          <Tag Name="ZoneCtrl2" TagType="Base" DataType="ConveyorZoneCtrl" Radix="NullType">
+            <Description>Zone 2 controller instance</Description>
+          </Tag>
+          <Tag Name="ZoneCtrl3" TagType="Base" DataType="ConveyorZoneCtrl" Radix="NullType">
+            <Description>Zone 3 controller instance</Description>
+          </Tag>
+          <Tag Name="BarcodeResult" TagType="Base" DataType="STRING" ExternalAccess="Read/Write">
+            <Description>Last barcode scan result</Description>
+          </Tag>
+          <Tag Name="SortDecision" TagType="Base" DataType="DINT" Radix="Decimal">
+            <Description>Sort decision: 0=straight, 1=left, 2=right</Description>
+          </Tag>
+        </Tags>
+        <Routines>
+          <Routine Name="MainRoutine" Type="RLL">
+            <Description>Main scan routine — zone control and monitoring</Description>
+            <RLLContent>
+              <Rung Number="0" Type="N">
+                <Comment>Zone 1 — Infeed conveyor control</Comment>
+                <Text>ConveyorZoneCtrl(ZoneCtrl1,SystemRunEnable,DefaultSpeed,Zone1.ItemPresent,0,Zone1.Speed_PV,Zone1.MotorCurrent,EStopActive,Zone1);</Text>
+              </Rung>
+              <Rung Number="1" Type="N">
+                <Comment>Zone 2 — Accumulation zone control (slow down if zone 3 jammed)</Comment>
+                <Text>ConveyorZoneCtrl(ZoneCtrl2,SystemRunEnable,DefaultSpeed,Zone2.ItemPresent,0,Zone2.Speed_PV,Zone2.MotorCurrent,EStopActive,Zone2);</Text>
+              </Rung>
+              <Rung Number="2" Type="N">
+                <Comment>Zone 3 — Sort zone control</Comment>
+                <Text>ConveyorZoneCtrl(ZoneCtrl3,SystemRunEnable,DefaultSpeed,Zone3.ItemPresent,0,Zone3.Speed_PV,Zone3.MotorCurrent,EStopActive,Zone3);</Text>
+              </Rung>
+              <Rung Number="3" Type="N">
+                <Comment>Total item count from all zones</Comment>
+                <Text>ADD(Zone1.ItemCount,Zone2.ItemCount,TotalItemCount);</Text>
+              </Rung>
+            </RLLContent>
+          </Routine>
+          <Routine Name="SortLogic" Type="ST">
+            <Description>Barcode-based sorting decision logic</Description>
+            <STContent>
+              <Line Number="0">(* Sorting logic based on barcode scan result *)</Line>
+              <Line Number="1">IF Zone3.ItemPresent AND (BarcodeResult &lt;&gt; '') THEN</Line>
+              <Line Number="2">    (* Check barcode prefix for destination *)</Line>
+              <Line Number="3">    IF MID(BarcodeResult, 2, 1) = 'LA' THEN</Line>
+              <Line Number="4">        SortDecision := 1;  (* Left lane *)</Line>
+              <Line Number="5">        Diverter1.DiverterActive := TRUE;</Line>
+              <Line Number="6">        Diverter2.DiverterActive := FALSE;</Line>
+              <Line Number="7">    ELSIF MID(BarcodeResult, 2, 1) = 'RA' THEN</Line>
+              <Line Number="8">        SortDecision := 2;  (* Right lane *)</Line>
+              <Line Number="9">        Diverter1.DiverterActive := FALSE;</Line>
+              <Line Number="10">        Diverter2.DiverterActive := TRUE;</Line>
+              <Line Number="11">    ELSE</Line>
+              <Line Number="12">        SortDecision := 0;  (* Straight through *)</Line>
+              <Line Number="13">        Diverter1.DiverterActive := FALSE;</Line>
+              <Line Number="14">        Diverter2.DiverterActive := FALSE;</Line>
+              <Line Number="15">    END_IF;</Line>
+              <Line Number="16">ELSE</Line>
+              <Line Number="17">    Diverter1.DiverterActive := FALSE;</Line>
+              <Line Number="18">    Diverter2.DiverterActive := FALSE;</Line>
+              <Line Number="19">END_IF;</Line>
+            </STContent>
+          </Routine>
+        </Routines>
+      </Program>
+    </Programs>
+
+  </Controller>
+</RSLogix5000Content>

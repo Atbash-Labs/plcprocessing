@@ -385,7 +385,7 @@ class OntologyGraph:
 
         Args:
             name: AOI name
-            aoi_type: Type of AOI (AOI, UDT, etc.)
+            aoi_type: Type of component (AOI, UDT, PROGRAM, CONTROLLER, FB, etc.)
             source_file: Source file path
             metadata: Metadata dict (revision, vendor, description)
             analysis: Analysis dict (purpose, tags, patterns, etc.)

@@ -109,7 +109,7 @@ if (loadIgnitionFileBtn) {
 document.getElementById('btn-ingest-plc').addEventListener('click', async () => {
   const filePath = await window.api.selectFile({
     filters: [
-      { name: 'Rockwell PLC Files', extensions: ['sc', 'L5X'] },
+      { name: 'Rockwell PLC Files', extensions: ['sc', 'L5X', 'l5x', 'L5K', 'l5k', 'ACD', 'acd'] },
       { name: 'All Files', extensions: ['*'] }
     ]
   });

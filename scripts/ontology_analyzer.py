@@ -21,6 +21,14 @@ from tia_xml_parser import TiaXmlParser
 from siemens_project_parser import SiemensProjectParser, TiaProject
 from neo4j_ontology import OntologyGraph, get_ontology_graph
 from claude_client import ClaudeClient, get_claude_client
+from rockwell_export import (
+    detect_rockwell_format,
+    parse_rockwell_file,
+    parse_rockwell_directory,
+    find_rockwell_files,
+    is_rockwell_file,
+    ROCKWELL_EXTENSIONS,
+)
 
 
 class OntologyAnalyzer:
@@ -697,6 +705,122 @@ Be concise but informative. Focus on the "why" and "what" rather than just resta
         return self.extract_cross_references(parsed, verbose=verbose)
 
     # ------------------------------------------------------------------
+    # Rockwell multi-format ingestion (L5X, L5K, ACD)
+    # ------------------------------------------------------------------
+
+    def analyze_rockwell_file(
+        self,
+        file_path: str,
+        verbose: bool = False,
+        skip_ai: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Analyze a Rockwell PLC file (L5X, L5K, or ACD) and store in Neo4j.
+
+        Auto-detects the file format and parses it into SCFile objects,
+        then runs the same analysis pipeline as .sc files.
+
+        Args:
+            file_path: Path to Rockwell PLC file
+            verbose: Print detailed progress
+            skip_ai: Skip AI analysis (import only)
+
+        Returns:
+            List of ontology dicts for each component found.
+        """
+        fmt = detect_rockwell_format(file_path)
+        if not fmt:
+            print(f"[ERROR] Not a recognized Rockwell file: {file_path}")
+            return []
+
+        print(f"[INFO] Detected Rockwell {fmt} format: {Path(file_path).name}")
+
+        parsed_files = parse_rockwell_file(file_path)
+        if not parsed_files:
+            print(f"[WARNING] No components found in {file_path}")
+            return []
+
+        action = "import" if skip_ai else "analyze"
+        print(f"[INFO] Found {len(parsed_files)} components to {action}")
+
+        ontologies = []
+        for i, sc_file in enumerate(parsed_files, 1):
+            print(f"\n[{i}/{len(parsed_files)}] Processing {sc_file.type}: {sc_file.name}...")
+            try:
+                ontology = self.analyze_sc_file(sc_file, verbose, skip_ai=skip_ai)
+                ontologies.append(ontology)
+                print(f"  [OK] {sc_file.type}: {sc_file.name}")
+            except Exception as e:
+                print(f"  [ERROR] Failed {sc_file.name}: {e}")
+                continue
+
+        # Cross-reference pass
+        if parsed_files:
+            xref_count = self.extract_cross_references(parsed_files, verbose=verbose)
+            if xref_count:
+                print(f"\n[INFO] Created {xref_count} cross-reference relationships")
+
+        return ontologies
+
+    def analyze_rockwell_directory(
+        self,
+        directory: str,
+        verbose: bool = False,
+        skip_ai: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Analyze all Rockwell PLC files in a directory.
+
+        Finds and processes all .L5X, .L5K, and .ACD files.
+
+        Args:
+            directory: Directory path
+            verbose: Print detailed progress
+            skip_ai: Skip AI analysis
+
+        Returns:
+            List of ontology dicts.
+        """
+        files = find_rockwell_files(directory)
+        if not files:
+            print(f"[WARNING] No Rockwell PLC files found in {directory}")
+            return []
+
+        print(f"[INFO] Found {len(files)} Rockwell PLC file(s)")
+
+        all_ontologies = []
+        all_parsed: List[SCFile] = []
+
+        for fp, fmt in files:
+            print(f"\n{'='*60}")
+            print(f"  [{fmt}] {Path(fp).name}")
+            print(f"{'='*60}")
+
+            parsed_files = parse_rockwell_file(fp, format_hint=fmt)
+            if not parsed_files:
+                continue
+
+            action = "import" if skip_ai else "analyze"
+            print(f"[INFO] {len(parsed_files)} components to {action}")
+
+            for i, sc_file in enumerate(parsed_files, 1):
+                try:
+                    ontology = self.analyze_sc_file(
+                        sc_file, verbose, skip_ai=skip_ai
+                    )
+                    all_ontologies.append(ontology)
+                    all_parsed.append(sc_file)
+                    print(f"  [{i}/{len(parsed_files)}] {sc_file.type}: {sc_file.name}")
+                except Exception as e:
+                    print(f"  [ERROR] {sc_file.name}: {e}")
+
+        # Cross-reference pass across all files
+        if all_parsed:
+            xref_count = self.extract_cross_references(all_parsed, verbose=verbose)
+            if xref_count:
+                print(f"\n[INFO] Created {xref_count} cross-reference relationships")
+
+        return all_ontologies
+
+    # ------------------------------------------------------------------
     # TIA Portal full-project ingestion
     # ------------------------------------------------------------------
 
@@ -1013,9 +1137,13 @@ def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Analyze PLC .sc/.st files and generate semantic ontologies using Claude (stored in Neo4j)"
+        description="Analyze PLC files and generate semantic ontologies using Claude (stored in Neo4j). "
+        "Supports Rockwell (L5X, L5K, ACD), Siemens (ST, TIA XML), and pre-exported .sc files."
     )
-    parser.add_argument("input", nargs="?", help="Path to .sc/.st file or directory")
+    parser.add_argument(
+        "input", nargs="?",
+        help="Path to PLC file (.L5X, .L5K, .ACD, .sc, .st) or directory",
+    )
     parser.add_argument(
         "-p",
         "--pattern",
@@ -1065,6 +1193,11 @@ def main():
         "--tia-project",
         action="store_true",
         help="Parse entire Siemens TIA Portal project structure (PLCs + HMIs + interlinks)",
+    )
+    parser.add_argument(
+        "--rockwell",
+        action="store_true",
+        help="Force Rockwell mode: auto-detect and process L5X, L5K, and ACD files",
     )
 
     args = parser.parse_args()
@@ -1167,34 +1300,85 @@ def main():
             # Auto-detect format from flags / file extension
             is_tia_xml = args.tia_xml or input_path.suffix.lower() == ".xml"
             is_siemens = args.siemens or input_path.suffix.lower() == ".st"
+            is_rockwell_native = (
+                args.rockwell
+                or input_path.suffix.lower() in ROCKWELL_EXTENSIONS
+                or (input_path.is_file() and is_rockwell_file(str(input_path)))
+            )
 
             # Process directory or single file
             if input_path.is_dir():
-                ontologies = analyzer.analyze_directory(
-                    str(input_path),
-                    pattern=args.pattern,
-                    verbose=args.verbose,
-                    skip_ai=args.skip_ai,
-                    siemens=is_siemens,
-                    tia_xml=is_tia_xml,
-                )
-                action = "Imported" if args.skip_ai else "Analyzed"
-                if is_tia_xml:
-                    platform = "Siemens TIA XML"
-                elif is_siemens:
-                    platform = "Siemens"
+                if is_rockwell_native or args.rockwell:
+                    # Check if directory contains native Rockwell files
+                    rockwell_files = find_rockwell_files(str(input_path))
+                    if rockwell_files:
+                        ontologies = analyzer.analyze_rockwell_directory(
+                            str(input_path),
+                            verbose=args.verbose,
+                            skip_ai=args.skip_ai,
+                        )
+                        action = "Imported" if args.skip_ai else "Analyzed"
+                        print(
+                            f"\n[OK] {action} {len(ontologies)} Rockwell components "
+                            f"and stored in Neo4j"
+                        )
+                        if args.skip_ai:
+                            print(
+                                "[INFO] Use incremental analyzer to add semantic descriptions"
+                            )
+                    else:
+                        # Fall back to .sc file pattern
+                        ontologies = analyzer.analyze_directory(
+                            str(input_path),
+                            pattern=args.pattern,
+                            verbose=args.verbose,
+                            skip_ai=args.skip_ai,
+                        )
+                        action = "Imported" if args.skip_ai else "Analyzed"
+                        print(
+                            f"\n[OK] {action} {len(ontologies)} Rockwell blocks "
+                            f"and stored in Neo4j"
+                        )
                 else:
-                    platform = "Rockwell"
-                print(
-                    f"\n[OK] {action} {len(ontologies)} {platform} blocks and stored in Neo4j"
-                )
-                if args.skip_ai:
-                    print(
-                        "[INFO] Use incremental analyzer to add semantic descriptions"
+                    ontologies = analyzer.analyze_directory(
+                        str(input_path),
+                        pattern=args.pattern,
+                        verbose=args.verbose,
+                        skip_ai=args.skip_ai,
+                        siemens=is_siemens,
+                        tia_xml=is_tia_xml,
                     )
+                    action = "Imported" if args.skip_ai else "Analyzed"
+                    if is_tia_xml:
+                        platform = "Siemens TIA XML"
+                    elif is_siemens:
+                        platform = "Siemens"
+                    else:
+                        platform = "Rockwell"
+                    print(
+                        f"\n[OK] {action} {len(ontologies)} {platform} blocks "
+                        f"and stored in Neo4j"
+                    )
+                    if args.skip_ai:
+                        print(
+                            "[INFO] Use incremental analyzer to add semantic descriptions"
+                        )
 
             elif input_path.is_file():
-                if is_tia_xml:
+                if is_rockwell_native and not is_tia_xml and not is_siemens:
+                    # Native Rockwell file (L5X, L5K, ACD)
+                    ontologies = analyzer.analyze_rockwell_file(
+                        str(input_path),
+                        verbose=args.verbose,
+                        skip_ai=args.skip_ai,
+                    )
+                    action = "Imported" if args.skip_ai else "Analyzed"
+                    print(
+                        f"\n[OK] {action} {len(ontologies)} components "
+                        f"and stored in Neo4j"
+                    )
+
+                elif is_tia_xml:
                     # TIA Portal XML file
                     tia_parser = TiaXmlParser()
                     parsed_blocks = tia_parser.parse_file(str(input_path))
@@ -1236,7 +1420,7 @@ def main():
                             action = "Created" if args.skip_ai else "Stored"
                             print(f"[OK] {action} in Neo4j")
                 else:
-                    # Rockwell .sc file
+                    # Rockwell .sc file (pre-exported)
                     sc_parser_inst = SCParser()
                     sc_file = sc_parser_inst.parse_file(str(input_path))
                     ontology = analyzer.analyze_sc_file(

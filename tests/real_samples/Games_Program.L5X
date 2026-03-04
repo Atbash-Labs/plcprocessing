@@ -1,0 +1,2164 @@
+﻿<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<RSLogix5000Content SchemaRevision="1.0" SoftwareRevision="33.00" TargetName="Games" TargetType="Program" TargetClass="Standard" ContainsContext="true" ExportDate="Fri Oct 21 14:23:16 2022" ExportOptions="References NoRawData L5KData DecoratedData Context Dependencies ForceProtectedEncoding AllProjDocTrans">
+<Controller Use="Context" Name="Orkla_Line1">
+<DataTypes Use="Context">
+<DataType Name="Snake_map_stuct" Family="NoFamily" Class="User">
+<Description>
+<![CDATA[array for world map]]>
+</Description>
+<Members>
+<Member Name="ZZZZZZZZZZSnake_map_0" DataType="SINT" Dimension="0" Radix="Decimal" Hidden="true" ExternalAccess="Read/Write"/>
+<Member Name="Death" DataType="BIT" Dimension="0" Radix="Decimal" Hidden="false" Target="ZZZZZZZZZZSnake_map_0" BitNumber="0" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[If set true then the snake may not pass this point]]>
+</Description>
+</Member>
+<Member Name="Food" DataType="BIT" Dimension="0" Radix="Decimal" Hidden="false" Target="ZZZZZZZZZZSnake_map_0" BitNumber="1" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[If true there is food on this point]]>
+</Description>
+</Member>
+<Member Name="SnakeVisable" DataType="BIT" Dimension="0" Radix="Decimal" Hidden="false" Target="ZZZZZZZZZZSnake_map_0" BitNumber="2" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[Display snake on worldmap]]>
+</Description>
+</Member>
+<Member Name="HMI_Color" DataType="DINT" Dimension="0" Radix="Decimal" Hidden="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[0 = Death
+1 = Food
+2 = Snake visable]]>
+</Description>
+</Member>
+</Members>
+</DataType>
+<DataType Name="Snake_Struct" Family="NoFamily" Class="User">
+<Members>
+<Member Name="Length" DataType="DINT" Dimension="0" Radix="Decimal" Hidden="false" ExternalAccess="Read/Write"/>
+<Member Name="X" DataType="DINT" Dimension="32" Radix="Decimal" Hidden="false" ExternalAccess="Read/Write"/>
+<Member Name="Y" DataType="DINT" Dimension="32" Radix="Decimal" Hidden="false" ExternalAccess="Read/Write"/>
+<Member Name="HighScore" DataType="Snake_Struct_Highscores" Dimension="0" Radix="NullType" Hidden="false" ExternalAccess="Read/Write"/>
+</Members>
+<Dependencies>
+<Dependency Type="DataType" Name="Snake_Struct_Highscores"/>
+</Dependencies>
+</DataType>
+<DataType Name="Snake_Struct_Highscores" Family="NoFamily" Class="User">
+<Members>
+<Member Name="Names" DataType="STRING" Dimension="3" Radix="NullType" Hidden="false" ExternalAccess="Read/Write"/>
+<Member Name="Score" DataType="DINT" Dimension="3" Radix="Decimal" Hidden="false" ExternalAccess="Read/Write"/>
+</Members>
+</DataType>
+</DataTypes>
+<Programs Use="Context">
+<Program Use="Target" Name="Games" TestEdits="false" MainRoutineName="Snake" Disabled="false" Class="Standard" UseAsFolder="false">
+<Tags>
+<Tag Name="Control" TagType="Base" DataType="INT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[0=down
+1=    left
+2=   right
+3=      up]]>
+</Description>
+<Data Format="L5K">
+<![CDATA[0]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="INT" Radix="Decimal" Value="0"/>
+</Data>
+</Tag>
+<Tag Name="debug" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[31]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="31"/>
+</Data>
+</Tag>
+<Tag Name="FALSE" TagType="Base" DataType="BOOL" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[0]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="BOOL" Radix="Decimal" Value="0"/>
+</Data>
+</Tag>
+<Tag Name="GameOver" TagType="Base" DataType="BOOL" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[Snake Reached deathzone]]>
+</Description>
+<Data Format="L5K">
+<![CDATA[0]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="BOOL" Radix="Decimal" Value="0"/>
+</Data>
+</Tag>
+<Tag Name="HMI_GameSpeed" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[Timer interval for update time. 
+1000 = 1 sec]]>
+</Description>
+<Data Format="L5K">
+<![CDATA[1000]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="1000"/>
+</Data>
+</Tag>
+<Tag Name="HMI_NewGame" TagType="Base" DataType="BOOL" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[0]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="BOOL" Radix="Decimal" Value="0"/>
+</Data>
+</Tag>
+<Tag Name="HMI_Score" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[actual score how many foods have been collected]]>
+</Description>
+<Data Format="L5K">
+<![CDATA[0]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="0"/>
+</Data>
+</Tag>
+<Tag Name="HMI_StartGame" TagType="Base" DataType="BOOL" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[Start the game]]>
+</Description>
+<Data Format="L5K">
+<![CDATA[0]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="BOOL" Radix="Decimal" Value="0"/>
+</Data>
+</Tag>
+<Tag Name="i" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[index num]]>
+</Description>
+<Data Format="L5K">
+<![CDATA[10]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="10"/>
+</Data>
+</Tag>
+<Tag Name="ii" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[nested index num]]>
+</Description>
+<Data Format="L5K">
+<![CDATA[10]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="10"/>
+</Data>
+</Tag>
+<Tag Name="RandomNum1" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[1]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="1"/>
+</Data>
+</Tag>
+<Tag Name="RandomNum2" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[3]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="3"/>
+</Data>
+</Tag>
+<Tag Name="Random_X" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[1]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="1"/>
+</Data>
+</Tag>
+<Tag Name="Random_Y" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[3]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="3"/>
+</Data>
+</Tag>
+<Tag Name="Snake" TagType="Base" DataType="Snake_Struct" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[[0,[5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[[[17,'tom3, ik ben goed$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00'
+		],[7,'Sander!$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00'
+		],[7,'tom2578$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00'
+		]],[19,17,16]]]]]>
+</Data>
+<Data Format="Decorated">
+<Structure DataType="Snake_Struct">
+<DataValueMember Name="Length" DataType="DINT" Radix="Decimal" Value="0"/>
+<ArrayMember Name="X" DataType="DINT" Dimensions="32" Radix="Decimal">
+<Element Index="[0]" Value="5"/>
+<Element Index="[1]" Value="0"/>
+<Element Index="[2]" Value="0"/>
+<Element Index="[3]" Value="0"/>
+<Element Index="[4]" Value="0"/>
+<Element Index="[5]" Value="0"/>
+<Element Index="[6]" Value="0"/>
+<Element Index="[7]" Value="0"/>
+<Element Index="[8]" Value="0"/>
+<Element Index="[9]" Value="0"/>
+<Element Index="[10]" Value="0"/>
+<Element Index="[11]" Value="0"/>
+<Element Index="[12]" Value="0"/>
+<Element Index="[13]" Value="0"/>
+<Element Index="[14]" Value="0"/>
+<Element Index="[15]" Value="0"/>
+<Element Index="[16]" Value="0"/>
+<Element Index="[17]" Value="0"/>
+<Element Index="[18]" Value="0"/>
+<Element Index="[19]" Value="0"/>
+<Element Index="[20]" Value="0"/>
+<Element Index="[21]" Value="0"/>
+<Element Index="[22]" Value="0"/>
+<Element Index="[23]" Value="0"/>
+<Element Index="[24]" Value="0"/>
+<Element Index="[25]" Value="0"/>
+<Element Index="[26]" Value="0"/>
+<Element Index="[27]" Value="0"/>
+<Element Index="[28]" Value="0"/>
+<Element Index="[29]" Value="0"/>
+<Element Index="[30]" Value="0"/>
+<Element Index="[31]" Value="0"/>
+</ArrayMember>
+<ArrayMember Name="Y" DataType="DINT" Dimensions="32" Radix="Decimal">
+<Element Index="[0]" Value="5"/>
+<Element Index="[1]" Value="0"/>
+<Element Index="[2]" Value="0"/>
+<Element Index="[3]" Value="0"/>
+<Element Index="[4]" Value="0"/>
+<Element Index="[5]" Value="0"/>
+<Element Index="[6]" Value="0"/>
+<Element Index="[7]" Value="0"/>
+<Element Index="[8]" Value="0"/>
+<Element Index="[9]" Value="0"/>
+<Element Index="[10]" Value="0"/>
+<Element Index="[11]" Value="0"/>
+<Element Index="[12]" Value="0"/>
+<Element Index="[13]" Value="0"/>
+<Element Index="[14]" Value="0"/>
+<Element Index="[15]" Value="0"/>
+<Element Index="[16]" Value="0"/>
+<Element Index="[17]" Value="0"/>
+<Element Index="[18]" Value="0"/>
+<Element Index="[19]" Value="0"/>
+<Element Index="[20]" Value="0"/>
+<Element Index="[21]" Value="0"/>
+<Element Index="[22]" Value="0"/>
+<Element Index="[23]" Value="0"/>
+<Element Index="[24]" Value="0"/>
+<Element Index="[25]" Value="0"/>
+<Element Index="[26]" Value="0"/>
+<Element Index="[27]" Value="0"/>
+<Element Index="[28]" Value="0"/>
+<Element Index="[29]" Value="0"/>
+<Element Index="[30]" Value="0"/>
+<Element Index="[31]" Value="0"/>
+</ArrayMember>
+<StructureMember Name="HighScore" DataType="Snake_Struct_Highscores">
+<ArrayMember Name="Names" DataType="STRING" Dimensions="3">
+<Element Index="[0]">
+<Structure DataType="STRING">
+<DataValueMember Name="LEN" DataType="DINT" Radix="Decimal" Value="17"/>
+<DataValueMember Name="DATA" DataType="STRING" Radix="ASCII">
+<![CDATA['tom3, ik ben goed']]>
+</DataValueMember>
+</Structure>
+</Element>
+<Element Index="[1]">
+<Structure DataType="STRING">
+<DataValueMember Name="LEN" DataType="DINT" Radix="Decimal" Value="7"/>
+<DataValueMember Name="DATA" DataType="STRING" Radix="ASCII">
+<![CDATA['Sander!']]>
+</DataValueMember>
+</Structure>
+</Element>
+<Element Index="[2]">
+<Structure DataType="STRING">
+<DataValueMember Name="LEN" DataType="DINT" Radix="Decimal" Value="7"/>
+<DataValueMember Name="DATA" DataType="STRING" Radix="ASCII">
+<![CDATA['tom2578']]>
+</DataValueMember>
+</Structure>
+</Element>
+</ArrayMember>
+<ArrayMember Name="Score" DataType="DINT" Dimensions="3" Radix="Decimal">
+<Element Index="[0]" Value="19"/>
+<Element Index="[1]" Value="17"/>
+<Element Index="[2]" Value="16"/>
+</ArrayMember>
+</StructureMember>
+</Structure>
+</Data>
+</Tag>
+<Tag Name="Sts_Highscore" TagType="Base" DataType="DINT" Dimensions="3" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[[7,6,5]]]>
+</Data>
+<Data Format="Decorated">
+<Array DataType="DINT" Dimensions="3" Radix="Decimal">
+<Element Index="[0]" Value="7"/>
+<Element Index="[1]" Value="6"/>
+<Element Index="[2]" Value="5"/>
+</Array>
+</Data>
+</Tag>
+<Tag Name="tempString" TagType="Base" DataType="STRING" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[[2,'13$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00'
+		]]]>
+</Data>
+<Data Format="String" Length="2">
+<![CDATA['13']]>
+</Data>
+</Tag>
+<Tag Name="temp_dint" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[trash dint to dump time struct in ]]>
+</Description>
+<Data Format="L5K">
+<![CDATA[0]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="0"/>
+</Data>
+</Tag>
+<Tag Name="temp_lint" TagType="Base" DataType="LINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[just some trash value to dump time struct in]]>
+</Description>
+<Data Format="L5K">
+<![CDATA[0]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="LINT" Radix="Decimal" Value="0"/>
+</Data>
+</Tag>
+<Tag Name="TRUE" TagType="Base" DataType="BOOL" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[1]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="BOOL" Radix="Decimal" Value="1"/>
+</Data>
+</Tag>
+<Tag Name="T_randomNum" TagType="Base" DataType="FBD_TIMER" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[[3,7,99,77,0,4,-140106513,5632,998445679,0,77,7]]]>
+</Data>
+<Data Format="Decorated">
+<Structure DataType="FBD_TIMER">
+<DataValueMember Name="EnableIn" DataType="BOOL" Value="1"/>
+<DataValueMember Name="TimerEnable" DataType="BOOL" Value="1"/>
+<DataValueMember Name="PRE" DataType="DINT" Radix="Decimal" Value="99"/>
+<DataValueMember Name="Reset" DataType="BOOL" Value="0"/>
+<DataValueMember Name="EnableOut" DataType="BOOL" Value="1"/>
+<DataValueMember Name="ACC" DataType="DINT" Radix="Decimal" Value="77"/>
+<DataValueMember Name="EN" DataType="BOOL" Value="1"/>
+<DataValueMember Name="TT" DataType="BOOL" Value="1"/>
+<DataValueMember Name="DN" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Status" DataType="DINT" Radix="Hex" Value="16#0000_0000"/>
+<DataValueMember Name="InstructFault" DataType="BOOL" Value="0"/>
+<DataValueMember Name="PresetInv" DataType="BOOL" Value="0"/>
+</Structure>
+</Data>
+</Tag>
+<Tag Name="UpdatePosition" TagType="Base" DataType="FBD_TIMER" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[[1,1,1000,0,0,4,1555751609,5632,998445679,0,0,1]]]>
+</Data>
+<Data Format="Decorated">
+<Structure DataType="FBD_TIMER">
+<DataValueMember Name="EnableIn" DataType="BOOL" Value="1"/>
+<DataValueMember Name="TimerEnable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="PRE" DataType="DINT" Radix="Decimal" Value="1000"/>
+<DataValueMember Name="Reset" DataType="BOOL" Value="0"/>
+<DataValueMember Name="EnableOut" DataType="BOOL" Value="1"/>
+<DataValueMember Name="ACC" DataType="DINT" Radix="Decimal" Value="0"/>
+<DataValueMember Name="EN" DataType="BOOL" Value="0"/>
+<DataValueMember Name="TT" DataType="BOOL" Value="0"/>
+<DataValueMember Name="DN" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Status" DataType="DINT" Radix="Hex" Value="16#0000_0000"/>
+<DataValueMember Name="InstructFault" DataType="BOOL" Value="0"/>
+<DataValueMember Name="PresetInv" DataType="BOOL" Value="0"/>
+</Structure>
+</Data>
+</Tag>
+<Tag Name="WorldMap" TagType="Base" DataType="Snake_map_stuct" Dimensions="10 10" Usage="Public" Constant="false" ExternalAccess="Read/Write">
+<Description>
+<![CDATA[where the big fat game takes place 
+]]>
+</Description>
+<Data Format="L5K">
+<![CDATA[[[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[1,3],[1,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[1,3],[1,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[1,3],[1
+		,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[1,3],[1,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[1,3],[1,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[1,3],[1,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[1,3],[1,3
+		],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[0,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3],[1,3]]]]>
+</Data>
+<Data Format="Decorated">
+<Array DataType="Snake_map_stuct" Dimensions="10,10">
+<Element Index="[0,0]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[0,1]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[0,2]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[0,3]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[0,4]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[0,5]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[0,6]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[0,7]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[0,8]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[0,9]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[1,0]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[1,1]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[1,2]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[1,3]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[1,4]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[1,5]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[1,6]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[1,7]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[1,8]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[1,9]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[2,0]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[2,1]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[2,2]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[2,3]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[2,4]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[2,5]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[2,6]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[2,7]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[2,8]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[2,9]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[3,0]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[3,1]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[3,2]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[3,3]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[3,4]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[3,5]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[3,6]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[3,7]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[3,8]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[3,9]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[4,0]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[4,1]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[4,2]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[4,3]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[4,4]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[4,5]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[4,6]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[4,7]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[4,8]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[4,9]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[5,0]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[5,1]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[5,2]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[5,3]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[5,4]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[5,5]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[5,6]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[5,7]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[5,8]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[5,9]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[6,0]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[6,1]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[6,2]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[6,3]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[6,4]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[6,5]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[6,6]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[6,7]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[6,8]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[6,9]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[7,0]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[7,1]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[7,2]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[7,3]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[7,4]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[7,5]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[7,6]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[7,7]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[7,8]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[7,9]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[8,0]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[8,1]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[8,2]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[8,3]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[8,4]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[8,5]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[8,6]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[8,7]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[8,8]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="0"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[8,9]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[9,0]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[9,1]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[9,2]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[9,3]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[9,4]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[9,5]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[9,6]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[9,7]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[9,8]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+<Element Index="[9,9]">
+<Structure DataType="Snake_map_stuct">
+<DataValueMember Name="Death" DataType="BOOL" Value="1"/>
+<DataValueMember Name="Food" DataType="BOOL" Value="0"/>
+<DataValueMember Name="SnakeVisable" DataType="BOOL" Value="0"/>
+<DataValueMember Name="HMI_Color" DataType="DINT" Radix="Decimal" Value="3"/>
+</Structure>
+</Element>
+</Array>
+</Data>
+</Tag>
+<Tag Name="wrk_CheckScoreBoard" TagType="Base" DataType="BOOL" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[1]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="BOOL" Radix="Decimal" Value="1"/>
+</Data>
+</Tag>
+<Tag Name="wrk_DeathBox_X" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[9]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="9"/>
+</Data>
+</Tag>
+<Tag Name="wrk_DeathBox_Y" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[1]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="1"/>
+</Data>
+</Tag>
+<Tag Name="wrk_Generate_Food" TagType="Base" DataType="BOOL" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[1]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="BOOL" Radix="Decimal" Value="1"/>
+</Data>
+</Tag>
+<Tag Name="wrk_Random_X" TagType="Base" DataType="STRING" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[[0,'$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00$00'
+		]]]>
+</Data>
+<Data Format="String" Length="0">
+<![CDATA['']]>
+</Data>
+</Tag>
+<Tag Name="wrk_X_position" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[4]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="4"/>
+</Data>
+</Tag>
+<Tag Name="wrk_Y_position" TagType="Base" DataType="DINT" Radix="Decimal" Constant="false" ExternalAccess="Read/Write">
+<Data Format="L5K">
+<![CDATA[8]]>
+</Data>
+<Data Format="Decorated">
+<DataValue DataType="DINT" Radix="Decimal" Value="8"/>
+</Data>
+</Tag>
+</Tags>
+<Routines>
+<Routine Name="Snake" Type="ST">
+<STContent>
+<Line Number="0">
+<![CDATA[////////////////////////////////////////////////////////////]]>
+</Line>
+<Line Number="1">
+<![CDATA[//   Copyright (c)  ]]>
+</Line>
+<Line Number="2">
+<![CDATA[//------------------------------------------------------------]]>
+</Line>
+<Line Number="3">
+<![CDATA[//   Routine: Snake]]>
+</Line>
+<Line Number="4">
+<![CDATA[//   Author: WPI\tom.reit]]>
+</Line>
+<Line Number="5">
+<![CDATA[//   Created: 8-7-2022]]>
+</Line>
+<Line Number="6">
+<![CDATA[//------------------------------------------------------------]]>
+</Line>
+<Line Number="7">
+<![CDATA[//   Description:]]>
+</Line>
+<Line Number="8">
+<![CDATA[//           ]]>
+</Line>
+<Line Number="9">
+<![CDATA[//]]>
+</Line>
+<Line Number="10">
+<![CDATA[//   History:]]>
+</Line>
+<Line Number="11">
+<![CDATA[//]]>
+</Line>
+<Line Number="12">
+<![CDATA[////////////////////////////////////////////////////////////]]>
+</Line>
+<Line Number="13">
+<![CDATA[]]>
+</Line>
+<Line Number="14">
+<![CDATA[]]>
+</Line>
+<Line Number="15">
+<![CDATA[]]>
+</Line>
+<Line Number="16">
+<![CDATA[/*]]>
+</Line>
+<Line Number="17">
+<![CDATA[snake[0] is always first element of the snake. ]]>
+</Line>
+<Line Number="18">
+<![CDATA[]]>
+</Line>
+<Line Number="19">
+<![CDATA[*/]]>
+</Line>
+<Line Number="20">
+<![CDATA[/* index num 0 = death zone & index num 9 = death zone */ ]]>
+</Line>
+<Line Number="21">
+<![CDATA[/* ]]>
+</Line>
+<Line Number="22">
+<![CDATA[game map ]]>
+</Line>
+<Line Number="23">
+<![CDATA[]]>
+</Line>
+<Line Number="24">
+<![CDATA[WorldMap[X,Y]]]>
+</Line>
+<Line Number="25">
+<![CDATA[]]>
+</Line>
+<Line Number="26">
+<![CDATA[    0   1   2   3   4   5   6   7   8   9]]>
+</Line>
+<Line Number="27">
+<![CDATA[0 | x | x | x | x | x | x | x | x | x | x | ]]>
+</Line>
+<Line Number="28">
+<![CDATA[1 | x |   |   |   |   |   |   |   |   | x |  ]]>
+</Line>
+<Line Number="29">
+<![CDATA[2 | x |   |   |   |   |   |   |   |   | x | ]]>
+</Line>
+<Line Number="30">
+<![CDATA[3 | x |   |   |   |   |   |   |   |   | x |  ]]>
+</Line>
+<Line Number="31">
+<![CDATA[4 | x |   |   |   |   |   |   |   |   | x | ]]>
+</Line>
+<Line Number="32">
+<![CDATA[5 | x |   |   |   |   |   |   |   |   | x |  ]]>
+</Line>
+<Line Number="33">
+<![CDATA[6 | x |   |   |   |   |   |   |   |   | x | ]]>
+</Line>
+<Line Number="34">
+<![CDATA[7 | x |   |   |   |   |   |   |   |   | x |  ]]>
+</Line>
+<Line Number="35">
+<![CDATA[8 | x |   |   |   |   |   |   |   |   | x | ]]>
+</Line>
+<Line Number="36">
+<![CDATA[9 | x | x | x | x | x | x | x | x | x | x | ]]>
+</Line>
+<Line Number="37">
+<![CDATA[def X> . Y^]]>
+</Line>
+<Line Number="38">
+<![CDATA[ ]]>
+</Line>
+<Line Number="39">
+<![CDATA[ ]]>
+</Line>
+<Line Number="40">
+<![CDATA[ ]]>
+</Line>
+<Line Number="41">
+<![CDATA[*/]]>
+</Line>
+<Line Number="42">
+<![CDATA[]]>
+</Line>
+<Line Number="43">
+<![CDATA[#region Macros]]>
+</Line>
+<Line Number="44">
+<![CDATA[	TRUE:=1;]]>
+</Line>
+<Line Number="45">
+<![CDATA[	FALSE:=0;]]>
+</Line>
+<Line Number="46">
+<![CDATA[#endregion]]>
+</Line>
+<Line Number="47">
+<![CDATA[]]>
+</Line>
+<Line Number="48">
+<![CDATA[#region Prevent overflow]]>
+</Line>
+<Line Number="49">
+<![CDATA[	if Snake.Length>30 then]]>
+</Line>
+<Line Number="50">
+<![CDATA[		Snake.Length	:=0;			//:)]]>
+</Line>
+<Line Number="51">
+<![CDATA[		GameOver		:=TRUE;			//Stop game.]]>
+</Line>
+<Line Number="52">
+<![CDATA[		HMI_StartGame	:=FALSE;		//Stop game.]]>
+</Line>
+<Line Number="53">
+<![CDATA[	end_if;]]>
+</Line>
+<Line Number="54">
+<![CDATA[#endregion]]>
+</Line>
+<Line Number="55">
+<![CDATA[]]>
+</Line>
+<Line Number="56">
+<![CDATA[#region High score]]>
+</Line>
+<Line Number="57">
+<![CDATA[	if GameOver and NOT HMI_StartGame and wrk_CheckScoreBoard then]]>
+</Line>
+<Line Number="58">
+<![CDATA[		/* ]]>
+</Line>
+<Line Number="59">
+<![CDATA[			check if current score is higher then any highscore following 1st 2nd and then 3rd. ]]>
+</Line>
+<Line Number="60">
+<![CDATA[							Once true add highscore to highscore array. ]]>
+</Line>
+<Line Number="61">
+<![CDATA[		*/	]]>
+</Line>
+<Line Number="62">
+<![CDATA[		for i := 0 to 2 do]]>
+</Line>
+<Line Number="63">
+<![CDATA[			if Snake.Length>Snake.HighScore.Score[i]then]]>
+</Line>
+<Line Number="64">
+<![CDATA[				/* shift high score first before adding new high score. */]]>
+</Line>
+<Line Number="65">
+<![CDATA[				for ii := i to 2 do]]>
+</Line>
+<Line Number="66">
+<![CDATA[					if 1 >= i then]]>
+</Line>
+<Line Number="67">
+<![CDATA[						Snake.HighScore.Score[i+1]:=Snake.HighScore.Score[i];]]>
+</Line>
+<Line Number="68">
+<![CDATA[						Snake.HighScore.Names[i+1]:=Snake.HighScore.Names[i];]]>
+</Line>
+<Line Number="69">
+<![CDATA[					end_if;]]>
+</Line>
+<Line Number="70">
+<![CDATA[				end_for;]]>
+</Line>
+<Line Number="71">
+<![CDATA[				Snake.HighScore.Score[i]:=Snake.Length;		// add new high score.]]>
+</Line>
+<Line Number="72">
+<![CDATA[				wrk_CheckScoreBoard:=FALSE;			// add score once.]]>
+</Line>
+<Line Number="73">
+<![CDATA[				exit;// cancel forloop]]>
+</Line>
+<Line Number="74">
+<![CDATA[			end_if;]]>
+</Line>
+<Line Number="75">
+<![CDATA[		end_for;]]>
+</Line>
+<Line Number="76">
+<![CDATA[	end_if;]]>
+</Line>
+<Line Number="77">
+<![CDATA[]]>
+</Line>
+<Line Number="78">
+<![CDATA[#endregion]]>
+</Line>
+<Line Number="79">
+<![CDATA[]]>
+</Line>
+<Line Number="80">
+<![CDATA[#region New Game ]]>
+</Line>
+<Line Number="81">
+<![CDATA[	if s:fs OR HMI_NewGame then]]>
+</Line>
+<Line Number="82">
+<![CDATA[		for i := 0 to 31 do				// reset snake]]>
+</Line>
+<Line Number="83">
+<![CDATA[			Snake.X[i]:=0;				// clear previous values]]>
+</Line>
+<Line Number="84">
+<![CDATA[			Snake.Y[i]:=0;				// clear previous values]]>
+</Line>
+<Line Number="85">
+<![CDATA[		end_for;]]>
+</Line>
+<Line Number="86">
+<![CDATA[		/* Snake start position */]]>
+</Line>
+<Line Number="87">
+<![CDATA[		HMI_GameSpeed		:=1000;			// predefined snake speed.]]>
+</Line>
+<Line Number="88">
+<![CDATA[		HMI_Score			:=0;			// fuck you, new game so score is 0. ]]>
+</Line>
+<Line Number="89">
+<![CDATA[		Snake.Length		:=0;			// Start snake score at 0.]]>
+</Line>
+<Line Number="90">
+<![CDATA[		Snake.X[0]			:=5;			// Start position snake ]]>
+</Line>
+<Line Number="91">
+<![CDATA[		Snake.Y[0]			:=5;			// Start position snake ]]>
+</Line>
+<Line Number="92">
+<![CDATA[		GameOver			:=FALSE;		// Prepare new game]]>
+</Line>
+<Line Number="93">
+<![CDATA[		wrk_CheckScoreBoard	:=TRUE;			// Check scoreboard ]]>
+</Line>
+<Line Number="94">
+<![CDATA[		wrk_Generate_Food	:=TRUE;			// Set food generation to true.]]>
+</Line>
+<Line Number="95">
+<![CDATA[		#region Clear whole map]]>
+</Line>
+<Line Number="96">
+<![CDATA[			for i := 0 to 9 do]]>
+</Line>
+<Line Number="97">
+<![CDATA[								/* Clear world map X */]]>
+</Line>
+<Line Number="98">
+<![CDATA[				WorldMap[i,0].Death:=FALSE;	WorldMap[i,0].Food:=FALSE;	]]>
+</Line>
+<Line Number="99">
+<![CDATA[				WorldMap[i,1].Death:=FALSE;	WorldMap[i,1].Food:=FALSE;	]]>
+</Line>
+<Line Number="100">
+<![CDATA[				WorldMap[i,2].Death:=FALSE;	WorldMap[i,2].Food:=FALSE;	]]>
+</Line>
+<Line Number="101">
+<![CDATA[				WorldMap[i,3].Death:=FALSE; WorldMap[i,3].Food:=FALSE;]]>
+</Line>
+<Line Number="102">
+<![CDATA[				WorldMap[i,4].Death:=FALSE; WorldMap[i,4].Food:=FALSE;]]>
+</Line>
+<Line Number="103">
+<![CDATA[				WorldMap[i,5].Death:=FALSE; WorldMap[i,5].Food:=FALSE;]]>
+</Line>
+<Line Number="104">
+<![CDATA[				WorldMap[i,6].Death:=FALSE; WorldMap[i,6].Food:=FALSE;]]>
+</Line>
+<Line Number="105">
+<![CDATA[				WorldMap[i,7].Death:=FALSE; WorldMap[i,7].Food:=FALSE;]]>
+</Line>
+<Line Number="106">
+<![CDATA[				WorldMap[i,8].Death:=FALSE; WorldMap[i,8].Food:=FALSE;]]>
+</Line>
+<Line Number="107">
+<![CDATA[				WorldMap[i,9].Death:=FALSE; WorldMap[i,9].Food:=FALSE;]]>
+</Line>
+<Line Number="108">
+<![CDATA[				]]>
+</Line>
+<Line Number="109">
+<![CDATA[								/* Clear world map Y */]]>
+</Line>
+<Line Number="110">
+<![CDATA[				WorldMap[0,i].Death:=FALSE; WorldMap[0,i].Food:=FALSE;]]>
+</Line>
+<Line Number="111">
+<![CDATA[				WorldMap[1,i].Death:=FALSE; WorldMap[1,i].Food:=FALSE;]]>
+</Line>
+<Line Number="112">
+<![CDATA[				WorldMap[2,i].Death:=FALSE; WorldMap[2,i].Food:=FALSE;]]>
+</Line>
+<Line Number="113">
+<![CDATA[				WorldMap[3,i].Death:=FALSE; WorldMap[3,i].Food:=FALSE;]]>
+</Line>
+<Line Number="114">
+<![CDATA[				WorldMap[4,i].Death:=FALSE; WorldMap[4,i].Food:=FALSE;]]>
+</Line>
+<Line Number="115">
+<![CDATA[				WorldMap[5,i].Death:=FALSE; WorldMap[5,i].Food:=FALSE;]]>
+</Line>
+<Line Number="116">
+<![CDATA[				WorldMap[6,i].Death:=FALSE; WorldMap[6,i].Food:=FALSE;]]>
+</Line>
+<Line Number="117">
+<![CDATA[				WorldMap[7,i].Death:=FALSE; WorldMap[7,i].Food:=FALSE;]]>
+</Line>
+<Line Number="118">
+<![CDATA[				WorldMap[8,i].Death:=FALSE; WorldMap[8,i].Food:=FALSE;]]>
+</Line>
+<Line Number="119">
+<![CDATA[				WorldMap[9,i].Death:=FALSE; WorldMap[9,i].Food:=FALSE;]]>
+</Line>
+<Line Number="120">
+<![CDATA[			end_for;]]>
+</Line>
+<Line Number="121">
+<![CDATA[			i:=0;	// set index back to 0]]>
+</Line>
+<Line Number="122">
+<![CDATA[			ii:=0;	// set index back to 0]]>
+</Line>
+<Line Number="123">
+<![CDATA[				/* set world map to white background */]]>
+</Line>
+<Line Number="124">
+<![CDATA[			for i := 0 to 9 do]]>
+</Line>
+<Line Number="125">
+<![CDATA[				for ii := 0 to 9 do]]>
+</Line>
+<Line Number="126">
+<![CDATA[					WorldMap[i,ii].SnakeVisable:=FALSE;	// set to white]]>
+</Line>
+<Line Number="127">
+<![CDATA[					WorldMap[i,ii].HMI_Color:=3;		// set to white]]>
+</Line>
+<Line Number="128">
+<![CDATA[				end_for;]]>
+</Line>
+<Line Number="129">
+<![CDATA[			end_for;]]>
+</Line>
+<Line Number="130">
+<![CDATA[		#endregion]]>
+</Line>
+<Line Number="131">
+<![CDATA[		#region Deathzone world map]]>
+</Line>
+<Line Number="132">
+<![CDATA[			for i := 0 to 9 do]]>
+</Line>
+<Line Number="133">
+<![CDATA[				// X death zone]]>
+</Line>
+<Line Number="134">
+<![CDATA[				WorldMap[0,i].Death:=TRUE;]]>
+</Line>
+<Line Number="135">
+<![CDATA[				WorldMap[9,i].Death:=TRUE;]]>
+</Line>
+<Line Number="136">
+<![CDATA[				]]>
+</Line>
+<Line Number="137">
+<![CDATA[				// Y death zone]]>
+</Line>
+<Line Number="138">
+<![CDATA[				WorldMap[i,0].Death:=TRUE;]]>
+</Line>
+<Line Number="139">
+<![CDATA[				WorldMap[i,9].Death:=TRUE;				]]>
+</Line>
+<Line Number="140">
+<![CDATA[			end_for;]]>
+</Line>
+<Line Number="141">
+<![CDATA[		#endregion]]>
+</Line>
+<Line Number="142">
+<![CDATA[		HMI_NewGame:=0;		]]>
+</Line>
+<Line Number="143">
+<![CDATA[	end_if;]]>
+</Line>
+<Line Number="144">
+<![CDATA[#endregion]]>
+</Line>
+<Line Number="145">
+<![CDATA[]]>
+</Line>
+<Line Number="146">
+<![CDATA[#region Control	]]>
+</Line>
+<Line Number="147">
+<![CDATA[	UpdatePosition.PRE:=HMI_GameSpeed;		// game speed]]>
+</Line>
+<Line Number="148">
+<![CDATA[	TONR(UpdatePosition);					// timer for game speed.]]>
+</Line>
+<Line Number="149">
+<![CDATA[	if HMI_StartGame AND NOT GameOver then	// every cycle update snake position.]]>
+</Line>
+<Line Number="150">
+<![CDATA[		UpdatePosition.TimerEnable:=TRUE;]]>
+</Line>
+<Line Number="151">
+<![CDATA[		#region Each time timer is done, update position and count according to input from user.]]>
+</Line>
+<Line Number="152">
+<![CDATA[			if UpdatePosition.DN then]]>
+</Line>
+<Line Number="153">
+<![CDATA[				/* shift snake boiii, from end of array to front. */]]>
+</Line>
+<Line Number="154">
+<![CDATA[				for i := 1 to 30 do]]>
+</Line>
+<Line Number="155">
+<![CDATA[					Snake.X[31-i]:=Snake.X[30-i];]]>
+</Line>
+<Line Number="156">
+<![CDATA[					Snake.Y[31-i]:=Snake.Y[30-i];	]]>
+</Line>
+<Line Number="157">
+<![CDATA[				end_for;]]>
+</Line>
+<Line Number="158">
+<![CDATA[				]]>
+</Line>
+<Line Number="159">
+<![CDATA[				/* add next element to big boi snake */]]>
+</Line>
+<Line Number="160">
+<![CDATA[				case Control of]]>
+</Line>
+<Line Number="161">
+<![CDATA[					0: // down]]>
+</Line>
+<Line Number="162">
+<![CDATA[						Snake.Y[0]:=Snake.Y[0]+1;		// v]]>
+</Line>
+<Line Number="163">
+<![CDATA[					1: // left]]>
+</Line>
+<Line Number="164">
+<![CDATA[						Snake.X[0]:=Snake.X[0]-1;		// <]]>
+</Line>
+<Line Number="165">
+<![CDATA[					2: // right]]>
+</Line>
+<Line Number="166">
+<![CDATA[						Snake.X[0]:=Snake.X[0]+1;		// >]]>
+</Line>
+<Line Number="167">
+<![CDATA[					3: // Up]]>
+</Line>
+<Line Number="168">
+<![CDATA[						Snake.Y[0]:=Snake.Y[0]-1;		// ^]]>
+</Line>
+<Line Number="169">
+<![CDATA[					else]]>
+</Line>
+<Line Number="170">
+<![CDATA[				end_case;]]>
+</Line>
+<Line Number="171">
+<![CDATA[			end_if;]]>
+</Line>
+<Line Number="172">
+<![CDATA[		#endregion]]>
+</Line>
+<Line Number="173">
+<![CDATA[	else]]>
+</Line>
+<Line Number="174">
+<![CDATA[		UpdatePosition.TimerEnable:=FALSE;			// turn off timer]]>
+</Line>
+<Line Number="175">
+<![CDATA[	end_if;]]>
+</Line>
+<Line Number="176">
+<![CDATA[		UpdatePosition.Reset:=UpdatePosition.DN;	// reset timer once Dn has been reached. only 1 puls]]>
+</Line>
+<Line Number="177">
+<![CDATA[#endregion]]>
+</Line>
+<Line Number="178">
+<![CDATA[]]>
+</Line>
+<Line Number="179">
+<![CDATA[]]>
+</Line>
+<Line Number="180">
+<![CDATA[#region Check death box]]>
+</Line>
+<Line Number="181">
+<![CDATA[	if HMI_StartGame AND NOT GameOver then]]>
+</Line>
+<Line Number="182">
+<![CDATA[		wrk_DeathBox_X:=Snake.X[0];					// check if front of snake reached deathbox]]>
+</Line>
+<Line Number="183">
+<![CDATA[		wrk_DeathBox_Y:=Snake.Y[0];					// check if front of snake reached deathbox]]>
+</Line>
+<Line Number="184">
+<![CDATA[		if WorldMap[wrk_DeathBox_X,wrk_DeathBox_Y].Death then]]>
+</Line>
+<Line Number="185">
+<![CDATA[			GameOver		:=TRUE; //Stop game.]]>
+</Line>
+<Line Number="186">
+<![CDATA[			HMI_StartGame	:=FALSE;//Stop game.]]>
+</Line>
+<Line Number="187">
+<![CDATA[		else]]>
+</Line>
+<Line Number="188">
+<![CDATA[			GameOver		:=FALSE;// keep game going.]]>
+</Line>
+<Line Number="189">
+<![CDATA[		end_if;]]>
+</Line>
+<Line Number="190">
+<![CDATA[		]]>
+</Line>
+<Line Number="191">
+<![CDATA[		/* check if snake hits itself*/]]>
+</Line>
+<Line Number="192">
+<![CDATA[		for i := 0 to Snake.Length do]]>
+</Line>
+<Line Number="193">
+<![CDATA[			if ( (Snake.X[0]=Snake.X[i+1]) AND (Snake.Y[0]=Snake.Y[i+1]) ) then]]>
+</Line>
+<Line Number="194">
+<![CDATA[				GameOver		:=TRUE; //Stop game.]]>
+</Line>
+<Line Number="195">
+<![CDATA[				HMI_StartGame	:=FALSE;//Stop game.]]>
+</Line>
+<Line Number="196">
+<![CDATA[			end_if;]]>
+</Line>
+<Line Number="197">
+<![CDATA[		end_for;]]>
+</Line>
+<Line Number="198">
+<![CDATA[]]>
+</Line>
+<Line Number="199">
+<![CDATA[	end_if;]]>
+</Line>
+<Line Number="200">
+<![CDATA[#endregion]]>
+</Line>
+<Line Number="201">
+<![CDATA[]]>
+</Line>
+<Line Number="202">
+<![CDATA[#region Food on map]]>
+</Line>
+<Line Number="203">
+<![CDATA[	#region Random num generator]]>
+</Line>
+<Line Number="204">
+<![CDATA[	/* ]]>
+</Line>
+<Line Number="205">
+<![CDATA[	 Because the PLC doesn't have a random num generator, we're using "Somewhat"random numbers. Based on a timer value. ]]>
+</Line>
+<Line Number="206">
+<![CDATA[	 once the snake reached is food the timer current value is saved and converted to be split into 2 values. the timer resets itelf once it reaches 99. ]]>
+</Line>
+<Line Number="207">
+<![CDATA[	 ]]>
+</Line>
+<Line Number="208">
+<![CDATA[	 for example: ]]>
+</Line>
+<Line Number="209">
+<![CDATA[	 snake reaches food once the timer is at 75 the value 75 is split into 7 and 5. So new food generation will be done at X 7 and Y 5. ]]>
+</Line>
+<Line Number="210">
+<![CDATA[	*/]]>
+</Line>
+<Line Number="211">
+<![CDATA[		TONR(T_randomNum);				// random num timer]]>
+</Line>
+<Line Number="212">
+<![CDATA[		T_randomNum.TimerEnable:=TRUE;	// start timer]]>
+</Line>
+<Line Number="213">
+<![CDATA[		T_randomNum.PRE:=99;			// predefined num because snake can only be within 9 and 9 ]]>
+</Line>
+<Line Number="214">
+<![CDATA[		if T_randomNum.DN then			// timer done]]>
+</Line>
+<Line Number="215">
+<![CDATA[			T_randomNum.Reset:=TRUE;	// reset itself]]>
+</Line>
+<Line Number="216">
+<![CDATA[		else							]]>
+</Line>
+<Line Number="217">
+<![CDATA[			T_randomNum.Reset:=FALSE;	]]>
+</Line>
+<Line Number="218">
+<![CDATA[		end_if;]]>
+</Line>
+<Line Number="219">
+<![CDATA[	#endregion]]>
+</Line>
+<Line Number="220">
+<![CDATA[]]>
+</Line>
+<Line Number="221">
+<![CDATA[	if HMI_StartGame AND wrk_Generate_Food then]]>
+</Line>
+<Line Number="222">
+<![CDATA[		/* random generator ]]>
+</Line>
+<Line Number="223">
+<![CDATA[		we can pick the first digit of timer, since this will loop around so ofthen that it can be conciderd random]]>
+</Line>
+<Line Number="224">
+<![CDATA[		*/]]>
+</Line>
+<Line Number="225">
+<![CDATA[		DTOS(T_randomNum.ACC,tempString);				// convert timer value into a string. ]]>
+</Line>
+<Line Number="226">
+<![CDATA[		RandomNum1:=tempString.DATA[0]-48;				// because the DINT is saved in assci we need to shift it back to a dint value by subtracting 48. ]]>
+</Line>
+<Line Number="227">
+<![CDATA[		RandomNum2:=tempString.DATA[1]-48;				// because the DINT is saved in assci we need to shift it back to a dint value by subtracting 48.]]>
+</Line>
+<Line Number="228">
+<![CDATA[		]]>
+</Line>
+<Line Number="229">
+<![CDATA[		Random_X 	:= RandomNum1;						// ]]>
+</Line>
+<Line Number="230">
+<![CDATA[		Random_Y	:= RandomNum2;						// ]]>
+</Line>
+<Line Number="231">
+<![CDATA[		]]>
+</Line>
+<Line Number="232">
+<![CDATA[		if Random_X<=0 then Random_X:=1; end_if;		// set border ]]>
+</Line>
+<Line Number="233">
+<![CDATA[		if Random_X>=9 then Random_X:=8; end_if;		// set border]]>
+</Line>
+<Line Number="234">
+<![CDATA[		]]>
+</Line>
+<Line Number="235">
+<![CDATA[		if Random_Y >=9 then Random_Y:=8; end_if;		// set border ]]>
+</Line>
+<Line Number="236">
+<![CDATA[		if Random_Y <=0 then Random_Y:=1; end_if;		// set border ]]>
+</Line>
+<Line Number="237">
+<![CDATA[		]]>
+</Line>
+<Line Number="238">
+<![CDATA[		WorldMap[Random_X,Random_Y].Food:=TRUE;			// set food on the map]]>
+</Line>
+<Line Number="239">
+<![CDATA[		wrk_Generate_Food:=FALSE;]]>
+</Line>
+<Line Number="240">
+<![CDATA[	end_if;]]>
+</Line>
+<Line Number="241">
+<![CDATA[	]]>
+</Line>
+<Line Number="242">
+<![CDATA[	/* check if snake has reached random X and random Y, if so remove food from map and regenerate a new one */]]>
+</Line>
+<Line Number="243">
+<![CDATA[	if Snake.X[0] = Random_X AND Snake.Y[0] = Random_Y AND UpdatePosition.DN then]]>
+</Line>
+<Line Number="244">
+<![CDATA[		Snake.Length:=Snake.Length+1;							// add 1 to snake length]]>
+</Line>
+<Line Number="245">
+<![CDATA[		if HMI_GameSpeed>100 then HMI_GameSpeed:=HMI_GameSpeed-50;	end_if;					// increase gamespeed]]>
+</Line>
+<Line Number="246">
+<![CDATA[		Snake.X[0]:=Random_X;]]>
+</Line>
+<Line Number="247">
+<![CDATA[		Snake.Y[0]:=Random_Y;]]>
+</Line>
+<Line Number="248">
+<![CDATA[		WorldMap[Random_X,Random_Y].Food	:=FALSE;			// Remove food from the map		]]>
+</Line>
+<Line Number="249">
+<![CDATA[		HMI_Score							:=HMI_Score+1;		// each time food is gatherd, add 1 to score.]]>
+</Line>
+<Line Number="250">
+<![CDATA[		wrk_Generate_Food					:=TRUE;]]>
+</Line>
+<Line Number="251">
+<![CDATA[	end_if;]]>
+</Line>
+<Line Number="252">
+<![CDATA[#endregion]]>
+</Line>
+<Line Number="253">
+<![CDATA[]]>
+</Line>
+<Line Number="254">
+<![CDATA[]]>
+</Line>
+<Line Number="255">
+<![CDATA[#region Update Snake on world map]]>
+</Line>
+<Line Number="256">
+<![CDATA[	/* snake positions which are in use based on snake length*/]]>
+</Line>
+<Line Number="257">
+<![CDATA[	if UpdatePosition.DN then]]>
+</Line>
+<Line Number="258">
+<![CDATA[		#region Clear previous positions				]]>
+</Line>
+<Line Number="259">
+<![CDATA[			for i := 0 to 9 do]]>
+</Line>
+<Line Number="260">
+<![CDATA[				for ii := 0 to 9 do]]>
+</Line>
+<Line Number="261">
+<![CDATA[					WorldMap[i,ii].SnakeVisable:=0;]]>
+</Line>
+<Line Number="262">
+<![CDATA[				end_for;]]>
+</Line>
+<Line Number="263">
+<![CDATA[			end_for;]]>
+</Line>
+<Line Number="264">
+<![CDATA[		#endregion	]]>
+</Line>
+<Line Number="265">
+<![CDATA[		#region Update snake on world map]]>
+</Line>
+<Line Number="266">
+<![CDATA[			i:=0;]]>
+</Line>
+<Line Number="267">
+<![CDATA[			for i := 0 to Snake.Length do					]]>
+</Line>
+<Line Number="268">
+<![CDATA[					wrk_X_position:=Snake.X[i];]]>
+</Line>
+<Line Number="269">
+<![CDATA[					wrk_Y_position:=Snake.Y[i];]]>
+</Line>
+<Line Number="270">
+<![CDATA[					if (wrk_X_position = 0) AND (wrk_Y_position = 0)  then 					]]>
+</Line>
+<Line Number="271">
+<![CDATA[						WorldMap[wrk_X_position,wrk_Y_position].SnakeVisable:=FALSE;]]>
+</Line>
+<Line Number="272">
+<![CDATA[					else]]>
+</Line>
+<Line Number="273">
+<![CDATA[						WorldMap[wrk_X_position,wrk_Y_position].SnakeVisable:=TRUE;]]>
+</Line>
+<Line Number="274">
+<![CDATA[					end_if;]]>
+</Line>
+<Line Number="275">
+<![CDATA[			end_for;]]>
+</Line>
+<Line Number="276">
+<![CDATA[		#endregion]]>
+</Line>
+<Line Number="277">
+<![CDATA[		i:=0;]]>
+</Line>
+<Line Number="278">
+<![CDATA[		ii:=0;]]>
+</Line>
+<Line Number="279">
+<![CDATA[		for i := 0 to 9 do]]>
+</Line>
+<Line Number="280">
+<![CDATA[			for ii := 0 to 9 do]]>
+</Line>
+<Line Number="281">
+<![CDATA[				]]>
+</Line>
+<Line Number="282">
+<![CDATA[				if 	  WorldMap[i,ii].Death 			then	WorldMap[i,ii].HMI_Color:=0;/* Death zone */]]>
+</Line>
+<Line Number="283">
+<![CDATA[				elsif WorldMap[i,ii].Food  			then	WorldMap[i,ii].HMI_Color:=1;/* food on map */ ]]>
+</Line>
+<Line Number="284">
+<![CDATA[				elsif WorldMap[i,ii].SnakeVisable   then	WorldMap[i,ii].HMI_Color:=2;/* Snake is on this tile */]]>
+</Line>
+<Line Number="285">
+<![CDATA[					]]>
+</Line>
+<Line Number="286">
+<![CDATA[				else /* white tile, nothing happening */]]>
+</Line>
+<Line Number="287">
+<![CDATA[					WorldMap[i,ii].HMI_Color:=3;]]>
+</Line>
+<Line Number="288">
+<![CDATA[				end_if;]]>
+</Line>
+<Line Number="289">
+<![CDATA[			end_for;]]>
+</Line>
+<Line Number="290">
+<![CDATA[		end_for;]]>
+</Line>
+<Line Number="291">
+<![CDATA[	end_if;]]>
+</Line>
+<Line Number="292">
+<![CDATA[#endregion]]>
+</Line>
+<Line Number="293">
+<![CDATA[]]>
+</Line>
+</STContent>
+</Routine>
+</Routines>
+</Program>
+</Programs>
+</Controller>
+</RSLogix5000Content>
