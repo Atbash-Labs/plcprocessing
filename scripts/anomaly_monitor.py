@@ -1,15 +1,29 @@
 #!/usr/bin/env python3
 """
-Long-running anomaly monitor worker.
+Per-subsystem anomaly monitoring with coordinator + worker threads.
 
-Modes:
-  - run: start continuous monitoring loop
-  - status: get run status
-  - list-events: list persisted anomaly events
-  - get-event: fetch one anomaly event
-  - ack-event: mark event as acknowledged
-  - cleanup: delete old events by retention policy
-  - replay-fixtures: run deterministic fixture validation
+Architecture:
+  AgentCoordinator (main thread)
+    - Discovers subsystems from Neo4j ontology
+    - Spawns/manages SubsystemAgent threads
+    - Reads stdin for commands (start/stop individual agents)
+    - Shared: Neo4j driver, IgnitionApiClient, thread-safe emit()
+
+  SubsystemAgent (one thread per subsystem)
+    - Own cycle loop, history cache, prev_values, ClaudeClient
+    - Monitors only its assigned tags
+    - Emits per-subsystem status/events via thread-safe emit()
+
+CLI modes:
+  run           Start coordinator with per-subsystem agents
+  list-events   List persisted anomaly events
+  get-event     Fetch one anomaly event
+  ack-event     Acknowledge an event
+  clear-event   Clear an acknowledged event
+  deep-analyze  Run LLM triage on an existing event
+  cleanup       Delete old events
+  status        Get run status
+  replay-fixtures  Validate scoring against fixtures
 """
 
 from __future__ import annotations
@@ -17,17 +31,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import signal
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 try:
     from dotenv import load_dotenv
-except ImportError:  # pragma: no cover - optional fallback for minimal environments
+except ImportError:
     def load_dotenv(*_args, **_kwargs):
         return False
 
@@ -40,8 +56,28 @@ from anomaly_rules import (
     safe_float,
 )
 
-
 load_dotenv()
+
+_api_semaphore = threading.Semaphore(2)  # max 2 concurrent Ignition API calls
+
+_emit_queue: queue.Queue = queue.Queue()
+
+
+def _emit_writer() -> None:
+    """Dedicated thread that drains the emit queue to stdout."""
+    while True:
+        line = _emit_queue.get()
+        if line is None:
+            break
+        try:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
+_emit_thread = threading.Thread(target=_emit_writer, daemon=True, name="emit-writer")
+_emit_thread.start()
 
 
 def utc_now_iso() -> str:
@@ -49,73 +85,15 @@ def utc_now_iso() -> str:
 
 
 def emit(prefix: str, payload: Dict[str, Any]) -> None:
-    """Emit machine-parseable messages for Electron main process."""
-    print(f"[{prefix}] {json.dumps(payload, default=str)}", flush=True)
+    _emit_queue.put(f"[{prefix}] {json.dumps(payload, default=str)}\n")
 
 
 DEFAULT_SUBSYSTEM_PRIORITY = ["view", "equipment", "group", "global"]
 
 
-def _preview_value(value: Any, max_len: int = 120) -> Any:
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    text = str(value)
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 3] + "..."
-
-
-def make_default_diagnostics(
-    *,
-    staleness_threshold_sec: int = 120,
-    phase: str = "initializing",
-    reason: str = "",
-) -> Dict[str, Any]:
-    return {
-        "phase": phase,
-        "reason": reason,
-        "monitoredTags": 0,
-        "linkedTags": 0,
-        "unlinkedTags": 0,
-        "validLiveCount": 0,
-        "missingTimestampCount": 0,
-        "inferredTimestampCount": 0,
-        "liveErrorCount": 0,
-        "liveErrorLinked": 0,
-        "liveErrorUnlinked": 0,
-        "qualityFilteredCount": 0,
-        "qualityFilteredLinked": 0,
-        "qualityFilteredUnlinked": 0,
-        "staleFilteredCount": 0,
-        "staleFilteredLinked": 0,
-        "staleFilteredUnlinked": 0,
-        "historyErrorCount": 0,
-        "historyErrorLinked": 0,
-        "historyErrorUnlinked": 0,
-        "insufficientHistoryCount": 0,
-        "lowHistoryCandidateCount": 0,
-        "evaluatedLinked": 0,
-        "evaluatedUnlinked": 0,
-        "candidateLinked": 0,
-        "candidateUnlinked": 0,
-        "nearShiftCount": 0,
-        "nearShiftLinked": 0,
-        "nearShiftUnlinked": 0,
-        "stalenessThresholdSec": staleness_threshold_sec,
-        "staleSamples": [],
-        "timestampParseNote": "Naive timestamps are treated as local time by parse_timestamp().",
-        "detectedSubsystemCount": 0,
-        "detectedSubsystems": [],
-        "candidateSubsystemCount": 0,
-        "candidateBySubsystem": {},
-        "subsystemShiftSignals": [],
-        "maxCandidatesPerSubsystem": 0,
-        "maxLlmTriagesPerSubsystem": 0,
-        "llmTriagedCount": 0,
-        "dedupSuppressedCount": 0,
-        "toolCalls": [],
-    }
-
+# ---------------------------------------------------------------------------
+#  Subsystem helpers
+# ---------------------------------------------------------------------------
 
 def _canonical_subsystem_type(kind: Any) -> str:
     value = str(kind or "").strip().lower()
@@ -149,7 +127,6 @@ def infer_tag_group(tag_path: Optional[str], folder_name: Optional[str] = None) 
         head = folder.split("/", 1)[0].strip()
         if head:
             return head
-
     raw = str(tag_path or "").strip()
     if not raw:
         return None
@@ -159,30 +136,26 @@ def infer_tag_group(tag_path: Optional[str], folder_name: Optional[str] = None) 
     if not raw:
         return None
     parts = [p.strip() for p in raw.split("/") if p.strip()]
-    # Ignore flat tags and only infer a group when there is at least one folder segment.
     if len(parts) < 2:
         return None
     return parts[0]
 
 
-def _last_segment_from_tag_path(tag_path: Optional[str]) -> str:
+def _last_segment(tag_path: Optional[str]) -> str:
     raw = str(tag_path or "").strip()
     if not raw:
         return ""
     if raw.startswith("[") and "]" in raw:
         raw = raw.split("]", 1)[1]
     raw = raw.strip("/")
-    if not raw:
-        return ""
     parts = [p.strip() for p in raw.split("/") if p.strip()]
     return parts[-1] if parts else raw
 
 
-def _looks_like_live_tag_path(value: Optional[str]) -> bool:
+def _looks_like_tag_path(value: Optional[str]) -> bool:
     path = str(value or "").strip()
     if not path:
         return False
-    # Typical Ignition path shape: [provider]Folder/Tag or Folder/Tag
     if path.startswith("[") and "]" in path:
         return True
     if "/" in path and not any(ch in path for ch in "{}()"):
@@ -197,35 +170,32 @@ def derive_subsystems_for_tag(
 ) -> Tuple[List[Dict[str, str]], Dict[str, str]]:
     mode = str(subsystem_mode or "auto").strip().lower()
     if mode in {"global", "off", "disabled"}:
-        global_ref = _subsystem_ref("global", "all")
-        return [global_ref], global_ref
+        ref = _subsystem_ref("global", "all")
+        return [ref], ref
 
     refs: List[Dict[str, str]] = []
     seen: Set[str] = set()
 
-    def add_ref(kind: str, name: Optional[str]) -> None:
+    def add(kind: str, name: Optional[str]) -> None:
         if not name:
             return
         ref = _subsystem_ref(kind, name)
-        if ref["id"] in seen:
-            return
-        seen.add(ref["id"])
-        refs.append(ref)
+        if ref["id"] not in seen:
+            seen.add(ref["id"])
+            refs.append(ref)
 
-    for view_name in tag_meta.get("views") or []:
-        add_ref("view", str(view_name))
-    for equipment_name in tag_meta.get("equipment") or []:
-        add_ref("equipment", str(equipment_name))
-    add_ref("group", infer_tag_group(tag_meta.get("path"), tag_meta.get("folder_name")))
+    for v in tag_meta.get("views") or []:
+        add("view", str(v))
+    for e in tag_meta.get("equipment") or []:
+        add("equipment", str(e))
+    add("group", infer_tag_group(tag_meta.get("path"), tag_meta.get("folder_name")))
 
     if not refs:
         refs = [_subsystem_ref("global", "all")]
 
-    ordered_priority = [
-        _canonical_subsystem_type(x) for x in (priority or DEFAULT_SUBSYSTEM_PRIORITY)
-    ]
+    ordered = [_canonical_subsystem_type(x) for x in (priority or DEFAULT_SUBSYSTEM_PRIORITY)]
     primary = refs[0]
-    for kind in ordered_priority:
+    for kind in ordered:
         found = next((s for s in refs if s.get("type") == kind), None)
         if found:
             primary = found
@@ -234,11 +204,22 @@ def derive_subsystems_for_tag(
     return refs, primary
 
 
+def _preview_value(value: Any, max_len: int = 120) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = str(value)
+    return text if len(text) <= max_len else text[:max_len - 3] + "..."
+
+
+# ---------------------------------------------------------------------------
+#  Config
+# ---------------------------------------------------------------------------
+
 def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     raw = dict(config or {})
     thresholds = raw.get("thresholds", {}) if isinstance(raw.get("thresholds"), dict) else {}
     defaults = {
-        "pollIntervalMs": 1000,
+        "pollIntervalMs": 5000,
         "historyWindowMinutes": 360,
         "minHistoryPoints": 30,
         "maxMonitoredTags": 200,
@@ -249,17 +230,16 @@ def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "dedupCooldownMinutes": 10,
         "retentionDays": 14,
         "cleanupEveryCycles": 40,
-        "historyCacheTtlSec": 30,
+        "historyCacheTtlSec": 60,
         "tagCacheTtlSec": 60,
-        "runMode": "live",
+        "rediscoveryIntervalSec": 60,
         "scope": {
-            "project": None,
-            "equipmentTags": [],
-            "tagRegex": None,
             "subsystemMode": "auto",
             "subsystemPriority": list(DEFAULT_SUBSYSTEM_PRIORITY),
             "subsystemInclude": [],
             "includeUnlinkedTags": False,
+            "tagRegex": None,
+            "equipmentTags": [],
         },
         "thresholds": {
             "z": 3.0,
@@ -277,320 +257,205 @@ def merge_defaults(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     cfg["thresholds"].update({k: v for k, v in thresholds.items() if v is not None})
     if isinstance(raw.get("scope"), dict):
         cfg["scope"].update(raw["scope"])
-    scope_cfg = cfg["scope"]
-    mode = str(scope_cfg.get("subsystemMode") or "auto").strip().lower()
-    if mode not in {"auto", "global", "off", "disabled"}:
-        mode = "auto"
-    scope_cfg["subsystemMode"] = mode
-    if not isinstance(scope_cfg.get("subsystemPriority"), list) or not scope_cfg.get("subsystemPriority"):
-        scope_cfg["subsystemPriority"] = list(DEFAULT_SUBSYSTEM_PRIORITY)
-    scope_cfg["subsystemPriority"] = [
-        str(x).strip()
-        for x in scope_cfg.get("subsystemPriority", [])
-        if str(x).strip()
+    scope = cfg["scope"]
+    mode = str(scope.get("subsystemMode") or "auto").strip().lower()
+    scope["subsystemMode"] = mode if mode in {"auto", "global", "off", "disabled"} else "auto"
+    if not isinstance(scope.get("subsystemPriority"), list) or not scope["subsystemPriority"]:
+        scope["subsystemPriority"] = list(DEFAULT_SUBSYSTEM_PRIORITY)
+    scope["subsystemPriority"] = [
+        str(x).strip() for x in scope["subsystemPriority"] if str(x).strip()
     ] or list(DEFAULT_SUBSYSTEM_PRIORITY)
-    if not isinstance(scope_cfg.get("subsystemInclude"), list):
-        scope_cfg["subsystemInclude"] = []
-    scope_cfg["subsystemInclude"] = [
-        str(x).strip().lower()
-        for x in scope_cfg.get("subsystemInclude", [])
-        if str(x).strip()
-    ]
-    scope_cfg["includeUnlinkedTags"] = bool(scope_cfg.get("includeUnlinkedTags", False))
+    if not isinstance(scope.get("subsystemInclude"), list):
+        scope["subsystemInclude"] = []
+    scope["subsystemInclude"] = [str(x).strip().lower() for x in scope["subsystemInclude"] if str(x).strip()]
+    scope["includeUnlinkedTags"] = bool(scope.get("includeUnlinkedTags", False))
     return cfg
 
 
-class AnomalyMonitor:
-    def __init__(self, config: Dict[str, Any], run_id: Optional[str] = None):
-        self.config = merge_defaults(config)
-        self.run_id = run_id or f"agent-run-{uuid.uuid4()}"
-        from ignition_api_client import IgnitionApiClient
-        from neo4j_ontology import get_ontology_graph
+# ═══════════════════════════════════════════════════════════════════════════
+#  SubsystemAgent — one per subsystem, runs in its own thread
+# ═══════════════════════════════════════════════════════════════════════════
 
-        self.graph = get_ontology_graph()
+class SubsystemAgent(threading.Thread):
+    """Monitors a single subsystem's tags in its own thread."""
 
-        self.api = IgnitionApiClient(
-            base_url=self.config.get("ignitionApiUrl") or os.getenv("IGNITION_API_URL"),
-            api_token=self.config.get("ignitionApiToken") or os.getenv("IGNITION_API_TOKEN"),
-            timeout=15.0,
-        )
+    def __init__(
+        self,
+        *,
+        subsystem_id: str,
+        subsystem_type: str,
+        subsystem_name: str,
+        tag_metas: List[Dict[str, Any]],
+        graph: Any,
+        api: Any,
+        config: Dict[str, Any],
+        run_id: str,
+        stagger_delay: float = 0.0,
+    ):
+        super().__init__(daemon=True, name=f"agent-{subsystem_id}")
+        self.subsystem_id = subsystem_id
+        self.subsystem_type = subsystem_type
+        self.subsystem_name = subsystem_name
+        self.tag_metas = list(tag_metas)
+        self.graph = graph
+        self.api = api
+        self.config = config
+        self.run_id = run_id
+        self._stagger_delay = stagger_delay
+
+        self._running = True
+        self._paused = False
+        self._cycle_count = 0
+        self._total_candidates = 0
+        self._total_triaged = 0
+        self._total_emitted = 0
+        self._cycle_times: List[int] = []
+        self._prev_values: Dict[str, float] = {}
+        self._history_cache: Dict[str, Dict[str, Any]] = {}
+        self._context_cache: Dict[str, Dict[str, Any]] = {}
+        self._context_cache_ts: Dict[str, float] = {}
 
         self.llm = None
-        self._llm_enabled = bool(os.getenv("ANTHROPIC_API_KEY"))
-        if self._llm_enabled:
+        if bool(os.getenv("ANTHROPIC_API_KEY")):
             try:
                 from claude_client import ClaudeClient
-
                 self.llm = ClaudeClient(
                     enable_tools=False,
-                    ignition_api_url=self.config.get("ignitionApiUrl"),
-                    ignition_api_token=self.config.get("ignitionApiToken"),
+                    ignition_api_url=config.get("ignitionApiUrl"),
+                    ignition_api_token=config.get("ignitionApiToken"),
+                )
+            except Exception:
+                pass
+
+    @property
+    def agent_state(self) -> str:
+        if not self._running:
+            return "stopped"
+        if self._paused:
+            return "paused"
+        return "running"
+
+    @property
+    def avg_cycle_ms(self) -> int:
+        if not self._cycle_times:
+            return 0
+        return int(sum(self._cycle_times) / len(self._cycle_times))
+
+    def update_tags(self, tag_metas: List[Dict[str, Any]]) -> None:
+        self.tag_metas = list(tag_metas)
+
+    def pause(self) -> None:
+        self._paused = True
+
+    def resume(self) -> None:
+        self._paused = False
+
+    def stop(self) -> None:
+        self._running = False
+
+    # -------------------------------------------------------------------
+    #  Thread entry point
+    # -------------------------------------------------------------------
+    def run(self) -> None:
+        poll_ms = int(self.config.get("pollIntervalMs", 1000))
+        self._emit_status("agent_started", "cycle_start")
+
+        if self._stagger_delay > 0:
+            self._emit_progress("staggering", f"{int(self._stagger_delay * 1000)}ms")
+            time.sleep(self._stagger_delay)
+
+        while self._running:
+            if self._paused:
+                time.sleep(0.5)
+                continue
+
+            self._cycle_count += 1
+            t0 = time.time()
+            try:
+                metrics = self._run_cycle()
+                cycle_ms = int((time.time() - t0) * 1000)
+                self._cycle_times.append(cycle_ms)
+                if len(self._cycle_times) > 20:
+                    self._cycle_times = self._cycle_times[-20:]
+
+                self._emit_status(
+                    "cycle_complete",
+                    "ok",
+                    cycle_ms=cycle_ms,
+                    diagnostics=metrics.get("diagnostics", {}),
+                    candidates=metrics.get("candidates", 0),
+                    triaged=metrics.get("triaged", 0),
+                    emitted=metrics.get("emitted", 0),
+                    live_events=metrics.get("liveEvents", []),
                 )
             except Exception as exc:
-                self._llm_enabled = False
+                cycle_ms = int((time.time() - t0) * 1000)
                 emit("AGENT_ERROR", {
                     "runId": self.run_id,
-                    "code": "llm_init_failed",
+                    "subsystemId": self.subsystem_id,
+                    "code": "cycle_error",
                     "message": str(exc),
                     "recoverable": True,
                     "timestamp": utc_now_iso(),
                 })
+                self._emit_status("cycle_error", str(exc), cycle_ms=cycle_ms)
 
-        self._running = True
-        self._cycle_count = 0
-        self._prev_values: Dict[str, float] = {}
-        self._history_cache: Dict[str, Dict[str, Any]] = {}
-        self._tag_cache: Optional[Dict[str, Any]] = None
-        self._tag_cache_at: float = 0.0
+            elapsed = time.time() - t0
+            remaining = max(0, poll_ms / 1000.0 - elapsed)
+            if remaining > 0 and self._running:
+                self._emit_progress("waiting", f"{int(remaining * 1000)}ms")
+                time.sleep(remaining)
 
-    # -----------------------------
-    # Schema / run lifecycle
-    # -----------------------------
-    def init_schema(self) -> None:
-        self.graph.init_agent_monitoring_schema()
+        self._emit_status("agent_stopped", "stopped")
 
-    def upsert_run(self, status: str, reason: Optional[str] = None) -> None:
-        with self.graph.session() as session:
-            session.run(
-                """
-                MERGE (r:AgentRun {run_id: $run_id})
-                SET r.status = $status,
-                    r.updated_at = datetime(),
-                    r.last_heartbeat_at = datetime(),
-                    r.config_json = $config_json,
-                    r.cycle_count = $cycle_count,
-                    r.started_at = coalesce(r.started_at, datetime()),
-                    r.stopped_at = CASE WHEN $status IN ['stopped', 'failed'] THEN datetime() ELSE r.stopped_at END,
-                    r.stop_reason = CASE WHEN $reason IS NULL THEN r.stop_reason ELSE $reason END
-                """,
-                run_id=self.run_id,
-                status=status,
-                config_json=json.dumps(self.config, default=str),
-                cycle_count=self._cycle_count,
-                reason=reason,
-            )
-
-    def heartbeat(self, metrics: Dict[str, Any]) -> None:
-        with self.graph.session() as session:
-            session.run(
-                """
-                MATCH (r:AgentRun {run_id: $run_id})
-                SET r.last_heartbeat_at = datetime(),
-                    r.cycle_count = $cycle_count,
-                    r.last_cycle_ms = $cycle_ms,
-                    r.last_candidates = $candidates,
-                    r.last_triaged = $triaged,
-                    r.last_emitted = $emitted
-                """,
-                run_id=self.run_id,
-                cycle_count=self._cycle_count,
-                cycle_ms=metrics.get("cycleMs", 0),
-                candidates=metrics.get("candidates", 0),
-                triaged=metrics.get("triaged", 0),
-                emitted=metrics.get("emitted", 0),
-            )
-
-    # -----------------------------
-    # Tag and context collection
-    # -----------------------------
-    def get_monitored_tags(self) -> List[Dict[str, Any]]:
-        ttl = float(self.config.get("tagCacheTtlSec", 60))
-        now = time.time()
-        if self._tag_cache is not None and ttl > 0 and (now - self._tag_cache_at) < ttl:
-            return self._tag_cache
-
-        result = self._fetch_monitored_tags()
-        self._tag_cache = result
-        self._tag_cache_at = time.time()
-        return result
-
-    def _fetch_monitored_tags(self) -> List[Dict[str, Any]]:
-        max_tags = int(self.config.get("maxMonitoredTags", 200))
-        scope = self.config.get("scope", {})
-        tag_regex = scope.get("tagRegex")
-        equipment_tags = {
-            str(x).strip().lower()
-            for x in (scope.get("equipmentTags") or [])
-            if str(x).strip()
+    # -------------------------------------------------------------------
+    #  Status emission
+    # -------------------------------------------------------------------
+    def _emit_status(
+        self,
+        phase: str,
+        reason: str,
+        cycle_ms: int = 0,
+        diagnostics: Optional[Dict[str, Any]] = None,
+        candidates: int = 0,
+        triaged: int = 0,
+        emitted: int = 0,
+        live_events: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "runId": self.run_id,
+            "subsystemId": self.subsystem_id,
+            "state": self.agent_state,
+            "cycleMs": cycle_ms,
+            "candidates": candidates,
+            "triaged": triaged,
+            "emitted": emitted,
+            "diagnostics": {
+                "phase": phase,
+                "reason": reason,
+                "subsystemId": self.subsystem_id,
+                "subsystemType": self.subsystem_type,
+                "subsystemName": self.subsystem_name,
+                "cycleCount": self._cycle_count,
+                "avgCycleMs": self.avg_cycle_ms,
+                "totalCandidates": self._total_candidates,
+                "totalTriaged": self._total_triaged,
+                "totalEmitted": self._total_emitted,
+                "tagCount": len(self.tag_metas),
+                **(diagnostics or {}),
+            },
+            "timestamp": utc_now_iso(),
         }
-        subsystem_mode = str(scope.get("subsystemMode") or "auto").strip().lower()
-        subsystem_priority = scope.get("subsystemPriority") or list(DEFAULT_SUBSYSTEM_PRIORITY)
-        subsystem_include = {
-            str(x).strip().lower()
-            for x in (scope.get("subsystemInclude") or [])
-            if str(x).strip()
-        }
-        include_unlinked = bool(scope.get("includeUnlinkedTags", False))
-        tag_map: Dict[str, Dict[str, Any]] = {}
+        if live_events is not None:
+            payload["liveEvents"] = live_events
+        emit("AGENT_STATUS", payload)
 
-        def upsert_tag(
-            *,
-            tag_path: str,
-            tag_name: str,
-            folder_name: str = "",
-            views: Optional[List[str]] = None,
-            equipment: Optional[List[str]] = None,
-            source: str = "unknown",
-        ) -> None:
-            path = str(tag_path or "").strip()
-            if not path:
-                return
-            entry = tag_map.setdefault(
-                path,
-                {
-                    "path": path,
-                    "name": str(tag_name or _last_segment_from_tag_path(path) or path),
-                    "folder_name": str(folder_name or ""),
-                    "views": [],
-                    "equipment": [],
-                    "source": source,
-                    "bound_to_view": False,
-                },
-            )
-            if source == "view_binding":
-                entry["bound_to_view"] = True
-                entry["source"] = source
-            if folder_name and not entry.get("folder_name"):
-                entry["folder_name"] = str(folder_name)
-            if tag_name and (
-                not entry.get("name")
-                or entry.get("name") == entry.get("path")
-                or entry.get("name") == _last_segment_from_tag_path(entry.get("path"))
-            ):
-                entry["name"] = str(tag_name)
-            for view_name in views or []:
-                v = str(view_name or "").strip()
-                if v and v not in entry["views"]:
-                    entry["views"].append(v)
-            for eq_name in equipment or []:
-                eq = str(eq_name or "").strip()
-                if eq and eq not in entry["equipment"]:
-                    entry["equipment"].append(eq)
-
-        with self.graph.session() as session:
-            bound_result = session.run(
-                """
-                MATCH (v:View)-[:HAS_COMPONENT]->(c:ViewComponent)-[r:BINDS_TO]->(n)
-                WHERE r.tag_path IS NOT NULL
-                  AND trim(r.tag_path) <> ''
-                  AND toLower(coalesce(r.binding_type, 'tag')) = 'tag'
-                OPTIONAL MATCH (eq:Equipment)-[*1..2]-(n)
-                RETURN DISTINCT trim(r.tag_path) AS tag_path,
-                                coalesce(n.name, '') AS tag_name,
-                                collect(DISTINCT v.name) AS views,
-                                collect(DISTINCT eq.name) AS equipment
-                LIMIT $limit
-                """,
-                limit=max_tags * 4,
-            )
-            for r in bound_result:
-                path = str(r["tag_path"] or "").strip()
-                if not _looks_like_live_tag_path(path):
-                    continue
-                upsert_tag(
-                    tag_path=path,
-                    tag_name=str(r["tag_name"] or _last_segment_from_tag_path(path)),
-                    folder_name=infer_tag_group(path) or "",
-                    views=[x for x in (r["views"] or []) if x],
-                    equipment=[x for x in (r["equipment"] or []) if x],
-                    source="view_binding",
-                )
-
-            scada_result = session.run(
-                """
-                MATCH (t:ScadaTag)
-                WHERE t.opc_item_path IS NOT NULL
-                  AND trim(t.opc_item_path) <> ''
-                OPTIONAL MATCH (c:ViewComponent)-[:BINDS_TO]->(t)
-                OPTIONAL MATCH (v:View)-[:HAS_COMPONENT]->(c)
-                OPTIONAL MATCH (eq:Equipment)-[*1..2]-(t)
-                RETURN DISTINCT trim(t.opc_item_path) AS tag_path,
-                                coalesce(t.name, t.opc_item_path) AS tag_name,
-                                coalesce(t.folder_name, '') AS folder_name,
-                                collect(DISTINCT v.name) AS views,
-                                collect(DISTINCT eq.name) AS equipment
-                LIMIT $limit
-                """,
-                limit=max_tags * 6,
-            )
-            for r in scada_result:
-                path = str(r["tag_path"] or "").strip()
-                if not _looks_like_live_tag_path(path):
-                    continue
-                upsert_tag(
-                    tag_path=path,
-                    tag_name=str(r["tag_name"] or _last_segment_from_tag_path(path)),
-                    folder_name=str(r["folder_name"] or ""),
-                    views=[x for x in (r["views"] or []) if x],
-                    equipment=[x for x in (r["equipment"] or []) if x],
-                    source="scada_tag",
-                )
-
-        tags = list(tag_map.values())
-
-        if not include_unlinked:
-            linked = [t for t in tags if (t.get("views") or t.get("equipment") or t.get("bound_to_view"))]
-            if linked:
-                tags = linked
-
-        if tag_regex:
-            import re
-            try:
-                pattern = re.compile(tag_regex, re.IGNORECASE)
-                tags = [t for t in tags if pattern.search(t["path"]) or pattern.search(t["name"])]
-            except re.error:
-                emit("AGENT_ERROR", {
-                    "runId": self.run_id,
-                    "code": "invalid_tag_regex",
-                    "message": f"Invalid regex: {tag_regex}",
-                    "recoverable": True,
-                    "timestamp": utc_now_iso(),
-                })
-
-        if equipment_tags:
-            tags = [
-                t for t in tags
-                if t["name"].lower() in equipment_tags
-                or t["path"].lower() in equipment_tags
-                or any(str(eq).strip().lower() in equipment_tags for eq in t.get("equipment", []))
-            ]
-
-        tags.sort(
-            key=lambda t: (
-                0 if t.get("bound_to_view") else 1,
-                0 if (t.get("views") or t.get("equipment")) else 1,
-                str(t.get("path", "")),
-            )
-        )
-
-        for tag in tags:
-            subsystems, primary = derive_subsystems_for_tag(
-                tag_meta=tag,
-                subsystem_mode=subsystem_mode,
-                priority=subsystem_priority,
-            )
-            tag["subsystems"] = subsystems
-            tag["primary_subsystem"] = primary
-
-        if subsystem_include:
-            tags = [
-                t
-                for t in tags
-                if any(
-                    s.get("id", "").lower() in subsystem_include
-                    or s.get("name", "").lower() in subsystem_include
-                    for s in (t.get("subsystems") or [])
-                )
-            ]
-
-        return tags[:max_tags]
-
+    # -------------------------------------------------------------------
+    #  History fetching (per-agent cache)
+    # -------------------------------------------------------------------
     def _extract_history_values(self, history_data: Any, tag_path: str) -> List[float]:
-        """Normalize multiple gateway response shapes to numeric values list."""
         values: List[float] = []
-        if history_data is None:
-            return values
-        if isinstance(history_data, dict) and history_data.get("error"):
+        if history_data is None or (isinstance(history_data, dict) and history_data.get("error")):
             return values
 
         rows: List[Any] = []
@@ -602,10 +467,10 @@ class AnomalyMonitor:
                 if isinstance(chunk, list):
                     rows = chunk
                     break
-            if not rows and "tagHistory" in history_data and isinstance(history_data["tagHistory"], list):
+            if not rows and isinstance(history_data.get("tagHistory"), list):
                 rows = history_data["tagHistory"]
 
-        prefixed = self.api._ensure_provider_prefix(tag_path) if hasattr(self, "api") else tag_path
+        prefixed = self.api._ensure_provider_prefix(tag_path) if hasattr(self.api, "_ensure_provider_prefix") else tag_path
         stripped = tag_path
         if stripped.startswith("[") and "]" in stripped:
             stripped = stripped[stripped.index("]") + 1:]
@@ -621,11 +486,11 @@ class AnomalyMonitor:
                 continue
             candidate = None
             if "value" in row:
-                candidate = row.get("value")
+                candidate = row["value"]
             else:
-                matched_key = next((k for k in path_variants if k in row), None)
-                if matched_key:
-                    candidate = row.get(matched_key)
+                matched = next((k for k in path_variants if k in row), None)
+                if matched:
+                    candidate = row[matched]
                 elif len(row) <= 2:
                     for k, v in row.items():
                         if k.lower() in {"timestamp", "ts", "t", "time"}:
@@ -637,34 +502,7 @@ class AnomalyMonitor:
                 values.append(val)
         return values
 
-    def fetch_history_values(self, tag_path: str) -> tuple[List[float], Optional[str]]:
-        ttl = float(self.config.get("historyCacheTtlSec", 30))
-        now = time.time()
-        cached = self._history_cache.get(tag_path)
-        if cached and ttl > 0 and (now - cached["fetched_at"]) < ttl:
-            return list(cached["values"]), cached.get("error")
-
-        minutes = int(self.config.get("historyWindowMinutes", 360))
-        end_dt = datetime.now(timezone.utc)
-        start_dt = end_dt - timedelta(minutes=minutes)
-        data = self.api.query_tag_history(
-            [tag_path],
-            start_dt.isoformat(),
-            end_dt.isoformat(),
-            return_size=max(100, int(self.config.get("minHistoryPoints", 30)) * 4),
-            aggregation_mode="Average",
-            return_format="Wide",
-        )
-        if isinstance(data, dict) and data.get("error"):
-            err = str(data.get("error"))
-            self._history_cache[tag_path] = {"values": [], "error": err, "fetched_at": now}
-            return [], err
-        values = self._extract_history_values(data, tag_path)
-        self._history_cache[tag_path] = {"values": values, "error": None, "fetched_at": now}
-        return values, None
-
-    def fetch_history_batch(self, tag_paths: List[str]) -> Dict[str, Tuple[List[float], Optional[str]]]:
-        """Fetch history for many tags, using cache and batched API calls."""
+    def _fetch_history_batch(self, tag_paths: List[str]) -> Dict[str, Tuple[List[float], Optional[str]]]:
         ttl = float(self.config.get("historyCacheTtlSec", 30))
         now = time.time()
         results: Dict[str, Tuple[List[float], Optional[str]]] = {}
@@ -684,35 +522,46 @@ class AnomalyMonitor:
         end_dt = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(minutes=minutes)
         return_size = max(100, int(self.config.get("minHistoryPoints", 30)) * 4)
-        batch_size = 20
 
-        for i in range(0, len(uncached), batch_size):
-            batch = uncached[i : i + batch_size]
-            data = self.api.query_tag_history(
-                batch,
-                start_dt.isoformat(),
-                end_dt.isoformat(),
-                return_size=return_size,
-                aggregation_mode="Average",
-                return_format="Wide",
-            )
-            fetch_ts = time.time()
+        for i in range(0, len(uncached), 20):
+            batch = uncached[i:i + 20]
+            with _api_semaphore:
+                data = self.api.query_tag_history(
+                    batch, start_dt.isoformat(), end_dt.isoformat(),
+                    return_size=return_size, aggregation_mode="Average", return_format="Wide",
+                )
+            ts = time.time()
 
             if isinstance(data, dict) and data.get("error"):
-                err = str(data.get("error"))
-                for path in batch:
-                    results[path] = ([], err)
-                    self._history_cache[path] = {"values": [], "error": err, "fetched_at": fetch_ts}
+                err = str(data["error"])
+                for p in batch:
+                    results[p] = ([], err)
+                    self._history_cache[p] = {"values": [], "error": err, "fetched_at": ts}
                 continue
 
-            for path in batch:
-                values = self._extract_history_values(data, path)
-                results[path] = (values, None)
-                self._history_cache[path] = {"values": values, "error": None, "fetched_at": fetch_ts}
+            for p in batch:
+                vals = self._extract_history_values(data, p)
+                results[p] = (vals, None)
+                self._history_cache[p] = {"values": vals, "error": None, "fetched_at": ts}
 
         return results
 
-    def get_context(self, tag_path: str) -> Dict[str, Any]:
+    # -------------------------------------------------------------------
+    #  Context & triage
+    # -------------------------------------------------------------------
+    def _get_context(self, tag_path: str) -> Dict[str, Any]:
+        ttl = 120.0
+        now = time.time()
+        cached_ts = self._context_cache_ts.get(tag_path, 0)
+        if tag_path in self._context_cache and (now - cached_ts) < ttl:
+            return dict(self._context_cache[tag_path])
+
+        ctx = self._fetch_context_from_graph(tag_path)
+        self._context_cache[tag_path] = ctx
+        self._context_cache_ts[tag_path] = now
+        return dict(ctx)
+
+    def _fetch_context_from_graph(self, tag_path: str) -> Dict[str, Any]:
         with self.graph.session() as session:
             result = session.run(
                 """
@@ -723,1252 +572,746 @@ class AnomalyMonitor:
                 OPTIONAL MATCH (eq:Equipment)-[*1..2]-(t)
                 OPTIONAL MATCH (eq)-[:HAS_SYMPTOM]->(s:FaultSymptom)
                 OPTIONAL MATCH (s)-[:CAUSED_BY]->(fc:FaultCause)
-                OPTIONAL MATCH (eq)-[:HAS_PATTERN]->(p:ControlPattern)
-                OPTIONAL MATCH (eq)-[:SAFETY_CRITICAL]->(se:SafetyElement)
                 RETURN t,
                        collect(DISTINCT v.name) AS views,
                        collect(DISTINCT eq.name) AS equipment,
                        collect(DISTINCT s.symptom) AS symptoms,
-                       collect(DISTINCT fc.cause) AS causes,
-                       collect(DISTINCT p.name) AS patterns,
-                       collect(DISTINCT se.name) AS safety
+                       collect(DISTINCT fc.cause) AS causes
                 LIMIT 1
                 """,
                 tag=tag_path,
             )
             record = result.single()
-            fallback_views: List[str] = []
-            fallback_equipment: List[str] = []
-            fallback_result = session.run(
+            fallback = session.run(
                 """
                 MATCH (v:View)-[:HAS_COMPONENT]->(vc:ViewComponent)-[r:BINDS_TO]->(n)
                 WHERE r.tag_path = $tag
                 OPTIONAL MATCH (eq:Equipment)-[*1..2]-(n)
-                RETURN collect(DISTINCT v.name) AS views,
-                       collect(DISTINCT eq.name) AS equipment
+                RETURN collect(DISTINCT v.name) AS views, collect(DISTINCT eq.name) AS equipment
                 LIMIT 1
                 """,
                 tag=tag_path,
             ).single()
-            if fallback_result:
-                fallback_views = [x for x in (fallback_result["views"] or []) if x]
-                fallback_equipment = [x for x in (fallback_result["equipment"] or []) if x]
+            fb_views = [x for x in (fallback["views"] or []) if x] if fallback else []
+            fb_equip = [x for x in (fallback["equipment"] or []) if x] if fallback else []
 
             if not record:
                 return {
                     "tag_path": tag_path,
-                    "tag_name": _last_segment_from_tag_path(tag_path) or tag_path,
-                    "views": fallback_views,
-                    "equipment": fallback_equipment,
+                    "tag_name": _last_segment(tag_path) or tag_path,
+                    "views": fb_views, "equipment": fb_equip,
                     "group": infer_tag_group(tag_path),
-                    "symptoms": [],
-                    "causes": [],
-                    "patterns": [],
-                    "safety": [],
+                    "symptoms": [], "causes": [],
                 }
             node = record["t"]
             return {
                 "tag_path": tag_path,
-                "tag_name": node.get("name") if node else (_last_segment_from_tag_path(tag_path) or tag_path),
-                "views": sorted(set([x for x in record["views"] if x] + fallback_views)),
-                "equipment": sorted(set([x for x in record["equipment"] if x] + fallback_equipment)),
+                "tag_name": node.get("name") if node else (_last_segment(tag_path) or tag_path),
+                "views": sorted(set([x for x in record["views"] if x] + fb_views)),
+                "equipment": sorted(set([x for x in record["equipment"] if x] + fb_equip)),
                 "group": infer_tag_group(tag_path, node.get("folder_name") if node else None),
                 "symptoms": [x for x in record["symptoms"] if x],
                 "causes": [x for x in record["causes"] if x],
-                "patterns": [x for x in record["patterns"] if x],
-                "safety": [x for x in record["safety"] if x],
             }
 
-    # -----------------------------
-    # Triage and persistence
-    # -----------------------------
-    def run_llm_triage(
-        self,
-        context: Dict[str, Any],
-        deterministic: Dict[str, Any],
-        live_sample: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    def _run_llm_triage(self, context: Dict, deterministic: Dict, live_sample: Dict) -> Dict[str, Any]:
         fallback = {
-            "summary": f"Deterministic anomaly on {context.get('tag_name', context['tag_path'])}",
+            "summary": f"Deviation on {context.get('tag_name', context['tag_path'])} in {self.subsystem_name}",
             "category": deterministic.get("category", "deviation"),
             "severity": "medium",
-            "confidence": 0.55,
+            "confidence": 0.5,
             "probable_causes": ["Signal deviates from historical baseline."],
-            "verification_checks": [
-                f"Check live quality/timestamp for {context.get('tag_path')}",
-                "Inspect upstream interlocks and communication health.",
-            ],
-            "safety_notes": context.get("safety", []),
-            "rationale": "LLM triage unavailable; using deterministic fallback.",
+            "verification_checks": [f"Check {context.get('tag_path')}"],
+            "safety_notes": [],
+            "rationale": "Deterministic-only triage.",
             "related_entities": [
                 {"label": "Equipment", "name": e} for e in context.get("equipment", [])[:3]
-            ] + [{"label": "View", "name": v} for v in context.get("views", [])[:2]],
+            ],
         }
         if not self.llm:
             return fallback
-
-        system_prompt = (
-            "You are an industrial anomaly triage assistant. "
-            "Return ONLY valid JSON with keys: summary, category, severity, confidence, "
-            "probable_causes, verification_checks, safety_notes, rationale, related_entities. "
-            "Severity must be one of critical/high/medium/low. "
-            "Category must be one of spike/drift/stuck/state-conflict/quality-issue/deviation. "
-            "related_entities is a list of objects: {label,name}."
-        )
-        user_prompt = json.dumps(
-            {
-                "context": context,
-                "deterministic": deterministic,
-                "live_sample": live_sample,
-            },
-            default=str,
-        )
         try:
             result = self.llm.query_json(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
+                system_prompt=(
+                    "You are an industrial anomaly triage assistant. "
+                    "Return ONLY valid JSON with keys: summary, category, severity, confidence, "
+                    "probable_causes, verification_checks, safety_notes, rationale, related_entities."
+                ),
+                user_prompt=json.dumps({"context": context, "deterministic": deterministic, "live_sample": live_sample}, default=str),
                 max_tokens=900,
                 use_tools=False,
             )
             data = result.get("data")
-            if not isinstance(data, dict):
-                return fallback
-            merged = dict(fallback)
-            merged.update({k: v for k, v in data.items() if v is not None})
-            return merged
-        except Exception as exc:
-            emit("AGENT_ERROR", {
-                "runId": self.run_id,
-                "code": "llm_triage_failed",
-                "message": str(exc),
-                "recoverable": True,
-                "timestamp": utc_now_iso(),
-            })
-            return fallback
+            if isinstance(data, dict):
+                merged = dict(fallback)
+                merged.update({k: v for k, v in data.items() if v is not None})
+                return merged
+        except Exception:
+            pass
+        return fallback
 
-    def _severity_from_scores(self, deterministic: Dict[str, Any], llm_out: Dict[str, Any]) -> str:
-        sev = str(llm_out.get("severity", "")).lower()
-        if sev in {"critical", "high", "medium", "low"}:
-            return sev
-        z = abs(float(deterministic.get("z_score", 0.0)))
-        if z >= 8:
-            return "critical"
-        if z >= 5:
-            return "high"
-        if z >= 3:
-            return "medium"
-        return "low"
-
-    def is_duplicate_recent(self, dedup_sig: str) -> bool:
-        cooldown = max(1, int(self.config.get("dedupCooldownMinutes", 10)))
-        with self.graph.session() as session:
-            result = session.run(
-                """
-                MATCH (e:AnomalyEvent {dedup_key: $dedup_key})
-                WHERE e.created_at IS NOT NULL
-                  AND datetime(e.created_at) > datetime() - duration({minutes: $minutes})
-                RETURN count(e) AS cnt
-                """,
-                dedup_key=dedup_sig,
-                minutes=cooldown,
-            )
-            row = result.single()
-            return bool(row and row["cnt"] > 0)
-
-    def persist_event(
-        self,
-        context: Dict[str, Any],
-        deterministic: Dict[str, Any],
-        live_sample: Dict[str, Any],
-        triage: Dict[str, Any],
-        subsystem: Optional[Dict[str, str]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        category = triage.get("category") or deterministic.get("category", "deviation")
-        subsystem_ref = subsystem or _subsystem_ref("global", "all")
-        dedup_source = f"{context['tag_path']}::{subsystem_ref.get('id', 'global:all')}"
-        dedup_sig = dedup_key(dedup_source, category, int(self.config.get("dedupCooldownMinutes", 10)))
-        if self.is_duplicate_recent(dedup_sig):
-            return None
-
-        event_id = f"ae-{uuid.uuid4()}"
-        severity = self._severity_from_scores(deterministic, triage)
-        confidence = float(max(0.0, min(1.0, triage.get("confidence", 0.5))))
-        event_data = {
-            "event_id": event_id,
-            "run_id": self.run_id,
-            "event_schema_version": 1,
-            "state": "open",
-            "severity": severity,
-            "confidence": confidence,
-            "category": category,
-            "summary": triage.get("summary", f"Anomaly on {context['tag_path']}"),
-            "explanation": triage.get("rationale", ""),
-            "recommended_checks_json": json.dumps(triage.get("verification_checks", []), default=str),
-            "probable_causes_json": json.dumps(triage.get("probable_causes", []), default=str),
-            "safety_notes_json": json.dumps(triage.get("safety_notes", []), default=str),
-            "deterministic_reasons_json": json.dumps(deterministic.get("reasons", []), default=str),
-            "z_score": float(deterministic.get("z_score", 0.0)),
-            "mad_score": float(deterministic.get("mad_score", 0.0)),
-            "delta_rate": float(deterministic.get("delta_rate", 0.0)),
-            "window_volatility": float(deterministic.get("window_volatility", 0.0)),
-            "source_tag": context["tag_path"],
-            "tag_name": context.get("tag_name") or context["tag_path"],
-            "subsystem_type": subsystem_ref.get("type"),
-            "subsystem_name": subsystem_ref.get("name"),
-            "subsystem_id": subsystem_ref.get("id"),
-            "live_quality": live_sample.get("quality"),
-            "live_timestamp": live_sample.get("timestamp"),
-            "live_value": str(live_sample.get("value")),
-            "dedup_key": dedup_sig,
-            "created_at": utc_now_iso(),
-            "updated_at": utc_now_iso(),
-        }
-
-        with self.graph.session() as session:
-            session.run(
-                """
-                MATCH (r:AgentRun {run_id: $run_id})
-                CREATE (e:AnomalyEvent $props)
-                MERGE (r)-[:EMITTED]->(e)
-                """,
-                run_id=self.run_id,
-                props=event_data,
-            )
-
-            session.run(
-                """
-                MATCH (e:AnomalyEvent {event_id: $event_id})
-                MATCH (t:ScadaTag)
-                WHERE t.name = $tag OR t.opc_item_path = $tag
-                MERGE (e)-[:OBSERVED_ON]->(t)
-                """,
-                event_id=event_id,
-                tag=context["tag_path"],
-            )
-
-            for equipment_name in context.get("equipment", [])[:5]:
-                session.run(
-                    """
-                    MATCH (e:AnomalyEvent {event_id: $event_id})
-                    MATCH (eq:Equipment {name: $name})
-                    MERGE (e)-[:AFFECTS]->(eq)
-                    """,
-                    event_id=event_id,
-                    name=equipment_name,
-                )
-
-            if subsystem_ref.get("type") == "view":
-                session.run(
-                    """
-                    MATCH (e:AnomalyEvent {event_id: $event_id})
-                    MATCH (v:View {name: $name})
-                    MERGE (e)-[:SCOPED_TO]->(v)
-                    """,
-                    event_id=event_id,
-                    name=subsystem_ref.get("name"),
-                )
-            elif subsystem_ref.get("type") == "equipment":
-                session.run(
-                    """
-                    MATCH (e:AnomalyEvent {event_id: $event_id})
-                    MATCH (eq:Equipment {name: $name})
-                    MERGE (e)-[:SCOPED_TO]->(eq)
-                    """,
-                    event_id=event_id,
-                    name=subsystem_ref.get("name"),
-                )
-
-            related_inputs: List[Dict[str, str]] = []
-            for item in triage.get("related_entities", []) or []:
-                if isinstance(item, dict) and item.get("label") and item.get("name"):
-                    related_inputs.append({"label": str(item["label"]), "name": str(item["name"])})
-            for name in context.get("symptoms", [])[:3]:
-                related_inputs.append({"label": "FaultSymptom", "name": name})
-            for name in context.get("causes", [])[:3]:
-                related_inputs.append({"label": "FaultCause", "name": name})
-
-            for rel in related_inputs[:8]:
-                label = rel["label"]
-                if label not in {"FaultSymptom", "FaultCause", "ControlPattern", "SafetyElement", "Equipment", "ScadaTag", "View"}:
-                    continue
-                session.run(
-                    f"""
-                    MATCH (e:AnomalyEvent {{event_id: $event_id}})
-                    MATCH (n:{label})
-                    WHERE n.name = $name OR n.symptom = $name OR n.cause = $name
-                    MERGE (e)-[:RELATED_TO]->(n)
-                    """,
-                    event_id=event_id,
-                    name=rel["name"],
-                )
-
-        return event_data
-
-    def _emit_persisted_event(self, persisted: Dict[str, Any]) -> None:
-        """Emit normalized AGENT_EVENT payload for UI stream."""
-        emit("AGENT_EVENT", {
+    # -------------------------------------------------------------------
+    #  Main cycle
+    # -------------------------------------------------------------------
+    def _emit_progress(self, step: str, detail: str = "") -> None:
+        emit("AGENT_STATUS", {
             "runId": self.run_id,
-            "eventId": persisted["event_id"],
-            "severity": persisted["severity"],
-            "summary": persisted["summary"],
-            "category": persisted.get("category"),
-            "entityRefs": {
-                "tag": persisted.get("tag_name") or persisted.get("source_tag"),
-                "sourceTag": persisted.get("source_tag"),
-                "subsystemType": persisted.get("subsystem_type"),
-                "subsystemName": persisted.get("subsystem_name"),
+            "subsystemId": self.subsystem_id,
+            "state": self.agent_state,
+            "diagnostics": {
+                "phase": "cycle_progress",
+                "step": step,
+                "detail": detail,
+                "subsystemId": self.subsystem_id,
+                "cycleCount": self._cycle_count,
             },
-            "createdAt": persisted.get("created_at"),
-        })
-
-    def emit_provider_failure_event(
-        self,
-        code: str,
-        message: str,
-        *,
-        severity: str = "high",
-        category: str = "quality-issue",
-        source_tag: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
-        subsystem: Optional[Dict[str, str]] = None,
-    ) -> bool:
-        """
-        Persist and stream provider-health anomalies so failures appear in feed.
-
-        Returns:
-            True if a new event was persisted (false if deduped).
-        """
-        emit("AGENT_ERROR", {
-            "runId": self.run_id,
-            "code": code,
-            "message": message,
-            "recoverable": True,
             "timestamp": utc_now_iso(),
         })
 
-        tag = source_tag or f"provider://{code}"
-        detail_blob = json.dumps(details or {}, default=str)
-        context = {
-            "tag_path": tag,
-            "tag_name": source_tag or "ProviderHealth",
-            "equipment": [],
-            "symptoms": [],
-            "causes": [],
-            "patterns": [],
-            "safety": [],
-        }
-        deterministic = {
-            "candidate": True,
-            "reasons": [code],
-            "category": category,
-            "z_score": 0.0,
-            "mad_score": 0.0,
-            "delta_rate": 0.0,
-            "window_volatility": 0.0,
-            "history_points": 0,
-        }
-        triage = {
-            "summary": message,
-            "category": category,
-            "severity": severity,
-            "confidence": 0.9,
-            "probable_causes": [message],
-            "verification_checks": [
-                "Check Ignition gateway connectivity and credentials.",
-                "Validate tag provider availability and endpoint health.",
-            ],
-            "safety_notes": [],
-            "rationale": f"Provider health event ({code}). Details: {detail_blob}",
-            "related_entities": [],
-        }
-        persisted = self.persist_event(
-            context=context,
-            deterministic=deterministic,
-            live_sample={
-                "path": tag,
-                "value": "",
-                "quality": "Bad",
-                "timestamp": utc_now_iso(),
-                "data_type": "provider_health",
-            },
-            triage=triage,
-            subsystem=subsystem,
-        )
-        if persisted:
-            self._emit_persisted_event(persisted)
-            return True
-        return False
-
-    # -----------------------------
-    # Monitoring loop
-    # -----------------------------
-    def run_cycle(self) -> Dict[str, Any]:
-        cycle_start = time.time()
+    def _run_cycle(self) -> Dict[str, Any]:
         thresholds = self.config.get("thresholds", {})
-        stale_threshold_sec = int(thresholds.get("stalenessSec", 120))
-        metrics = {
-            "candidates": 0,
-            "triaged": 0,
-            "emitted": 0,
-            "cycleMs": 0,
-            "diagnostics": make_default_diagnostics(
-                staleness_threshold_sec=stale_threshold_sec,
-                phase="cycle_start",
-                reason="cycle_initialized",
-            ),
-        }
+        stale_sec = int(thresholds.get("stalenessSec", 120))
         min_history = int(self.config.get("minHistoryPoints", 30))
-        max_candidates_total = max(1, int(self.config.get("maxCandidatesPerCycle", 25)))
-        max_candidates_per_subsystem = max(1, int(self.config.get("maxCandidatesPerSubsystem", 8)))
-        max_triage_total = max(0, int(self.config.get("maxLlmTriagesPerCycle", 5)))
-        max_triage_per_subsystem = max(0, int(self.config.get("maxLlmTriagesPerSubsystem", 2)))
+        max_candidates = int(self.config.get("maxCandidatesPerSubsystem", 8))
+        max_llm = int(self.config.get("maxLlmTriagesPerSubsystem", 0))
 
-        if not self.api.is_configured:
-            emitted = self.emit_provider_failure_event(
-                "ignition_not_configured",
-                "Ignition API URL/token not configured.",
-                severity="critical",
-                category="state-conflict",
-            )
-            if emitted:
-                metrics["emitted"] += 1
-            metrics["diagnostics"]["phase"] = "cycle_early_exit"
-            metrics["diagnostics"]["reason"] = "ignition_not_configured"
-            metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
-            return metrics
+        tag_paths = [t["path"] for t in self.tag_metas]
+        if not tag_paths:
+            return {"candidates": 0, "triaged": 0, "emitted": 0, "diagnostics": {"phase": "cycle_complete", "reason": "no_tags"}}
 
-        tags = self.get_monitored_tags()
-        if not tags:
-            emit("AGENT_ERROR", {
-                "runId": self.run_id,
-                "code": "no_tags_found",
-                "message": "No ScadaTag nodes with readable tag paths found.",
-                "recoverable": True,
-                "timestamp": utc_now_iso(),
+        self._emit_progress("reading_tags", f"{len(tag_paths)} tags")
+        t_read = time.time()
+        with _api_semaphore:
+            live_values = self.api.read_tags(tag_paths)
+        read_ms = int((time.time() - t_read) * 1000)
+        now = datetime.now(timezone.utc)
+
+        tags_for_history: List[Tuple[Any, Dict[str, Any]]] = []
+        live_error_count = 0
+        quality_filtered = 0
+        stale_filtered = 0
+
+        for idx, tv in enumerate(live_values):
+            tag_meta = self.tag_metas[idx] if idx < len(self.tag_metas) else {"path": tv.path, "name": tv.path}
+            if tv.error:
+                live_error_count += 1
+                continue
+            if not is_quality_good(tv.quality):
+                quality_filtered += 1
+                continue
+            if is_stale(tv.timestamp, stale_sec, now=now):
+                stale_filtered += 1
+                continue
+            tags_for_history.append((tv, tag_meta))
+
+        self._emit_progress("fetching_history", f"{len(tags_for_history)} tags")
+        history_paths = [tv.path for tv, _ in tags_for_history]
+        t_hist = time.time()
+        history_results = self._fetch_history_batch(history_paths) if history_paths else {}
+        hist_ms = int((time.time() - t_hist) * 1000)
+
+        self._emit_progress("scoring", f"{len(tags_for_history)} tags (read={read_ms}ms hist={hist_ms}ms)")
+        t_score = time.time()
+        shift_signal = {
+            "subsystemId": self.subsystem_id,
+            "subsystemType": self.subsystem_type,
+            "subsystemName": self.subsystem_name,
+            "evaluated": 0, "candidate": 0, "nearShift": 0,
+            "sumAbsZ": 0.0, "maxAbsZ": 0.0,
+            "_tagEntries": [],
+        }
+        candidates: List[Dict] = []
+        history_errors = 0
+        insufficient_history = 0
+
+        for tv, tag_meta in tags_for_history:
+            history, hist_err = history_results.get(tv.path, ([], "No history"))
+            if hist_err:
+                history_errors += 1
+                continue
+            if len(history) < min_history and len(history) < 5:
+                insufficient_history += 1
+                continue
+
+            prev_val = self._prev_values.get(tv.path)
+            det = compute_deviation_scores(tv.value, history, prev_value=prev_val, thresholds=thresholds)
+            curr = safe_float(tv.value)
+            if curr is not None:
+                self._prev_values[tv.path] = curr
+
+            abs_z = abs(float(det.get("z_score", 0.0)))
+            z = float(det.get("z_score", 0.0))
+            shift_signal["evaluated"] += 1
+            shift_signal["sumAbsZ"] += abs_z
+            if abs_z > shift_signal["maxAbsZ"]:
+                shift_signal["maxAbsZ"] = abs_z
+            if abs_z >= 1.5:
+                shift_signal["nearShift"] += 1
+
+            tag_name = tv.path.rsplit("/", 1)[-1] if "/" in str(tv.path) else str(tv.path)
+            cached_hist = self._history_cache.get(tv.path)
+            sparkline = None
+            avg_val = None
+            if cached_hist and cached_hist.get("values"):
+                vals = cached_hist["values"]
+                avg_val = round(sum(vals) / len(vals), 2)
+                if len(vals) <= 20:
+                    sparkline = [round(v, 2) for v in vals]
+                else:
+                    step = len(vals) / 20
+                    sparkline = [round(vals[int(i * step)], 2) for i in range(20)]
+
+            shift_signal["_tagEntries"].append({
+                "path": str(tv.path), "name": tag_name,
+                "z": round(z, 3), "mad": round(float(det.get("mad_score", 0)), 3),
+                "value": tv.value, "avg": avg_val, "sparkline": sparkline,
             })
-            metrics["diagnostics"]["phase"] = "cycle_early_exit"
-            metrics["diagnostics"]["reason"] = "no_tags_found"
-            metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
-            return metrics
 
-        tag_paths = [t["path"] for t in tags]
-        tag_lookup = {t["path"]: t for t in tags}
-        linked_tag_count = sum(
-            1 for t in tags if (t.get("views") or t.get("equipment"))
-        )
-        unlinked_tag_count = max(0, len(tags) - linked_tag_count)
-        detected_subsystems = sorted(
-            {
-                (t.get("primary_subsystem") or _subsystem_ref("global", "all")).get("id", "global:all")
-                for t in tags
-            }
-        )
+            cat = det.get("category", "normal")
+            if det.get("candidate") and cat != "stuck" and len(candidates) < max_candidates:
+                shift_signal["candidate"] += 1
+                context = self._get_context(tv.path)
+                context["subsystem"] = _subsystem_ref(self.subsystem_type, self.subsystem_name)
+                candidates.append({
+                    "context": context, "deterministic": det,
+                    "live_sample": {"path": tv.path, "value": tv.value, "quality": tv.quality, "timestamp": tv.timestamp},
+                })
 
-        subsystem_tag_map: Dict[str, Dict[str, Any]] = {}
+        score_ms = int((time.time() - t_score) * 1000)
+
+        t_triage = time.time()
+        live_events: List[Dict[str, Any]] = []
+        now_iso = utc_now_iso()
+        for cand in candidates:
+            det = cand["deterministic"]
+            ctx = cand["context"]
+            ls = cand["live_sample"]
+            severity = "low"
+            abs_z = abs(float(det.get("z_score", 0)))
+            if abs_z >= 8:
+                severity = "critical"
+            elif abs_z >= 5:
+                severity = "high"
+            elif abs_z >= 3:
+                severity = "medium"
+            live_events.append({
+                "event_id": f"live-{self.subsystem_id}-{ls.get('path', '')}",
+                "source_tag": ls.get("path", ""),
+                "tag_name": ctx.get("tag_name") or ls.get("path", ""),
+                "subsystem_id": self.subsystem_id,
+                "subsystem_type": self.subsystem_type,
+                "subsystem_name": self.subsystem_name,
+                "state": "open",
+                "severity": severity,
+                "category": det.get("category", "deviation"),
+                "summary": f"{det.get('category', 'Deviation')} on {ctx.get('tag_name', '?')} (z={det.get('z_score', 0):.1f})",
+                "z_score": float(det.get("z_score", 0)),
+                "mad_score": float(det.get("mad_score", 0)),
+                "delta_rate": float(det.get("delta_rate", 0)),
+                "confidence": 0.5,
+                "deterministic_reasons_json": json.dumps(det.get("reasons", []), default=str),
+                "live_value": str(ls.get("value")),
+                "live_quality": ls.get("quality"),
+                "live_timestamp": ls.get("timestamp"),
+                "created_at": now_iso,
+            })
+        triage_ms = int((time.time() - t_triage) * 1000)
+
+        self._total_candidates += len(candidates)
+        self._total_emitted += len(live_events)
+
+        evaluated = max(1, shift_signal["evaluated"])
+        tag_entries = shift_signal.pop("_tagEntries", [])
+        shift_signal["avgAbsZ"] = round(shift_signal["sumAbsZ"] / evaluated, 3)
+        shift_signal["shiftRatio"] = round(shift_signal["nearShift"] / evaluated, 3)
+        shift_signal["candidateRatio"] = round(shift_signal["candidate"] / evaluated, 3)
+        shift_signal.pop("sumAbsZ", None)
+        sorted_tags = sorted(tag_entries, key=lambda t: abs(t.get("z", 0)), reverse=True)
+        shift_signal["tagSignals"] = sorted_tags
+
+        return {
+            "candidates": len(candidates),
+            "triaged": len(live_events),
+            "emitted": len(live_events),
+            "liveEvents": live_events,
+            "diagnostics": {
+                "phase": "cycle_complete",
+                "reason": "ok",
+                "monitoredTags": len(tag_paths),
+                "liveErrorCount": live_error_count,
+                "qualityFilteredCount": quality_filtered,
+                "staleFilteredCount": stale_filtered,
+                "historyErrorCount": history_errors,
+                "insufficientHistoryCount": insufficient_history,
+                "evaluatedCount": shift_signal["evaluated"],
+                "candidateCount": len(candidates),
+                "subsystemShiftSignals": [shift_signal],
+                "timingMs": {
+                    "read": read_ms,
+                    "history": hist_ms,
+                    "score": score_ms,
+                    "triage": triage_ms,
+                },
+            },
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  AgentCoordinator — manages subsystem agents
+# ═══════════════════════════════════════════════════════════════════════════
+
+class AgentCoordinator:
+    """Discovers subsystems, spawns/manages SubsystemAgent threads."""
+
+    def __init__(self, config: Dict[str, Any], run_id: Optional[str] = None):
+        self.config = merge_defaults(config)
+        self.run_id = run_id or f"agent-{int(time.time() * 1000)}"
+        from ignition_api_client import IgnitionApiClient
+        from neo4j_ontology import get_ontology_graph
+
+        self.graph = get_ontology_graph()
+        self.api = IgnitionApiClient(
+            base_url=self.config.get("ignitionApiUrl") or os.getenv("IGNITION_API_URL"),
+            api_token=self.config.get("ignitionApiToken") or os.getenv("IGNITION_API_TOKEN"),
+            timeout=15.0,
+        )
+        self._running = True
+        self.agents: Dict[str, SubsystemAgent] = {}
+
+    # -------------------------------------------------------------------
+    #  Schema / lifecycle
+    # -------------------------------------------------------------------
+    def _init_schema(self) -> None:
+        self.graph.init_agent_monitoring_schema()
+
+    def _upsert_run(self, status: str, reason: Optional[str] = None) -> None:
+        with self.graph.session() as session:
+            session.run(
+                """
+                MERGE (r:AgentRun {run_id: $run_id})
+                SET r.status = $status, r.updated_at = datetime(),
+                    r.last_heartbeat_at = datetime(),
+                    r.config_json = $cfg,
+                    r.started_at = coalesce(r.started_at, datetime()),
+                    r.stopped_at = CASE WHEN $status IN ['stopped','failed'] THEN datetime() ELSE r.stopped_at END,
+                    r.stop_reason = CASE WHEN $reason IS NULL THEN r.stop_reason ELSE $reason END
+                """,
+                run_id=self.run_id, status=status,
+                cfg=json.dumps(self.config, default=str), reason=reason,
+            )
+
+    # -------------------------------------------------------------------
+    #  Tag discovery
+    # -------------------------------------------------------------------
+    def _fetch_tags(self) -> List[Dict[str, Any]]:
+        max_tags = int(self.config.get("maxMonitoredTags", 200))
+        scope = self.config.get("scope", {})
+        subsystem_mode = str(scope.get("subsystemMode") or "auto")
+        subsystem_priority = scope.get("subsystemPriority") or list(DEFAULT_SUBSYSTEM_PRIORITY)
+        include_unlinked = bool(scope.get("includeUnlinkedTags", False))
+        tag_map: Dict[str, Dict[str, Any]] = {}
+
+        def upsert(*, path: str, name: str, folder: str = "", views: List[str] = None, equipment: List[str] = None, source: str = "unknown"):
+            path = path.strip()
+            if not path:
+                return
+            entry = tag_map.setdefault(path, {
+                "path": path, "name": name or _last_segment(path) or path,
+                "folder_name": folder, "views": [], "equipment": [],
+                "source": source, "bound_to_view": False,
+            })
+            if source == "view_binding":
+                entry["bound_to_view"] = True
+                entry["source"] = source
+            if folder and not entry.get("folder_name"):
+                entry["folder_name"] = folder
+            if name and (not entry["name"] or entry["name"] == entry["path"]):
+                entry["name"] = name
+            for v in (views or []):
+                if v and v not in entry["views"]:
+                    entry["views"].append(v)
+            for e in (equipment or []):
+                if e and e not in entry["equipment"]:
+                    entry["equipment"].append(e)
+
+        with self.graph.session() as session:
+            for r in session.run(
+                """
+                MATCH (v:View)-[:HAS_COMPONENT]->(c:ViewComponent)-[r:BINDS_TO]->(n)
+                WHERE r.tag_path IS NOT NULL AND trim(r.tag_path) <> ''
+                  AND toLower(coalesce(r.binding_type, 'tag')) = 'tag'
+                OPTIONAL MATCH (eq:Equipment)-[*1..2]-(n)
+                RETURN DISTINCT trim(r.tag_path) AS tag_path, coalesce(n.name,'') AS tag_name,
+                       collect(DISTINCT v.name) AS views, collect(DISTINCT eq.name) AS equipment
+                LIMIT $lim
+                """, lim=max_tags * 4,
+            ):
+                p = str(r["tag_path"] or "").strip()
+                if _looks_like_tag_path(p):
+                    upsert(path=p, name=str(r["tag_name"] or _last_segment(p)),
+                           folder=infer_tag_group(p) or "",
+                           views=[x for x in (r["views"] or []) if x],
+                           equipment=[x for x in (r["equipment"] or []) if x],
+                           source="view_binding")
+
+            for r in session.run(
+                """
+                MATCH (t:ScadaTag) WHERE t.opc_item_path IS NOT NULL AND trim(t.opc_item_path) <> ''
+                OPTIONAL MATCH (c:ViewComponent)-[:BINDS_TO]->(t)
+                OPTIONAL MATCH (v:View)-[:HAS_COMPONENT]->(c)
+                OPTIONAL MATCH (eq:Equipment)-[*1..2]-(t)
+                RETURN DISTINCT trim(t.opc_item_path) AS tag_path, coalesce(t.name,t.opc_item_path) AS tag_name,
+                       coalesce(t.folder_name,'') AS folder_name,
+                       collect(DISTINCT v.name) AS views, collect(DISTINCT eq.name) AS equipment
+                LIMIT $lim
+                """, lim=max_tags * 6,
+            ):
+                p = str(r["tag_path"] or "").strip()
+                if _looks_like_tag_path(p):
+                    upsert(path=p, name=str(r["tag_name"] or _last_segment(p)),
+                           folder=str(r["folder_name"] or ""),
+                           views=[x for x in (r["views"] or []) if x],
+                           equipment=[x for x in (r["equipment"] or []) if x],
+                           source="scada_tag")
+
+        tags = list(tag_map.values())
+        if not include_unlinked:
+            linked = [t for t in tags if t.get("views") or t.get("equipment") or t.get("bound_to_view")]
+            if linked:
+                tags = linked
+
+        for tag in tags:
+            subs, primary = derive_subsystems_for_tag(tag, subsystem_mode=subsystem_mode, priority=subsystem_priority)
+            tag["subsystems"] = subs
+            tag["primary_subsystem"] = primary
+
+        return tags[:max_tags]
+
+    def _discover_subsystems(self) -> Dict[str, Dict[str, Any]]:
+        tags = self._fetch_tags()
+        subsystems: Dict[str, Dict[str, Any]] = {}
         for t in tags:
             sub = t.get("primary_subsystem") or _subsystem_ref("global", "all")
             sub_id = sub.get("id", "global:all")
-            bucket = subsystem_tag_map.setdefault(sub_id, {
+            bucket = subsystems.setdefault(sub_id, {
                 "type": sub.get("type", "global"),
                 "name": sub.get("name", "all"),
                 "tags": [],
             })
-            bucket["tags"].append({
-                "path": t["path"],
-                "name": t.get("name", t["path"]),
-                "views": t.get("views", []),
-                "equipment": t.get("equipment", []),
-                "allSubsystems": [s.get("id") for s in (t.get("subsystems") or [])],
-            })
+            bucket["tags"].append(t)
+        return subsystems
 
-        live_values = self.api.read_tags(tag_paths)
-        tool_calls: List[Dict[str, Any]] = []
-        tool_calls.append({
-            "tool": "read_tags",
-            "request": {
-                "count": len(tag_paths),
-                "samplePaths": tag_paths[:8],
-            },
-            "result": {
-                "count": len(live_values),
-                "errorCount": sum(1 for tv in live_values if tv.error),
-                "qualityGoodCount": sum(1 for tv in live_values if is_quality_good(tv.quality)),
-                "timestampMissingCount": sum(1 for tv in live_values if not tv.timestamp),
-                "timestampInferredCount": sum(
-                    1
-                    for tv in live_values
-                    if isinstance(tv.config, dict) and bool(tv.config.get("timestamp_inferred"))
-                ),
-                "sample": [
-                    {
-                        "path": tv.path,
-                        "value": _preview_value(tv.value),
-                        "quality": tv.quality,
-                        "timestamp": tv.timestamp,
-                        "timestampInferred": bool(tv.config.get("timestamp_inferred"))
-                        if isinstance(tv.config, dict)
-                        else False,
-                        "configKeys": sorted(list(tv.config.keys()))[:8]
-                        if isinstance(tv.config, dict)
-                        else [],
-                        "error": tv.error,
-                    }
-                    for tv in live_values[:5]
-                ],
-            },
-        })
-        candidates: List[Dict[str, Any]] = []
-        now = datetime.now(timezone.utc)
-        live_error_count = 0
-        live_error_samples: List[str] = []
-        history_error_count = 0
-        history_error_samples: List[str] = []
-        valid_live_count = 0
-        missing_timestamp_count = 0
-        inferred_timestamp_count = 0
-        quality_filtered_count = 0
-        stale_filtered_count = 0
-        insufficient_history_count = 0
-        low_history_candidate_count = 0
-        candidate_subsystem_counts: Dict[str, int] = {}
-        live_error_linked = 0
-        live_error_unlinked = 0
-        history_error_linked = 0
-        history_error_unlinked = 0
-        quality_filtered_linked = 0
-        quality_filtered_unlinked = 0
-        stale_filtered_linked = 0
-        stale_filtered_unlinked = 0
-        evaluated_linked = 0
-        evaluated_unlinked = 0
-        candidate_linked = 0
-        candidate_unlinked = 0
-        near_shift_count = 0
-        near_shift_linked = 0
-        near_shift_unlinked = 0
-        stale_samples: List[Dict[str, Any]] = []
-        subsystem_shift_signals: Dict[str, Dict[str, Any]] = {}
-        processed_live_count = 0
-        total_live_count = len(live_values)
-        last_progress_emit = 0.0
-
-        def emit_cycle_progress(reason: str, current_tag: str = "", include_tag_map: bool = False) -> None:
-            nonlocal last_progress_emit
-            diag = make_default_diagnostics(
-                staleness_threshold_sec=stale_threshold_sec,
-                phase="cycle_in_progress",
-                reason=reason,
-            )
-            diag.update({
-                "processedLiveCount": processed_live_count,
-                "totalLiveCount": total_live_count,
-                "currentTag": current_tag,
-                "candidatesSoFar": len(candidates),
-                "liveErrorCount": live_error_count,
-                "qualityFilteredCount": quality_filtered_count,
-                "staleFilteredCount": stale_filtered_count,
-                "historyErrorCount": history_error_count,
-                "monitoredTags": len(tags),
-                "linkedTags": linked_tag_count,
-                "unlinkedTags": unlinked_tag_count,
-                "detectedSubsystemCount": len(detected_subsystems),
-                "detectedSubsystems": detected_subsystems[:10],
-            })
-            if include_tag_map:
-                diag["subsystemTagMap"] = subsystem_tag_map
-            emit("AGENT_STATUS", {
-                "runId": self.run_id,
-                "state": "running",
-                "cycleMs": int((time.time() - cycle_start) * 1000),
-                "candidates": len(candidates),
-                "triaged": 0,
-                "emitted": metrics.get("emitted", 0),
-                "diagnostics": diag,
-                "timestamp": utc_now_iso(),
-            })
-            last_progress_emit = time.time()
-
-        emit_cycle_progress("cycle_started", include_tag_map=True)
-
-        def _update_subsystem_signal(
-            subsystem_ref: Dict[str, str], deterministic: Dict[str, Any],
-            tag_path: str, live_value: Any = None,
-        ) -> None:
-            sub_id = subsystem_ref.get("id", "global:all")
-            abs_z = abs(float(deterministic.get("z_score", 0.0)))
-            z = float(deterministic.get("z_score", 0.0))
-            mad = float(deterministic.get("mad_score", 0.0))
-            bucket = subsystem_shift_signals.setdefault(
-                sub_id,
-                {
-                    "subsystemId": sub_id,
-                    "subsystemType": subsystem_ref.get("type", "global"),
-                    "subsystemName": subsystem_ref.get("name", "all"),
-                    "evaluated": 0,
-                    "candidate": 0,
-                    "nearShift": 0,
-                    "sumAbsZ": 0.0,
-                    "sumZ": 0.0,
-                    "maxAbsZ": 0.0,
-                    "sampleTag": tag_path,
-                    "_tagEntries": [],
-                },
-            )
-            bucket["evaluated"] += 1
-            bucket["sumAbsZ"] += abs_z
-            bucket["sumZ"] += z
-            if abs_z >= 1.5:
-                bucket["nearShift"] += 1
-            if abs_z > bucket["maxAbsZ"]:
-                bucket["maxAbsZ"] = abs_z
-                bucket["sampleTag"] = tag_path
-            tag_name = tag_path.rsplit("/", 1)[-1] if "/" in str(tag_path) else str(tag_path)
-            bucket["_tagEntries"].append({
-                "path": str(tag_path),
-                "name": tag_name,
-                "z": round(z, 3),
-                "absZ": round(abs_z, 3),
-                "mad": round(mad, 3),
-                "value": live_value,
-            })
-
-        # ---- Phase 1: Filter live values (no I/O) ----
-        TagEntry = Tuple[Any, Dict[str, Any], Dict[str, str], bool]  # (tv, tag_meta, subsystem, is_linked)
-        tags_for_history: List[TagEntry] = []
-
-        for idx, tv in enumerate(live_values):
-            processed_live_count += 1
-            tag_meta = (
-                tags[idx] if idx < len(tags)
-                else tag_lookup.get(tv.path, {"path": tv.path, "name": tv.path})
-            )
-            subsystem = tag_meta.get("primary_subsystem") or _subsystem_ref("global", "all")
-            is_linked = bool(tag_meta.get("views") or tag_meta.get("equipment"))
-
-            if tv.error:
-                live_error_count += 1
-                if is_linked:
-                    live_error_linked += 1
-                else:
-                    live_error_unlinked += 1
-                if len(live_error_samples) < 5:
-                    live_error_samples.append(f"{tv.path}: {tv.error}")
-                continue
-            valid_live_count += 1
-            if not tv.timestamp:
-                missing_timestamp_count += 1
-            if isinstance(tv.config, dict) and bool(tv.config.get("timestamp_inferred")):
-                inferred_timestamp_count += 1
-            if not is_quality_good(tv.quality):
-                quality_filtered_count += 1
-                if is_linked:
-                    quality_filtered_linked += 1
-                else:
-                    quality_filtered_unlinked += 1
-                continue
-            parsed_ts = parse_timestamp(tv.timestamp)
-            age_sec = (now - parsed_ts).total_seconds() if parsed_ts is not None else None
-            if is_stale(tv.timestamp, stale_threshold_sec, now=now):
-                stale_filtered_count += 1
-                if is_linked:
-                    stale_filtered_linked += 1
-                else:
-                    stale_filtered_unlinked += 1
-                if len(stale_samples) < 8:
-                    stale_samples.append({
-                        "path": tv.path,
-                        "timestampRaw": tv.timestamp,
-                        "timestampParsedUtc": parsed_ts.isoformat() if parsed_ts else None,
-                        "ageSec": round(age_sec, 3) if age_sec is not None else None,
-                        "thresholdSec": stale_threshold_sec,
-                        "reason": "timestamp_parse_failed" if parsed_ts is None else "age_exceeds_threshold",
-                    })
-                continue
-
-            tags_for_history.append((tv, tag_meta, subsystem, is_linked))
-
-        emit_cycle_progress(
-            "filtering_complete",
-            current_tag=f"{len(tags_for_history)} tags passed filters",
+    # -------------------------------------------------------------------
+    #  Agent management
+    # -------------------------------------------------------------------
+    def _spawn_agent(self, sub_id: str, info: Dict[str, Any], stagger_delay: float = 0.0) -> SubsystemAgent:
+        agent = SubsystemAgent(
+            subsystem_id=sub_id,
+            subsystem_type=info["type"],
+            subsystem_name=info["name"],
+            tag_metas=info["tags"],
+            graph=self.graph,
+            api=self.api,
+            config=self.config,
+            run_id=self.run_id,
+            stagger_delay=stagger_delay,
         )
+        agent.start()
+        self.agents[sub_id] = agent
+        return agent
 
-        # ---- Phase 2: Batched history fetch ----
-        history_fetch_start = time.time()
-        history_paths = [tv.path for tv, _, _, _ in tags_for_history]
-        history_results = self.fetch_history_batch(history_paths) if history_paths else {}
-        history_fetch_elapsed = time.time() - history_fetch_start
-        emit_cycle_progress(
-            "history_complete",
-            current_tag=f"{len(history_results)} in {round(history_fetch_elapsed, 1)}s",
-        )
+    def _stop_agent(self, sub_id: str) -> None:
+        agent = self.agents.pop(sub_id, None)
+        if agent:
+            agent.stop()
 
-        # ---- Phase 3: Score and build candidates using pre-fetched history ----
-        for tv, tag_meta, subsystem, is_linked in tags_for_history:
-            history, history_error = history_results.get(tv.path, ([], "No history result"))
+    def _stop_all(self) -> None:
+        for agent in self.agents.values():
+            agent.stop()
+        for agent in list(self.agents.values()):
+            agent.join(timeout=5)
+        self.agents.clear()
 
-            if len(tool_calls) < 18:
-                tool_calls.append({
-                    "tool": "query_tag_history",
-                    "request": {
-                        "tagPath": tv.path,
-                        "historyWindowMinutes": int(self.config.get("historyWindowMinutes", 360)),
-                    },
-                    "result": {
-                        "historyPoints": len(history),
-                        "error": history_error,
-                    },
+    # -------------------------------------------------------------------
+    #  Stdin command reader
+    # -------------------------------------------------------------------
+    def _stdin_reader(self) -> None:
+        while self._running:
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                cmd = json.loads(line)
+                self._handle_command(cmd)
+            except (json.JSONDecodeError, Exception):
+                continue
+
+    def _handle_command(self, cmd: Dict[str, Any]) -> None:
+        action = cmd.get("cmd", "")
+        sub_id = cmd.get("subsystemId", "")
+
+        if action == "stop-all":
+            self._running = False
+        elif action == "stop-agent" and sub_id:
+            agent = self.agents.get(sub_id)
+            if agent:
+                agent.pause()
+                emit("AGENT_STATUS", {
+                    "runId": self.run_id, "subsystemId": sub_id,
+                    "state": "paused", "diagnostics": {"phase": "agent_paused", "reason": "user_request"},
+                    "timestamp": utc_now_iso(),
                 })
-            if history_error:
-                history_error_count += 1
-                if is_linked:
-                    history_error_linked += 1
-                else:
-                    history_error_unlinked += 1
-                if len(history_error_samples) < 5:
-                    history_error_samples.append(f"{tv.path}: {history_error}")
-                continue
-            if len(history) < min_history:
-                insufficient_history_count += 1
-                if len(history) >= 5:
-                    prev_val = self._prev_values.get(tv.path)
-                    deterministic = compute_deviation_scores(
-                        current_value=tv.value,
-                        history_values=history,
-                        prev_value=prev_val,
-                        thresholds=thresholds,
+        elif action == "start-agent" and sub_id:
+            agent = self.agents.get(sub_id)
+            if agent:
+                agent.resume()
+                emit("AGENT_STATUS", {
+                    "runId": self.run_id, "subsystemId": sub_id,
+                    "state": "running", "diagnostics": {"phase": "agent_resumed", "reason": "user_request"},
+                    "timestamp": utc_now_iso(),
+                })
+        elif action == "deep-analyze":
+            event_data = cmd.get("event", {})
+            threading.Thread(
+                target=self._deep_analyze_inline,
+                args=(event_data,),
+                daemon=True,
+                name="deep-analyze",
+            ).start()
+
+    # -------------------------------------------------------------------
+    #  Deep analyze (inline, runs in background thread)
+    # -------------------------------------------------------------------
+    def _deep_analyze_inline(self, event_data: Dict[str, Any]) -> None:
+        event_id = event_data.get("event_id", "?")
+        tag_path = event_data.get("source_tag") or event_data.get("tag_name", "")
+        sub_id = event_data.get("subsystem_id", "")
+        if not tag_path:
+            emit("AGENT_EVENT", {"runId": self.run_id, "deepAnalyze": True,
+                "event": {**event_data, "deep_analyze_error": "No source_tag"}})
+            return
+        agent = self.agents.get(sub_id) if sub_id else None
+        llm = None
+        if agent and agent.llm:
+            llm = agent.llm
+        else:
+            if bool(os.getenv("ANTHROPIC_API_KEY")):
+                try:
+                    from claude_client import ClaudeClient
+                    llm = ClaudeClient(
+                        enable_tools=False,
+                        ignition_api_url=self.config.get("ignitionApiUrl"),
+                        ignition_api_token=self.config.get("ignitionApiToken"),
                     )
-                    curr_num = safe_float(tv.value)
-                    if curr_num is not None:
-                        self._prev_values[tv.path] = curr_num
+                except Exception:
+                    pass
+        if not llm:
+            emit("AGENT_EVENT", {"runId": self.run_id, "deepAnalyze": True,
+                "event": {**event_data, "deep_analyze_error": "No LLM available (check ANTHROPIC_API_KEY)"}})
+            return
 
-                    _update_subsystem_signal(subsystem, deterministic, tv.path, live_value=tv.value)
-                    if is_linked:
-                        evaluated_linked += 1
-                    else:
-                        evaluated_unlinked += 1
-                    if abs(float(deterministic.get("z_score", 0.0))) >= 1.5:
-                        near_shift_count += 1
-                        if is_linked:
-                            near_shift_linked += 1
-                        else:
-                            near_shift_unlinked += 1
-
-                    if deterministic.get("candidate"):
-                        sub_bucket = subsystem_shift_signals.setdefault(
-                            subsystem.get("id", "global:all"),
-                            {
-                                "subsystemId": subsystem.get("id", "global:all"),
-                                "subsystemType": subsystem.get("type", "global"),
-                                "subsystemName": subsystem.get("name", "all"),
-                                "evaluated": 0,
-                                "candidate": 0,
-                                "nearShift": 0,
-                                "sumAbsZ": 0.0,
-                                "sumZ": 0.0,
-                                "maxAbsZ": 0.0,
-                                "sampleTag": tv.path,
-                                "_tagEntries": [],
-                            },
-                        )
-                        sub_bucket["candidate"] += 1
-                        if is_linked:
-                            candidate_linked += 1
-                        else:
-                            candidate_unlinked += 1
-                        deterministic["reasons"] = list(deterministic.get("reasons", [])) + ["low_history_override"]
-                        deterministic["history_quality"] = "low"
-                        context = self.get_context(tv.path)
-                        context["subsystem"] = subsystem
-                        context["subsystems"] = tag_meta.get("subsystems") or [subsystem]
-                        candidates.append(
-                            {
-                                "context": context,
-                                "deterministic": deterministic,
-                                "live_sample": {
-                                    "path": tv.path,
-                                    "value": tv.value,
-                                    "quality": tv.quality,
-                                    "timestamp": tv.timestamp,
-                                    "data_type": tv.data_type,
-                                },
-                                "subsystem": subsystem,
-                            }
-                        )
-                        sub_id = subsystem.get("id", "global:all")
-                        candidate_subsystem_counts[sub_id] = candidate_subsystem_counts.get(sub_id, 0) + 1
-                        low_history_candidate_count += 1
-                continue
-
-            prev_val = self._prev_values.get(tv.path)
-            deterministic = compute_deviation_scores(
-                current_value=tv.value,
-                history_values=history,
-                prev_value=prev_val,
-                thresholds=thresholds,
-            )
-            curr_num = safe_float(tv.value)
-            if curr_num is not None:
-                self._prev_values[tv.path] = curr_num
-
-            _update_subsystem_signal(subsystem, deterministic, tv.path, live_value=tv.value)
-            if is_linked:
-                evaluated_linked += 1
-            else:
-                evaluated_unlinked += 1
-            if abs(float(deterministic.get("z_score", 0.0))) >= 1.5:
-                near_shift_count += 1
-                if is_linked:
-                    near_shift_linked += 1
-                else:
-                    near_shift_unlinked += 1
-
-            if deterministic.get("candidate"):
-                sub_bucket = subsystem_shift_signals.setdefault(
-                    subsystem.get("id", "global:all"),
-                    {
-                        "subsystemId": subsystem.get("id", "global:all"),
-                        "subsystemType": subsystem.get("type", "global"),
-                        "subsystemName": subsystem.get("name", "all"),
-                        "evaluated": 0,
-                        "candidate": 0,
-                        "nearShift": 0,
-                        "sumAbsZ": 0.0,
-                        "sumZ": 0.0,
-                        "maxAbsZ": 0.0,
-                        "sampleTag": tv.path,
-                        "_tagEntries": [],
-                    },
-                )
-                sub_bucket["candidate"] += 1
-                if is_linked:
-                    candidate_linked += 1
-                else:
-                    candidate_unlinked += 1
-                context = self.get_context(tv.path)
-                context["subsystem"] = subsystem
-                context["subsystems"] = tag_meta.get("subsystems") or [subsystem]
-                candidates.append(
-                    {
-                        "context": context,
-                        "deterministic": deterministic,
-                        "live_sample": {
-                            "path": tv.path,
-                            "value": tv.value,
-                            "quality": tv.quality,
-                            "timestamp": tv.timestamp,
-                            "data_type": tv.data_type,
-                        },
-                        "subsystem": subsystem,
-                    }
-                )
-                sub_id = subsystem.get("id", "global:all")
-                candidate_subsystem_counts[sub_id] = candidate_subsystem_counts.get(sub_id, 0) + 1
-
-        emit_cycle_progress("scoring_complete")
-
-        if live_values and live_error_count == len(live_values):
-            emitted = self.emit_provider_failure_event(
-                "live_tag_provider_failed",
-                f"Live tag provider failed for all reads ({live_error_count}/{len(live_values)}).",
-                severity="high",
-                category="quality-issue",
-                details={"samples": live_error_samples},
-            )
-            if emitted:
-                metrics["emitted"] += 1
-        elif live_error_count > 0:
-            emitted = self.emit_provider_failure_event(
-                "live_tag_provider_partial_failure",
-                f"Live tag provider partially failed ({live_error_count}/{len(live_values)} reads).",
-                severity="medium",
-                category="quality-issue",
-                details={"samples": live_error_samples},
-            )
-            if emitted:
-                metrics["emitted"] += 1
-
-        if valid_live_count > 0 and history_error_count >= max(1, int(valid_live_count * 0.8)):
-            emitted = self.emit_provider_failure_event(
-                "history_provider_failed",
-                f"History provider failed for most queries ({history_error_count}/{valid_live_count}).",
-                severity="high",
-                category="quality-issue",
-                details={"samples": history_error_samples},
-            )
-            if emitted:
-                metrics["emitted"] += 1
-        elif history_error_count > 0:
-            emitted = self.emit_provider_failure_event(
-                "history_provider_partial_failure",
-                f"History provider partially failed ({history_error_count}/{valid_live_count}).",
-                severity="medium",
-                category="quality-issue",
-                details={"samples": history_error_samples},
-            )
-            if emitted:
-                metrics["emitted"] += 1
-
-        if valid_live_count > 0 and stale_filtered_count >= max(1, int(valid_live_count * 0.8)):
-            emitted = self.emit_provider_failure_event(
-                "live_timestamp_stale",
-                f"Most live samples were stale ({stale_filtered_count}/{valid_live_count}).",
-                severity="medium",
-                category="quality-issue",
-                details={"staleCount": stale_filtered_count, "validLiveCount": valid_live_count},
-            )
-            if emitted:
-                metrics["emitted"] += 1
-
-        if valid_live_count > 0 and quality_filtered_count >= max(1, int(valid_live_count * 0.8)):
-            emitted = self.emit_provider_failure_event(
-                "live_quality_bad",
-                f"Most live samples had non-good quality ({quality_filtered_count}/{valid_live_count}).",
-                severity="medium",
-                category="quality-issue",
-                details={"qualityFilteredCount": quality_filtered_count, "validLiveCount": valid_live_count},
-            )
-            if emitted:
-                metrics["emitted"] += 1
-
-        metrics["candidates"] = len(candidates)
-        shortlisted: List[Dict[str, Any]] = []
-        selected_per_subsystem: Dict[str, int] = {}
-        for candidate in candidates:
-            subsystem = candidate.get("subsystem") or _subsystem_ref("global", "all")
-            sub_id = subsystem.get("id", "global:all")
-            if selected_per_subsystem.get(sub_id, 0) >= max_candidates_per_subsystem:
-                continue
-            shortlisted.append(candidate)
-            selected_per_subsystem[sub_id] = selected_per_subsystem.get(sub_id, 0) + 1
-            if len(shortlisted) >= max_candidates_total:
-                break
-
-        llm_total = 0
-        llm_per_subsystem: Dict[str, int] = {}
-        dedup_suppressed_count = 0
-
-        if shortlisted:
-            emit_cycle_progress(
-                "triage_started",
-                current_tag=f"{len(shortlisted)} candidates to process",
-            )
-
-        for ci, candidate in enumerate(shortlisted):
-            subsystem = candidate.get("subsystem") or _subsystem_ref("global", "all")
-            sub_id = subsystem.get("id", "global:all")
-            tag_name = candidate["context"].get("tag_name", candidate["context"].get("tag_path", "?"))
-            use_llm = (
-                llm_total < max_triage_total
-                and llm_per_subsystem.get(sub_id, 0) < max_triage_per_subsystem
-            )
-            triage = (
-                self.run_llm_triage(
-                    candidate["context"],
-                    candidate["deterministic"],
-                    candidate["live_sample"],
-                )
-                if use_llm
-                else {
-                    "summary": (
-                        f"Deviation on {candidate['context'].get('tag_name', candidate['context']['tag_path'])} "
-                        f"in subsystem {subsystem.get('name', 'all')}"
-                    ),
-                    "category": candidate["deterministic"].get("category", "deviation"),
-                    "severity": "medium",
-                    "confidence": 0.5,
-                    "verification_checks": [],
-                    "probable_causes": [],
-                    "safety_notes": [],
-                    "rationale": "Deterministic-only triage (LLM triage disabled or cap reached).",
-                    "related_entities": [],
-                }
-            )
-            if use_llm:
-                llm_total += 1
-                llm_per_subsystem[sub_id] = llm_per_subsystem.get(sub_id, 0) + 1
-            metrics["triaged"] += 1
-            persisted = self.persist_event(
-                candidate["context"],
-                candidate["deterministic"],
-                candidate["live_sample"],
-                triage,
-                subsystem=subsystem,
-            )
-            if persisted:
-                metrics["emitted"] += 1
-                self._emit_persisted_event(persisted)
-            else:
-                dedup_suppressed_count += 1
-
-            if (ci + 1) % 5 == 0 or ci == len(shortlisted) - 1:
-                emit_cycle_progress(
-                    "triaging",
-                    current_tag=f"{ci + 1}/{len(shortlisted)} ({tag_name})",
-                )
-
-        top_candidates_by_subsystem = dict(
-            sorted(candidate_subsystem_counts.items(), key=lambda item: item[1], reverse=True)[:10]
-        )
-        top_shift_signals = sorted(
-            subsystem_shift_signals.values(),
-            key=lambda item: (
-                int(item.get("candidate", 0)),
-                float(item.get("maxAbsZ", 0.0)),
-                int(item.get("nearShift", 0)),
-                int(item.get("evaluated", 0)),
-            ),
-            reverse=True,
-        )
-        sparkline_size = 20
-        for item in top_shift_signals:
-            evaluated = max(1, int(item.get("evaluated", 0)))
-            item["avgAbsZ"] = round(float(item.get("sumAbsZ", 0.0)) / evaluated, 3)
-            item["avgZ"] = round(float(item.get("sumZ", 0.0)) / evaluated, 3)
-            item["shiftRatio"] = round(float(item.get("nearShift", 0)) / evaluated, 3)
-            item["candidateRatio"] = round(float(item.get("candidate", 0)) / evaluated, 3)
-            item.pop("sumAbsZ", None)
-            item.pop("sumZ", None)
-            raw_tags = item.pop("_tagEntries", [])
-            sorted_tags = sorted(raw_tags, key=lambda t: t.get("absZ", 0.0), reverse=True)
-            tag_signals = []
-            for t in sorted_tags:
-                entry = {k: v for k, v in t.items() if k != "absZ"}
-                cached_hist = self._history_cache.get(t.get("path", ""))
-                if cached_hist and cached_hist.get("values"):
-                    vals = cached_hist["values"]
-                    entry["avg"] = round(sum(vals) / len(vals), 2)
-                    if len(vals) <= sparkline_size:
-                        entry["sparkline"] = [round(v, 2) for v in vals]
-                    else:
-                        step = len(vals) / sparkline_size
-                        entry["sparkline"] = [round(vals[int(i * step)], 2) for i in range(sparkline_size)]
-                tag_signals.append(entry)
-            item["tagSignals"] = tag_signals
-
-        metrics["diagnostics"] = {
-            **make_default_diagnostics(
-                staleness_threshold_sec=int(thresholds.get("stalenessSec", 120)),
-                phase="cycle_complete",
-                reason="ok",
-            ),
-            "monitoredTags": len(tag_paths),
-            "linkedTags": linked_tag_count,
-            "unlinkedTags": unlinked_tag_count,
-            "validLiveCount": valid_live_count,
-            "missingTimestampCount": missing_timestamp_count,
-            "inferredTimestampCount": inferred_timestamp_count,
-            "liveErrorCount": live_error_count,
-            "liveErrorLinked": live_error_linked,
-            "liveErrorUnlinked": live_error_unlinked,
-            "qualityFilteredCount": quality_filtered_count,
-            "qualityFilteredLinked": quality_filtered_linked,
-            "qualityFilteredUnlinked": quality_filtered_unlinked,
-            "staleFilteredCount": stale_filtered_count,
-            "staleFilteredLinked": stale_filtered_linked,
-            "staleFilteredUnlinked": stale_filtered_unlinked,
-            "historyErrorCount": history_error_count,
-            "historyErrorLinked": history_error_linked,
-            "historyErrorUnlinked": history_error_unlinked,
-            "insufficientHistoryCount": insufficient_history_count,
-            "lowHistoryCandidateCount": low_history_candidate_count,
-            "evaluatedLinked": evaluated_linked,
-            "evaluatedUnlinked": evaluated_unlinked,
-            "candidateLinked": candidate_linked,
-            "candidateUnlinked": candidate_unlinked,
-            "nearShiftCount": near_shift_count,
-            "nearShiftLinked": near_shift_linked,
-            "nearShiftUnlinked": near_shift_unlinked,
-            "stalenessThresholdSec": int(thresholds.get("stalenessSec", 120)),
-            "staleSamples": stale_samples,
-            "timestampParseNote": "Naive timestamps are treated as local time by parse_timestamp().",
-            "detectedSubsystemCount": len(detected_subsystems),
-            "detectedSubsystems": detected_subsystems[:10],
-            "subsystemTagMap": subsystem_tag_map,
-            "candidateSubsystemCount": len(candidate_subsystem_counts),
-            "candidateBySubsystem": top_candidates_by_subsystem,
-            "subsystemShiftSignals": top_shift_signals,
-            "maxCandidatesPerSubsystem": max_candidates_per_subsystem,
-            "maxLlmTriagesPerSubsystem": max_triage_per_subsystem,
-            "llmTriagedCount": llm_total,
-            "dedupSuppressedCount": dedup_suppressed_count,
-            "toolCalls": tool_calls,
+        det = {
+            "z_score": event_data.get("z_score", 0),
+            "mad_score": event_data.get("mad_score", 0),
+            "delta_rate": event_data.get("delta_rate", 0),
+            "category": event_data.get("category", "deviation"),
+            "reasons": json.loads(event_data.get("deterministic_reasons_json", "[]")),
         }
-        metrics["cycleMs"] = int((time.time() - cycle_start) * 1000)
-        return metrics
+        context = {"tag_path": tag_path, "tag_name": event_data.get("tag_name", tag_path),
+            "equipment": [], "views": [], "group": "", "symptoms": [], "causes": []}
+        live_sample = {"path": tag_path, "value": event_data.get("live_value"),
+            "quality": event_data.get("live_quality"), "timestamp": event_data.get("live_timestamp")}
 
-    def cleanup_retention(self) -> int:
-        retention_days = int(self.config.get("retentionDays", 14))
-        return self.graph.cleanup_anomaly_events(retention_days=retention_days)
+        try:
+            result = llm.query_json(
+                system_prompt=(
+                    "You are an industrial anomaly triage assistant. "
+                    "Return ONLY valid JSON with keys: summary, category, severity, confidence, "
+                    "probable_causes, verification_checks, safety_notes, rationale, related_entities."
+                ),
+                user_prompt=json.dumps({"context": context, "deterministic": det, "live_sample": live_sample}, default=str),
+                max_tokens=900,
+                use_tools=False,
+            )
+            data = result.get("data", {}) if isinstance(result, dict) else {}
+            updated = dict(event_data)
+            if isinstance(data, dict):
+                updated["summary"] = data.get("summary", updated.get("summary", ""))
+                updated["explanation"] = data.get("rationale", updated.get("explanation", ""))
+                updated["probable_causes_json"] = json.dumps(data.get("probable_causes", []))
+                updated["recommended_checks_json"] = json.dumps(data.get("verification_checks", []))
+                updated["safety_notes_json"] = json.dumps(data.get("safety_notes", []))
+                updated["severity"] = data.get("severity", updated.get("severity", "medium"))
+                updated["confidence"] = data.get("confidence", updated.get("confidence", 0.5))
+                updated["deep_analyzed"] = True
+            emit("AGENT_EVENT", {"runId": self.run_id, "deepAnalyze": True, "event": updated})
+        except Exception as exc:
+            emit("AGENT_EVENT", {"runId": self.run_id, "deepAnalyze": True,
+                "event": {**event_data, "deep_analyze_error": str(exc)}})
 
-    def run_forever(self) -> int:
-        self.init_schema()
-        self.upsert_run("running")
-        startup_diag = make_default_diagnostics(
-            staleness_threshold_sec=int(self.config.get("thresholds", {}).get("stalenessSec", 120)),
-            phase="startup",
-            reason="worker_started",
-        )
+    # -------------------------------------------------------------------
+    #  Main loop
+    # -------------------------------------------------------------------
+    def run(self) -> int:
+        self._init_schema()
+        self._upsert_run("running")
+
         emit("AGENT_STATUS", {
-            "runId": self.run_id,
-            "state": "running",
-            "cycleMs": 0,
-            "candidates": 0,
-            "triaged": 0,
-            "emitted": 0,
-            "diagnostics": startup_diag,
+            "runId": self.run_id, "state": "running",
+            "diagnostics": {"phase": "startup", "reason": "coordinator_started"},
             "timestamp": utc_now_iso(),
         })
 
-        poll_ms = int(self.config.get("pollIntervalMs", 1000))
+        subsystems = self._discover_subsystems()
+        tag_map: Dict[str, Any] = {}
+        stagger_sec = 1.5  # seconds between each agent's first cycle
+        for idx, (sub_id, info) in enumerate(subsystems.items()):
+            tag_map[sub_id] = {
+                "type": info["type"], "name": info["name"],
+                "tags": [{"path": t["path"], "name": t.get("name", t["path"])} for t in info["tags"]],
+            }
+            self._spawn_agent(sub_id, info, stagger_delay=idx * stagger_sec)
+
+        emit("AGENT_STATUS", {
+            "runId": self.run_id, "state": "running",
+            "diagnostics": {
+                "phase": "agents_started",
+                "reason": f"{len(self.agents)} subsystem agents spawned",
+                "subsystemTagMap": tag_map,
+                "agentCount": len(self.agents),
+                "agentIds": list(self.agents.keys()),
+            },
+            "timestamp": utc_now_iso(),
+        })
+
+        stdin_thread = threading.Thread(target=self._stdin_reader, daemon=True, name="stdin-reader")
+        stdin_thread.start()
+
+        rediscovery_interval = float(self.config.get("rediscoveryIntervalSec", 60))
         cleanup_every = max(1, int(self.config.get("cleanupEveryCycles", 40)))
-        exit_code = 0
-        reason = "stopped"
+        last_rediscovery = time.time()
+        watchdog_count = 0
 
         while self._running:
-            self._cycle_count += 1
-            cycle_started = time.time()
-            try:
-                metrics = self.run_cycle()
-                self.heartbeat(metrics)
-                emit("AGENT_STATUS", {
-                    "runId": self.run_id,
-                    "state": "running",
-                    "cycleMs": metrics["cycleMs"],
-                    "candidates": metrics["candidates"],
-                    "triaged": metrics["triaged"],
-                    "emitted": metrics["emitted"],
-                    "diagnostics": metrics.get("diagnostics", {}),
-                    "timestamp": utc_now_iso(),
-                })
-                if self._cycle_count % cleanup_every == 0:
-                    deleted = self.cleanup_retention()
-                    if deleted > 0:
-                        cleanup_diag = make_default_diagnostics(
-                            staleness_threshold_sec=int(self.config.get("thresholds", {}).get("stalenessSec", 120)),
-                            phase="retention_cleanup",
-                            reason="cleanup_complete",
-                        )
-                        cleanup_diag["emittedCleanupCount"] = deleted
+            time.sleep(2)
+            watchdog_count += 1
+
+            if time.time() - last_rediscovery >= rediscovery_interval:
+                try:
+                    new_subs = self._discover_subsystems()
+                    new_ids = set(new_subs.keys())
+                    old_ids = set(self.agents.keys())
+
+                    for sub_id in new_ids - old_ids:
+                        info = new_subs[sub_id]
+                        self._spawn_agent(sub_id, info)
                         emit("AGENT_STATUS", {
-                            "runId": self.run_id,
-                            "state": "retention_cleanup",
-                            "cycleMs": 0,
-                            "candidates": 0,
-                            "triaged": 0,
-                            "emitted": deleted,
-                            "diagnostics": cleanup_diag,
+                            "runId": self.run_id, "subsystemId": sub_id, "state": "running",
+                            "diagnostics": {"phase": "agent_discovered", "reason": "new_subsystem"},
                             "timestamp": utc_now_iso(),
                         })
-            except Exception as exc:
-                reason = "failed"
-                exit_code = 1
-                emit("AGENT_ERROR", {
-                    "runId": self.run_id,
-                    "code": "cycle_error",
-                    "message": str(exc),
-                    "recoverable": True,
-                    "timestamp": utc_now_iso(),
-                })
-                error_diag = make_default_diagnostics(
-                    staleness_threshold_sec=int(self.config.get("thresholds", {}).get("stalenessSec", 120)),
-                    phase="cycle_error",
-                    reason="exception",
-                )
-                error_diag["errorMessage"] = str(exc)
-                emit("AGENT_STATUS", {
-                    "runId": self.run_id,
-                    "state": "running",
-                    "cycleMs": int((time.time() - cycle_started) * 1000),
-                    "candidates": 0,
-                    "triaged": 0,
-                    "emitted": 0,
-                    "diagnostics": error_diag,
-                    "timestamp": utc_now_iso(),
-                })
 
-            elapsed_ms = int((time.time() - cycle_started) * 1000)
-            remaining = max(0, poll_ms - elapsed_ms) / 1000.0
-            if remaining > 0:
-                time.sleep(remaining)
+                    for sub_id in old_ids & new_ids:
+                        agent = self.agents.get(sub_id)
+                        if agent:
+                            agent.update_tags(new_subs[sub_id]["tags"])
 
-        self.upsert_run("stopped" if reason != "failed" else "failed", reason=reason)
+                    tag_map = {}
+                    for sub_id, info in new_subs.items():
+                        tag_map[sub_id] = {
+                            "type": info["type"], "name": info["name"],
+                            "tags": [{"path": t["path"], "name": t.get("name", t["path"])} for t in info["tags"]],
+                        }
+                    emit("AGENT_STATUS", {
+                        "runId": self.run_id, "state": "running",
+                        "diagnostics": {
+                            "phase": "rediscovery_complete",
+                            "reason": f"{len(new_subs)} subsystems",
+                            "subsystemTagMap": tag_map,
+                            "agentCount": len(self.agents),
+                        },
+                        "timestamp": utc_now_iso(),
+                    })
+                except Exception as exc:
+                    emit("AGENT_ERROR", {
+                        "runId": self.run_id, "code": "rediscovery_error",
+                        "message": str(exc), "recoverable": True, "timestamp": utc_now_iso(),
+                    })
+                last_rediscovery = time.time()
+
+            if watchdog_count % cleanup_every == 0:
+                try:
+                    deleted = self.graph.cleanup_anomaly_events(int(self.config.get("retentionDays", 14)))
+                    if deleted > 0:
+                        emit("AGENT_STATUS", {
+                            "runId": self.run_id, "state": "running",
+                            "diagnostics": {"phase": "retention_cleanup", "reason": f"deleted {deleted} old events"},
+                            "timestamp": utc_now_iso(),
+                        })
+                except Exception:
+                    pass
+
+        self._stop_all()
+        self._upsert_run("stopped", reason="stopped")
         emit("AGENT_COMPLETE", {
-            "runId": self.run_id,
-            "success": exit_code == 0,
-            "reason": reason,
-            "stoppedAt": utc_now_iso(),
+            "runId": self.run_id, "success": True, "reason": "stopped", "stoppedAt": utc_now_iso(),
         })
-        return exit_code
+        return 0
 
-    # -----------------------------
-    # Single-operation helpers
-    # -----------------------------
-    def list_events(self, limit: int, state: Optional[str], severity: Optional[str], run_id: Optional[str]) -> Dict[str, Any]:
-        events = self.graph.list_anomaly_events(limit=limit, state=state, severity=severity, run_id=run_id)
-        return {"success": True, "events": events}
+    # -------------------------------------------------------------------
+    #  Single-operation helpers (for CLI)
+    # -------------------------------------------------------------------
+    def list_events(self, limit: int, state: Optional[str] = None, severity: Optional[str] = None, run_id: Optional[str] = None) -> Dict:
+        return {"success": True, "events": self.graph.list_anomaly_events(limit=limit, state=state, severity=severity, run_id=run_id)}
 
-    def get_event(self, event_id: str) -> Dict[str, Any]:
+    def get_event(self, event_id: str) -> Dict:
         event = self.graph.get_anomaly_event(event_id)
-        if not event:
-            return {"success": False, "error": f"Event not found: {event_id}"}
-        return {"success": True, "event": event}
+        return {"success": True, "event": event} if event else {"success": False, "error": f"Not found: {event_id}"}
 
-    def ack_event(self, event_id: str, note: Optional[str]) -> Dict[str, Any]:
+    def ack_event(self, event_id: str, note: Optional[str] = None) -> Dict:
         with self.graph.session() as session:
-            result = session.run(
-                """
-                MATCH (e:AnomalyEvent {event_id: $event_id})
-                SET e.state = 'acknowledged',
-                    e.acknowledged_at = datetime(),
-                    e.ack_note = $note,
-                    e.updated_at = datetime()
-                RETURN count(e) AS cnt
-                """,
-                event_id=event_id,
-                note=note or "",
-            )
-            record = result.single()
-            if not record or record["cnt"] == 0:
-                return {"success": False, "error": f"Event not found: {event_id}"}
+            row = session.run(
+                "MATCH (e:AnomalyEvent {event_id: $eid}) SET e.state='acknowledged', e.acknowledged_at=datetime(), e.ack_note=$note, e.updated_at=datetime() RETURN count(e) AS cnt",
+                eid=event_id, note=note or "",
+            ).single()
+            if not row or row["cnt"] == 0:
+                return {"success": False, "error": f"Not found: {event_id}"}
         return {"success": True, "eventId": event_id}
 
-    def clear_event(self, event_id: str, note: Optional[str]) -> Dict[str, Any]:
+    def clear_event(self, event_id: str, note: Optional[str] = None) -> Dict:
         with self.graph.session() as session:
-            result = session.run(
-                """
-                MATCH (e:AnomalyEvent {event_id: $event_id})
-                SET e.state = 'cleared',
-                    e.cleared_at = datetime(),
-                    e.clear_note = $note,
-                    e.updated_at = datetime()
-                RETURN count(e) AS cnt
-                """,
-                event_id=event_id,
-                note=note or "",
-            )
-            record = result.single()
-            if not record or record["cnt"] == 0:
-                return {"success": False, "error": f"Event not found: {event_id}"}
+            row = session.run(
+                "MATCH (e:AnomalyEvent {event_id: $eid}) SET e.state='cleared', e.cleared_at=datetime(), e.clear_note=$note, e.updated_at=datetime() RETURN count(e) AS cnt",
+                eid=event_id, note=note or "",
+            ).single()
+            if not row or row["cnt"] == 0:
+                return {"success": False, "error": f"Not found: {event_id}"}
         return {"success": True, "eventId": event_id}
 
-    def deep_analyze(self, event_id: str) -> Dict[str, Any]:
-        """Run LLM triage on an existing event and update it in-place."""
+    def deep_analyze(self, event_id: str) -> Dict:
         event = self.graph.get_anomaly_event(event_id)
         if not event:
-            return {"success": False, "error": f"Event not found: {event_id}"}
-
+            return {"success": False, "error": f"Not found: {event_id}"}
         tag_path = event.get("source_tag") or event.get("tag_name", "")
         if not tag_path:
             return {"success": False, "error": "Event has no source_tag"}
 
-        context = self.get_context(tag_path)
-        context["subsystem"] = {
-            "id": event.get("subsystem_id", "global:all"),
-            "type": event.get("subsystem_type", "global"),
-            "name": event.get("subsystem_name", "all"),
-        }
+        temp_agent = SubsystemAgent(
+            subsystem_id=event.get("subsystem_id", "global:all"),
+            subsystem_type=event.get("subsystem_type", "global"),
+            subsystem_name=event.get("subsystem_name", "all"),
+            tag_metas=[], graph=self.graph, api=self.api,
+            config=self.config, run_id=self.run_id,
+        )
+        if not temp_agent.llm:
+            return {"success": False, "error": "LLM client not configured"}
 
-        deterministic = {
+        context = temp_agent._get_context(tag_path)
+        context["subsystem"] = _subsystem_ref(event.get("subsystem_type", "global"), event.get("subsystem_name", "all"))
+        det = {
             "candidate": True,
             "z_score": float(event.get("z_score", 0)),
             "mad_score": float(event.get("mad_score", 0)),
@@ -1977,134 +1320,81 @@ class AnomalyMonitor:
             "reasons": json.loads(event.get("deterministic_reasons_json", "[]")),
             "category": event.get("category", "deviation"),
         }
+        live = {"value": event.get("live_value"), "quality": event.get("live_quality"), "timestamp": event.get("live_timestamp")}
+        triage = temp_agent._run_llm_triage(context, det, live)
+        severity = SubsystemAgent._severity_from_scores(det, triage)
 
-        live_sample = {
-            "value": event.get("live_value"),
-            "quality": event.get("live_quality"),
-            "timestamp": event.get("live_timestamp"),
-        }
-
-        if not self.llm:
-            return {"success": False, "error": "LLM client not configured"}
-
-        triage = self.run_llm_triage(context, deterministic, live_sample)
-
-        severity = self._severity_from_scores(deterministic, triage)
         with self.graph.session() as session:
             session.run(
                 """
-                MATCH (e:AnomalyEvent {event_id: $event_id})
-                SET e.summary = $summary,
-                    e.explanation = $explanation,
-                    e.severity = $severity,
-                    e.confidence = $confidence,
-                    e.recommended_checks_json = $checks,
-                    e.probable_causes_json = $causes,
-                    e.safety_notes_json = $safety,
-                    e.updated_at = $updated_at,
-                    e.llm_triaged = true
-                RETURN e
+                MATCH (e:AnomalyEvent {event_id: $eid})
+                SET e.summary=$summary, e.explanation=$expl, e.severity=$sev,
+                    e.confidence=$conf, e.recommended_checks_json=$checks,
+                    e.probable_causes_json=$causes, e.safety_notes_json=$safety,
+                    e.updated_at=$ts, e.llm_triaged=true
                 """,
-                event_id=event_id,
-                summary=triage.get("summary", ""),
-                explanation=triage.get("rationale", ""),
-                severity=severity,
-                confidence=float(max(0.0, min(1.0, triage.get("confidence", 0.5)))),
+                eid=event_id, summary=triage.get("summary", ""),
+                expl=triage.get("rationale", ""), sev=severity,
+                conf=float(max(0.0, min(1.0, triage.get("confidence", 0.5)))),
                 checks=json.dumps(triage.get("verification_checks", []), default=str),
                 causes=json.dumps(triage.get("probable_causes", []), default=str),
                 safety=json.dumps(triage.get("safety_notes", []), default=str),
-                updated_at=utc_now_iso(),
+                ts=utc_now_iso(),
             )
+        return {"success": True, "event": self.graph.get_anomaly_event(event_id)}
 
-        updated_event = self.graph.get_anomaly_event(event_id)
-        return {"success": True, "event": updated_event}
-
-    def get_status(self, run_id: str) -> Dict[str, Any]:
+    def get_status(self, run_id: str) -> Dict:
         with self.graph.session() as session:
-            result = session.run(
-                """
-                MATCH (r:AgentRun {run_id: $run_id})
-                RETURN r
-                LIMIT 1
-                """,
-                run_id=run_id,
-            )
-            row = result.single()
+            row = session.run("MATCH (r:AgentRun {run_id: $rid}) RETURN r LIMIT 1", rid=run_id).single()
             if not row:
                 return {"success": False, "error": f"Run not found: {run_id}"}
             props = dict(row["r"])
             return {
-                "success": True,
-                "status": props.get("status"),
+                "success": True, "status": props.get("status"),
                 "metrics": {
                     "cycleCount": props.get("cycle_count", 0),
                     "lastCycleMs": props.get("last_cycle_ms", 0),
-                    "lastCandidates": props.get("last_candidates", 0),
-                    "lastTriaged": props.get("last_triaged", 0),
-                    "lastEmitted": props.get("last_emitted", 0),
                 },
-                "lastHeartbeatAt": props.get("last_heartbeat_at"),
-                "run": props,
+                "lastHeartbeatAt": props.get("last_heartbeat_at"), "run": props,
             }
 
 
-def _load_fixture_cases(path: Path) -> List[Dict[str, Any]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(data, dict):
-        return data.get("cases", [])
-    if isinstance(data, list):
-        return data
-    return []
-
+# ═══════════════════════════════════════════════════════════════════════════
+#  Fixture replay (standalone, no agent needed)
+# ═══════════════════════════════════════════════════════════════════════════
 
 def replay_fixtures(config_json: Optional[str], fixture_path: str) -> Dict[str, Any]:
     config = merge_defaults(json.loads(config_json) if config_json else {})
-    path = Path(fixture_path)
-    cases = _load_fixture_cases(path)
+    cases = json.loads(Path(fixture_path).read_text(encoding="utf-8"))
+    if isinstance(cases, dict):
+        cases = cases.get("cases", [])
     thresholds = config.get("thresholds", {})
     passed = 0
-    failures: List[Dict[str, Any]] = []
-
+    failures: List[Dict] = []
     for case in cases:
-        result = compute_deviation_scores(
-            current_value=case.get("current_value"),
-            history_values=case.get("history_values", []),
-            prev_value=case.get("prev_value"),
-            thresholds=thresholds,
-        )
+        result = compute_deviation_scores(case.get("current_value"), case.get("history_values", []),
+                                          prev_value=case.get("prev_value"), thresholds=thresholds)
         expected = bool(case.get("expected_candidate", False))
         if result.get("candidate") == expected:
             passed += 1
         else:
-            failures.append(
-                {
-                    "id": case.get("id"),
-                    "expected_candidate": expected,
-                    "actual_candidate": result.get("candidate"),
-                    "category": result.get("category"),
-                    "reasons": result.get("reasons", []),
-                }
-            )
+            failures.append({"id": case.get("id"), "expected": expected, "actual": result.get("candidate"), "reasons": result.get("reasons", [])})
+    return {"success": len(failures) == 0, "total": len(cases), "passed": passed, "failed": len(failures), "failures": failures}
 
-    return {
-        "success": len(failures) == 0,
-        "total": len(cases),
-        "passed": passed,
-        "failed": len(failures),
-        "failures": failures,
-    }
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  CLI entry point
+# ═══════════════════════════════════════════════════════════════════════════
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Anomaly monitor worker")
+    parser = argparse.ArgumentParser(description="Per-subsystem anomaly monitor")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="Run continuous anomaly monitoring")
-    p_run.add_argument("--run-id", help="Optional run id")
-    p_run.add_argument("--config-json", default="{}", help="JSON config string")
+    p_run = sub.add_parser("run", help="Run coordinator with per-subsystem agents")
+    p_run.add_argument("--run-id")
+    p_run.add_argument("--config-json", default="{}")
 
-    p_status = sub.add_parser("status", help="Get status for one run")
-    p_status.add_argument("--run-id", required=True)
+    sub.add_parser("status", help="Get run status").add_argument("--run-id", required=True)
 
     p_list = sub.add_parser("list-events", help="List anomaly events")
     p_list.add_argument("--limit", type=int, default=100)
@@ -2112,36 +1402,33 @@ def main() -> int:
     p_list.add_argument("--severity")
     p_list.add_argument("--run-id")
 
-    p_get = sub.add_parser("get-event", help="Get one anomaly event")
-    p_get.add_argument("--event-id", required=True)
+    sub.add_parser("get-event", help="Get one event").add_argument("--event-id", required=True)
 
-    p_ack = sub.add_parser("ack-event", help="Acknowledge one anomaly event")
+    p_ack = sub.add_parser("ack-event", help="Acknowledge event")
     p_ack.add_argument("--event-id", required=True)
     p_ack.add_argument("--note")
 
-    p_clear = sub.add_parser("clear-event", help="Clear one acknowledged anomaly event")
+    p_clear = sub.add_parser("clear-event", help="Clear event")
     p_clear.add_argument("--event-id", required=True)
     p_clear.add_argument("--note")
 
-    p_deep = sub.add_parser("deep-analyze", help="Run LLM triage on an existing event")
+    p_deep = sub.add_parser("deep-analyze", help="LLM triage on existing event")
     p_deep.add_argument("--event-id", required=True)
 
-    p_cleanup = sub.add_parser("cleanup", help="Delete old anomaly events")
-    p_cleanup.add_argument("--retention-days", type=int, default=14)
+    sub.add_parser("cleanup", help="Delete old events").add_argument("--retention-days", type=int, default=14)
 
-    p_replay = sub.add_parser("replay-fixtures", help="Validate deterministic scoring against fixtures")
+    p_replay = sub.add_parser("replay-fixtures", help="Validate scoring")
     p_replay.add_argument("--fixture-file", required=True)
     p_replay.add_argument("--config-json", default="{}")
 
     args = parser.parse_args()
 
     if args.command == "replay-fixtures":
-        result = replay_fixtures(args.config_json, args.fixture_file)
-        print(json.dumps(result))
-        return 0 if result["success"] else 1
+        print(json.dumps(replay_fixtures(args.config_json, args.fixture_file)))
+        return 0
 
     try:
-        monitor = AnomalyMonitor(
+        coordinator = AgentCoordinator(
             config=json.loads(getattr(args, "config_json", "{}") or "{}"),
             run_id=getattr(args, "run_id", None),
         )
@@ -2150,46 +1437,28 @@ def main() -> int:
         return 1
 
     if args.command == "run":
-        def _signal_handler(_signum, _frame):
-            monitor._running = False
-
-        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGTERM, lambda *_: setattr(coordinator, '_running', False))
         if hasattr(signal, "SIGINT"):
-            signal.signal(signal.SIGINT, _signal_handler)
-        return monitor.run_forever()
+            signal.signal(signal.SIGINT, lambda *_: setattr(coordinator, '_running', False))
+        return coordinator.run()
 
     if args.command == "status":
-        print(json.dumps(monitor.get_status(args.run_id), default=str))
-        return 0
-
-    if args.command == "list-events":
-        print(json.dumps(monitor.list_events(args.limit, args.state, args.severity, args.run_id), default=str))
-        return 0
-
-    if args.command == "get-event":
-        print(json.dumps(monitor.get_event(args.event_id), default=str))
-        return 0
-
-    if args.command == "ack-event":
-        print(json.dumps(monitor.ack_event(args.event_id, args.note), default=str))
-        return 0
-
-    if args.command == "clear-event":
-        print(json.dumps(monitor.clear_event(args.event_id, args.note), default=str))
-        return 0
-
-    if args.command == "deep-analyze":
-        print(json.dumps(monitor.deep_analyze(args.event_id), default=str))
-        return 0
-
-    if args.command == "cleanup":
-        deleted = monitor.graph.cleanup_anomaly_events(args.retention_days)
+        print(json.dumps(coordinator.get_status(args.run_id), default=str))
+    elif args.command == "list-events":
+        print(json.dumps(coordinator.list_events(args.limit, args.state, args.severity, getattr(args, "run_id", None)), default=str))
+    elif args.command == "get-event":
+        print(json.dumps(coordinator.get_event(args.event_id), default=str))
+    elif args.command == "ack-event":
+        print(json.dumps(coordinator.ack_event(args.event_id, args.note), default=str))
+    elif args.command == "clear-event":
+        print(json.dumps(coordinator.clear_event(args.event_id, args.note), default=str))
+    elif args.command == "deep-analyze":
+        print(json.dumps(coordinator.deep_analyze(args.event_id), default=str))
+    elif args.command == "cleanup":
+        deleted = coordinator.graph.cleanup_anomaly_events(args.retention_days)
         print(json.dumps({"success": True, "deleted": deleted}))
-        return 0
-
-    return 1
+    return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-

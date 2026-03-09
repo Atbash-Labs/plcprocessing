@@ -542,14 +542,14 @@
       <!-- Agents Tab -->
       <section class="tab-content" id="tab-agents">
         <header class="tab-header">
-          <h2>Long-Running Agents</h2>
-          <p>Continuously monitor live process data and triage anomalies with ontology context</p>
+          <h2>Subsystem Agents</h2>
+          <p>Per-subsystem anomaly monitoring with independent agent threads</p>
         </header>
 
         <div class="agents-topbar">
           <div class="agents-run-controls">
-            <button class="btn btn-primary" id="btn-agents-start">Start Monitoring</button>
-            <button class="btn btn-secondary" id="btn-agents-stop" disabled>Stop</button>
+            <button class="btn btn-primary" id="btn-agents-start">Start All Agents</button>
+            <button class="btn btn-secondary" id="btn-agents-stop" disabled>Stop All</button>
             <button class="btn btn-ghost" id="btn-agents-refresh">Refresh Events</button>
             <button class="btn btn-ghost" id="btn-agents-cleanup">Cleanup Old</button>
           </div>
@@ -579,30 +579,10 @@
           <input class="input input-sm" id="agents-config-staleness-sec" type="number" min="10" step="10" value="120">
         </div>
 
-        <div class="agents-metrics-row">
-          <div class="metric-card"><span class="metric-label">Cycle (ms)</span><span class="metric-value" id="agents-metric-cycle">0</span></div>
-          <div class="metric-card"><span class="metric-label">Candidates</span><span class="metric-value" id="agents-metric-candidates">0</span></div>
-          <div class="metric-card"><span class="metric-label">Triaged</span><span class="metric-value" id="agents-metric-triaged">0</span></div>
-          <div class="metric-card"><span class="metric-label">Emitted</span><span class="metric-value" id="agents-metric-emitted">0</span></div>
-          <div class="metric-card"><span class="metric-label">Last heartbeat</span><span class="metric-value" id="agents-metric-heartbeat">n/a</span></div>
-        </div>
-
         <div class="agents-health-section">
           <div class="agents-health-header">
-            <h3>Subsystem Health</h3>
+            <h3>Subsystem Agents</h3>
             <div class="agents-health-actions">
-              <button class="btn btn-ghost btn-sm" id="btn-agents-clear-subsystem" style="display:none">Show All</button>
-            </div>
-          </div>
-          <div class="agents-health-grid" id="agents-health-grid">
-            <div class="agents-health-empty">Start monitoring to see subsystem health.</div>
-          </div>
-        </div>
-
-        <div class="agents-main">
-          <aside class="agents-feed-panel">
-            <div class="agents-feed-header">
-              <h3>Anomaly Feed</h3>
               <div class="agents-feed-filters">
                 <select class="input input-sm" id="agents-filter-state">
                   <option value="">All states</option>
@@ -619,25 +599,12 @@
                 </select>
                 <input class="input input-sm" id="agents-filter-search" placeholder="Search tag/equipment">
               </div>
+              <button class="btn btn-ghost btn-sm" id="btn-agents-clear-subsystem" style="display:none">Show All</button>
             </div>
-            <div class="agents-event-list" id="agents-event-list">
-              <div class="agents-empty">No anomaly events yet.</div>
-            </div>
-          </aside>
-
-          <section class="agents-detail-panel">
-            <div class="agents-detail-header">
-              <h3>Event Details</h3>
-              <div class="agents-detail-actions">
-                <button class="btn btn-sm btn-primary" id="btn-agents-deep-analyze" disabled>Deep Analyze</button>
-                <button class="btn btn-sm btn-secondary" id="btn-agents-open-graph" disabled>Open in Graph</button>
-                <button class="btn btn-sm btn-ghost" id="btn-agents-ack" disabled>Acknowledge</button>
-              </div>
-            </div>
-            <div class="agents-detail-content" id="agents-event-detail">
-              <p class="text-muted">Select an anomaly event from the feed.</p>
-            </div>
-          </section>
+          </div>
+          <div class="agents-health-grid" id="agents-health-grid">
+            <div class="agents-health-empty">Start monitoring to see subsystem agents.</div>
+          </div>
         </div>
       </section>
 
@@ -1537,8 +1504,6 @@ Execution time: 12ms</code>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
   <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
   <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
-  <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
-  <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
   <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
   
   <script src="graph-renderer.js"></script>

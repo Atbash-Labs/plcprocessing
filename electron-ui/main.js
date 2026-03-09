@@ -215,8 +215,8 @@ function normalizeAgentConfig(config = {}) {
     maxMonitoredTags: Math.max(10, Number(config.maxMonitoredTags || 200)),
     maxCandidatesPerCycle: Math.max(1, Number(config.maxCandidatesPerCycle || 25)),
     maxCandidatesPerSubsystem: Math.max(1, Number(config.maxCandidatesPerSubsystem || 8)),
-    maxLlmTriagesPerCycle: Math.max(0, Number(config.maxLlmTriagesPerCycle || 5)),
-    maxLlmTriagesPerSubsystem: Math.max(0, Number(config.maxLlmTriagesPerSubsystem || 2)),
+    maxLlmTriagesPerCycle: Math.max(0, Number(config.maxLlmTriagesPerCycle ?? 5)),
+    maxLlmTriagesPerSubsystem: Math.max(0, Number(config.maxLlmTriagesPerSubsystem ?? 2)),
     dedupCooldownMinutes: Math.max(1, Number(config.dedupCooldownMinutes || 10)),
     retentionDays: Math.max(1, Number(config.retentionDays || 14)),
     cleanupEveryCycles: Math.max(1, Number(config.cleanupEveryCycles || 40)),
@@ -1749,17 +1749,18 @@ ipcMain.handle('agents:clear-event', async (event, eventId, note = '') => {
   }
 });
 
-ipcMain.handle('agents:deep-analyze', async (event, eventId) => {
-  try {
-    const output = await runPythonScript('anomaly_monitor.py', [
-      'deep-analyze',
-      '--event-id',
-      String(eventId),
-    ]);
-    return JSON.parse(output || '{}');
-  } catch (error) {
-    return { success: false, error: error.message };
+ipcMain.handle('agents:deep-analyze', async (event, eventId, eventData) => {
+  if (!activeAgentRun || !activeAgentRun.process || activeAgentRun.process.killed) {
+    return { success: false, error: 'No active agent run — deep analyze requires a running agent' };
   }
+  if (!eventData || !eventData.event_id) {
+    return { success: false, error: 'Missing event data' };
+  }
+  const sent = sendAgentCommand({ cmd: 'deep-analyze', event: eventData });
+  if (!sent) {
+    return { success: false, error: 'Failed to send command to agent process' };
+  }
+  return { success: true, pending: true, eventId: eventData.event_id };
 });
 
 ipcMain.handle('agents:cleanup', async (event, retentionDays = 14) => {
@@ -1773,4 +1774,24 @@ ipcMain.handle('agents:cleanup', async (event, retentionDays = 14) => {
   } catch (error) {
     return { success: false, error: error.message };
   }
+});
+
+function sendAgentCommand(cmd) {
+  if (activeAgentRun && activeAgentRun.process && activeAgentRun.process.stdin && activeAgentRun.process.stdin.writable) {
+    activeAgentRun.process.stdin.write(JSON.stringify(cmd) + '\n');
+    return true;
+  }
+  return false;
+}
+
+ipcMain.handle('agents:start-subsystem', async (event, subsystemId) => {
+  if (!activeAgentRun) return { success: false, error: 'No active agent run' };
+  const sent = sendAgentCommand({ cmd: 'start-agent', subsystemId });
+  return { success: sent, subsystemId };
+});
+
+ipcMain.handle('agents:stop-subsystem', async (event, subsystemId) => {
+  if (!activeAgentRun) return { success: false, error: 'No active agent run' };
+  const sent = sendAgentCommand({ cmd: 'stop-agent', subsystemId });
+  return { success: sent, subsystemId };
 });

@@ -3536,7 +3536,7 @@ btnSaveDbCreds?.addEventListener('click', async () => {
     btnSaveDbCreds.disabled = false;
   }
 });
-// Agents Tab - Long-running monitoring
+// Agents Tab — Per-subsystem agent monitoring
 // ============================================
 
 const HEALTH_TREND_MAX_CYCLES = 20;
@@ -3550,6 +3550,8 @@ const agentsState = {
   listenersReady: false,
   subsystemHealth: {},
   subsystemHistory: {},
+  agentStates: {},
+  pendingDeepAnalyze: new Set(),
 };
 
 function getAgentsElements() {
@@ -3558,21 +3560,11 @@ function getAgentsElements() {
     btnStop: document.getElementById('btn-agents-stop'),
     btnRefresh: document.getElementById('btn-agents-refresh'),
     btnCleanup: document.getElementById('btn-agents-cleanup'),
-    btnDeepAnalyze: document.getElementById('btn-agents-deep-analyze'),
-    btnOpenGraph: document.getElementById('btn-agents-open-graph'),
-    btnAck: document.getElementById('btn-agents-ack'),
     statusChip: document.getElementById('agents-status-chip'),
     statusText: document.getElementById('agents-status-text'),
-    list: document.getElementById('agents-event-list'),
-    detail: document.getElementById('agents-event-detail'),
     filterState: document.getElementById('agents-filter-state'),
     filterSeverity: document.getElementById('agents-filter-severity'),
     filterSearch: document.getElementById('agents-filter-search'),
-    metricCycle: document.getElementById('agents-metric-cycle'),
-    metricCandidates: document.getElementById('agents-metric-candidates'),
-    metricTriaged: document.getElementById('agents-metric-triaged'),
-    metricEmitted: document.getElementById('agents-metric-emitted'),
-    metricHeartbeat: document.getElementById('agents-metric-heartbeat'),
     cfgPoll: document.getElementById('agents-config-poll-ms'),
     cfgHist: document.getElementById('agents-config-history-min'),
     cfgPoints: document.getElementById('agents-config-min-points'),
@@ -3610,16 +3602,14 @@ function formatAgentTime(ts) {
   if (!ts) return 'n/a';
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return String(ts);
-  return d.toLocaleString();
+  return d.toLocaleTimeString();
 }
 
 function computeHealthLevel(signal) {
-  const avgAbsZ = parseFloat(signal.avgAbsZ || 0);
-  const candidateRatio = parseFloat(signal.candidateRatio || 0);
   const maxAbsZ = parseFloat(signal.maxAbsZ || 0);
-  if (candidateRatio >= 0.25 || maxAbsZ >= 5) return 'critical';
-  if (candidateRatio >= 0.10 || avgAbsZ >= 2.5) return 'warning';
-  if (signal.shiftRatio > 0.1 || avgAbsZ >= 1.5) return 'elevated';
+  if (maxAbsZ >= 5) return 'critical';
+  if (maxAbsZ >= 3) return 'warning';
+  if (maxAbsZ >= 1.5) return 'elevated';
   return 'healthy';
 }
 
@@ -3627,59 +3617,144 @@ function healthLevelToScore(level) {
   return { healthy: 0.1, elevated: 0.4, warning: 0.7, critical: 1.0 }[level] || 0.1;
 }
 
-function updateSubsystemHealthFromDiagnostics(diagnostics) {
-  const tagMap = diagnostics?.subsystemTagMap;
-  if (tagMap && typeof tagMap === 'object') {
-    for (const [subId, info] of Object.entries(tagMap)) {
-      if (!agentsState.subsystemHealth[subId]) {
-        agentsState.subsystemHealth[subId] = {
-          subsystemId: subId,
+function getSubsystemIdForEvent(event) {
+  return event.subsystem_id
+    || `${(event.subsystem_type || 'global')}:${(event.subsystem_name || 'all').toLowerCase()}`;
+}
+
+function getFilteredEventsForSubsystem(subId) {
+  const el = getAgentsElements();
+  const stateFilter = (el.filterState?.value || '').toLowerCase();
+  const sevFilter = (el.filterSeverity?.value || '').toLowerCase();
+  const search = (el.filterSearch?.value || '').trim().toLowerCase();
+  return agentsState.events.filter((event) => {
+    if (getSubsystemIdForEvent(event) !== subId) return false;
+    if (stateFilter && String(event.state || '').toLowerCase() !== stateFilter) return false;
+    if (sevFilter && String(event.severity || '').toLowerCase() !== sevFilter) return false;
+    if (search) {
+      const haystack = [event.summary, event.source_tag, event.tag_name]
+        .filter(Boolean).join(' ').toLowerCase();
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
+  });
+}
+
+function updateSubsystemHealthFromStatus(payload) {
+  const diagnostics = payload.diagnostics || {};
+  const phase = diagnostics.phase || '';
+  const subId = payload.subsystemId || diagnostics.subsystemId;
+
+  if (diagnostics.subsystemTagMap && typeof diagnostics.subsystemTagMap === 'object') {
+    for (const [sid, info] of Object.entries(diagnostics.subsystemTagMap)) {
+      if (!agentsState.subsystemHealth[sid]) {
+        agentsState.subsystemHealth[sid] = {
+          subsystemId: sid,
           subsystemType: info.type || 'global',
-          subsystemName: info.name || subId,
+          subsystemName: info.name || sid,
           evaluated: (info.tags || []).length,
-          candidate: 0,
-          nearShift: 0,
-          maxAbsZ: 0,
-          avgAbsZ: 0,
+          candidate: 0, nearShift: 0, maxAbsZ: 0, avgAbsZ: 0,
           healthLevel: 'healthy',
           tagSignals: (info.tags || []).map((t) => ({
-            path: t.path,
-            name: t.name || t.path,
-            z: 0,
-            mad: 0,
-            value: null,
+            path: t.path, name: t.name || t.path, z: 0, mad: 0, value: null,
           })),
+        };
+        agentsState.agentStates[sid] = {
+          state: 'running', cycleCount: 0, avgCycleMs: 0, totalCandidates: 0, totalTriaged: 0,
         };
       }
     }
   }
 
-  const signals = diagnostics?.subsystemShiftSignals;
-  if (Array.isArray(signals) && signals.length) {
-    for (const sig of signals) {
-      const subId = sig.subsystemId || sig.subsystemName || 'global:all';
-      const healthLevel = computeHealthLevel(sig);
-      agentsState.subsystemHealth[subId] = { ...sig, healthLevel };
+  if (subId && phase === 'cycle_complete') {
+    const signals = diagnostics.subsystemShiftSignals;
+    if (Array.isArray(signals) && signals.length) {
+      for (const sig of signals) {
+        const sid = sig.subsystemId || subId;
+        const healthLevel = computeHealthLevel(sig);
+        agentsState.subsystemHealth[sid] = { ...sig, healthLevel };
+        if (!agentsState.subsystemHistory[sid]) agentsState.subsystemHistory[sid] = [];
+        const history = agentsState.subsystemHistory[sid];
+        history.push({
+          healthLevel,
+          avgAbsZ: parseFloat(sig.avgAbsZ || 0),
+          candidateRatio: parseFloat(sig.candidateRatio || 0),
+          candidates: parseInt(sig.candidate || 0, 10),
+          evaluated: parseInt(sig.evaluated || 0, 10),
+          ts: Date.now(),
+        });
+        if (history.length > HEALTH_TREND_MAX_CYCLES) history.splice(0, history.length - HEALTH_TREND_MAX_CYCLES);
+      }
+    }
+    agentsState.agentStates[subId] = {
+      state: payload.state || 'running',
+      cycleCount: diagnostics.cycleCount || 0,
+      avgCycleMs: diagnostics.avgCycleMs || 0,
+      totalCandidates: diagnostics.totalCandidates || 0,
+      totalTriaged: diagnostics.totalTriaged || 0,
+    };
 
-      if (!agentsState.subsystemHistory[subId]) {
-        agentsState.subsystemHistory[subId] = [];
-      }
-      const history = agentsState.subsystemHistory[subId];
-      history.push({
-        healthLevel,
-        avgAbsZ: parseFloat(sig.avgAbsZ || 0),
-        candidateRatio: parseFloat(sig.candidateRatio || 0),
-        candidates: parseInt(sig.candidate || 0, 10),
-        evaluated: parseInt(sig.evaluated || 0, 10),
-        ts: Date.now(),
-      });
-      if (history.length > HEALTH_TREND_MAX_CYCLES) {
-        history.splice(0, history.length - HEALTH_TREND_MAX_CYCLES);
-      }
+    // Replace events for this subsystem with current live events
+    const liveEvents = payload.liveEvents || [];
+    agentsState.events = agentsState.events.filter((e) => e.subsystem_id !== subId);
+    for (const evt of liveEvents) {
+      agentsState.events.unshift(evt);
+    }
+  }
+
+  if (subId && phase === 'cycle_progress') {
+    if (!agentsState.agentStates[subId]) {
+      agentsState.agentStates[subId] = { state: 'running', cycleCount: 0, avgCycleMs: 0, totalCandidates: 0, totalTriaged: 0 };
+    }
+    const step = diagnostics.step || '';
+    const stepLabels = {
+      reading_tags: 'Reading tags',
+      fetching_history: 'Fetching history',
+      scoring: 'Scoring',
+      triaging: 'Triaging',
+      waiting: 'Idle',
+    };
+    agentsState.agentStates[subId].currentStep = step;
+    agentsState.agentStates[subId].stepLabel = stepLabels[step] || step;
+    agentsState.agentStates[subId].stepDetail = diagnostics.detail || '';
+    agentsState.agentStates[subId].lastStepAt = Date.now();
+    updateAgentCardPhase(subId);
+    return;
+  }
+
+  if (subId && (phase === 'agent_paused' || phase === 'agent_stopped')) {
+    if (agentsState.agentStates[subId]) {
+      agentsState.agentStates[subId].state = 'paused';
+      agentsState.agentStates[subId].currentStep = 'paused';
+      agentsState.agentStates[subId].stepLabel = 'Paused';
+    }
+  }
+  if (subId && (phase === 'agent_resumed' || phase === 'agent_started')) {
+    if (agentsState.agentStates[subId]) {
+      agentsState.agentStates[subId].state = 'running';
+      agentsState.agentStates[subId].currentStep = '';
+      agentsState.agentStates[subId].stepLabel = '';
     }
   }
 
   renderSubsystemHealthGrid();
+}
+
+function updateAgentCardPhase(subId) {
+  const card = document.querySelector(`.agents-health-card[data-subsystem-id="${CSS.escape(subId)}"]`);
+  if (!card) return;
+  const phaseEl = card.querySelector('.health-agent-phase');
+  if (!phaseEl) return;
+  const agState = agentsState.agentStates[subId] || {};
+  const step = agState.currentStep || '';
+  const isActive = step && step !== 'waiting' && step !== 'paused';
+  phaseEl.textContent = agState.stepLabel || '';
+  phaseEl.className = 'health-agent-phase' + (isActive ? ' phase-active' : '');
+  if (isActive) {
+    card.classList.add('agent-cycling');
+  } else {
+    card.classList.remove('agent-cycling');
+  }
 }
 
 function renderSubsystemHealthGrid() {
@@ -3688,7 +3763,7 @@ function renderSubsystemHealthGrid() {
 
   const entries = Object.entries(agentsState.subsystemHealth);
   if (!entries.length) {
-    container.innerHTML = '<div class="agents-health-empty">Start monitoring to see subsystem health.</div>';
+    container.innerHTML = '<div class="agents-health-empty">Start monitoring to see subsystem agents.</div>';
     return;
   }
 
@@ -3713,11 +3788,34 @@ function renderSubsystemHealthGrid() {
       const anomalyClass = candidates > 0 ? (level === 'critical' ? ' has-critical' : ' has-anomalies') : '';
       const history = agentsState.subsystemHistory[subId] || [];
 
+      const agState = agentsState.agentStates[subId] || {};
+      const isPaused = agState.state === 'paused';
+      const agentIcon = isPaused ? '&#9654;' : '&#9646;&#9646;';
+      const agentTitle = isPaused ? 'Resume agent' : 'Pause agent';
+
+      const currentStep = agState.currentStep || '';
+      const isActive = currentStep && currentStep !== 'waiting' && currentStep !== 'paused';
+      const phaseLabel = agState.stepLabel || '';
+      const cyclingClass = isActive ? ' agent-cycling' : '';
+
+      const metricsRow = `
+        <div class="health-agent-metrics">
+          <span class="health-agent-phase${isActive ? ' phase-active' : ''}">${escapeHtml(phaseLabel)}</span>
+          <span title="Cycles">#${agState.cycleCount || 0}</span>
+          <span title="Avg cycle time">${agState.avgCycleMs || 0}ms</span>
+          <span title="Total candidates">cand: ${agState.totalCandidates || 0}</span>
+          <span title="Total triaged">tri: ${agState.totalTriaged || 0}</span>
+        </div>
+      `;
+
       let expandedBody = '';
       if (isExpanded) {
         const bigTrend = renderTrendBars(history, 48);
         const tagRows = renderTagSignalRows(sig.tagSignals || []);
         const tagCount = (sig.tagSignals || []).length;
+        const subEvents = getFilteredEventsForSubsystem(subId);
+        const eventRows = renderSubsystemEventRows(subEvents);
+        const eventCount = subEvents.length;
         expandedBody = `
           <div class="health-expanded-body">
             <div class="health-expanded-trend">${bigTrend}</div>
@@ -3729,6 +3827,11 @@ function renderSubsystemHealthGrid() {
               <span>Name</span><span>Trend</span><span>z-score</span><span>Avg</span><span>Current</span>
             </div>
             <div class="health-tag-list">${tagRows}</div>
+            <div class="health-tag-list-header" style="margin-top:var(--space-3)">
+              <h4>Events</h4>
+              <span>${eventCount} events</span>
+            </div>
+            <div class="health-event-list">${eventRows}</div>
           </div>
         `;
       } else {
@@ -3736,14 +3839,18 @@ function renderSubsystemHealthGrid() {
       }
 
       return `
-        <div class="agents-health-card health-${escapeHtml(level)}${expandedClass}" data-subsystem-id="${escapeHtml(subId)}">
+        <div class="agents-health-card health-${escapeHtml(level)}${expandedClass}${isPaused ? ' agent-paused' : ''}${cyclingClass}" data-subsystem-id="${escapeHtml(subId)}">
           <div class="health-card-top">
             <div class="health-card-identity">
               <span class="health-indicator health-${escapeHtml(level)}"></span>
               <span class="health-card-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
             </div>
-            <span class="health-card-type">${escapeHtml(type)}</span>
+            <div class="health-card-controls">
+              <button class="btn-agent-toggle" data-subsystem-id="${escapeHtml(subId)}" title="${agentTitle}">${agentIcon}</button>
+              <span class="health-card-type">${escapeHtml(type)}</span>
+            </div>
           </div>
+          ${metricsRow}
           <div class="health-card-stats">
             <div class="health-stat">
               <span class="health-stat-label">Tags</span>
@@ -3765,13 +3872,124 @@ function renderSubsystemHealthGrid() {
     })
     .join('');
 
+  container.querySelectorAll('.btn-agent-toggle').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const subId = btn.getAttribute('data-subsystem-id');
+      if (!subId) return;
+      const agState = agentsState.agentStates[subId] || {};
+      if (agState.state === 'paused') window.api.agentsStartSubsystem(subId);
+      else window.api.agentsStopSubsystem(subId);
+    });
+  });
+
   container.querySelectorAll('.agents-health-card').forEach((card) => {
     card.addEventListener('click', (e) => {
-      if (e.target.closest('.health-tag-list')) return;
+      if (e.target.closest('.health-tag-list') || e.target.closest('.health-event-list') || e.target.closest('.btn-agent-toggle')) return;
       const subId = card.getAttribute('data-subsystem-id');
       selectSubsystem(subId);
     });
   });
+
+  container.querySelectorAll('.health-event-row').forEach((row) => {
+    row.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const eventId = row.getAttribute('data-event-id');
+      if (eventId) selectAgentEvent(eventId);
+    });
+  });
+
+  container.querySelectorAll('.health-event-detail-actions .btn-deep-analyze').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const eventId = btn.getAttribute('data-event-id');
+      if (eventId) deepAnalyzeEvent(eventId, btn);
+    });
+  });
+
+  container.querySelectorAll('.health-event-detail-actions .btn-ack-event').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const eventId = btn.getAttribute('data-event-id');
+      if (eventId) acknowledgeEvent(eventId);
+    });
+  });
+
+  container.querySelectorAll('.health-event-detail-actions .btn-open-graph').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const eventId = btn.getAttribute('data-event-id');
+      if (!eventId) return;
+      const event = agentsState.events.find((ev) => ev.event_id === eventId);
+      if (!event) return;
+      const target = resolveAgentGraphTarget(event);
+      if (target) openGraphModal(target.name, target.type, event.summary || target.name);
+    });
+  });
+}
+
+function renderSubsystemEventRows(events) {
+  if (!events.length) return '<div class="health-tag-empty">No events for this subsystem.</div>';
+  return events.slice(0, 50).map((event) => {
+    const sev = String(event.severity || 'low').toLowerCase();
+    const isSelected = event.event_id === agentsState.selectedEventId;
+    const selectedClass = isSelected ? ' selected' : '';
+    const tagLabel = event.tag_name || event.source_tag || '';
+    const timeLabel = formatAgentTime(event.created_at);
+
+    let detailHtml = '';
+    if (isSelected) {
+      detailHtml = renderInlineEventDetail(event);
+    }
+
+    return `
+      <div class="health-event-row${selectedClass}" data-event-id="${escapeHtml(event.event_id || '')}">
+        <div class="health-event-row-header">
+          <span class="agents-severity sev-${escapeHtml(sev)}">${escapeHtml(sev)}</span>
+          <span class="health-event-summary">${escapeHtml(event.summary || 'Anomaly')}</span>
+          <span class="health-event-tag">${escapeHtml(tagLabel)}</span>
+          <span class="health-event-time">${escapeHtml(timeLabel)}</span>
+        </div>
+        ${detailHtml}
+      </div>
+    `;
+  }).join('');
+}
+
+function renderInlineEventDetail(event) {
+  let checks = [], causes = [], safety = [];
+  try { checks = JSON.parse(event.recommended_checks_json || '[]'); } catch (e) {}
+  try { causes = JSON.parse(event.probable_causes_json || '[]'); } catch (e) {}
+  try { safety = JSON.parse(event.safety_notes_json || '[]'); } catch (e) {}
+
+  const st = String(event.state || '').toLowerCase();
+  const ackLabel = st === 'acknowledged' ? 'Clear' : (st === 'cleared' ? 'Cleared' : 'Acknowledge');
+  const ackDisabled = st === 'cleared' ? ' disabled' : '';
+  const isPending = agentsState.pendingDeepAnalyze.has(event.event_id);
+  const analyzeLabel = isPending ? 'Analyzing…' : (event.deep_analyzed ? 'Re-Analyze' : 'Deep Analyze');
+  const analyzeDisabled = isPending ? ' disabled' : '';
+
+  return `
+    <div class="health-event-detail" onclick="event.stopPropagation()">
+      <div class="health-event-detail-grid">
+        <span class="detail-label">State</span><span>${escapeHtml(event.state || 'open')}</span>
+        <span class="detail-label">z-score</span><span>${escapeHtml(String(event.z_score ?? '0'))}</span>
+        <span class="detail-label">MAD</span><span>${escapeHtml(String(event.mad_score ?? '0'))}</span>
+        <span class="detail-label">Confidence</span><span>${escapeHtml(String(event.confidence ?? ''))}</span>
+        <span class="detail-label">Category</span><span>${escapeHtml(event.category || '')}</span>
+        <span class="detail-label">Source Tag</span><span>${escapeHtml(event.source_tag || '')}</span>
+      </div>
+      ${event.explanation ? `<div class="detail-section"><span class="detail-label">Explanation</span><div>${escapeHtml(event.explanation)}</div></div>` : ''}
+      ${causes.length ? `<div class="detail-section"><span class="detail-label">Probable Causes</span><ul class="agents-list">${causes.map((x) => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul></div>` : ''}
+      ${checks.length ? `<div class="detail-section"><span class="detail-label">Checks</span><ul class="agents-list">${checks.map((x) => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul></div>` : ''}
+      ${safety.length ? `<div class="detail-section"><span class="detail-label">Safety</span><ul class="agents-list">${safety.map((x) => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul></div>` : ''}
+      <div class="health-event-detail-actions">
+        <button class="btn btn-sm btn-primary btn-deep-analyze" data-event-id="${escapeHtml(event.event_id)}"${analyzeDisabled}>${analyzeLabel}</button>
+        <button class="btn btn-sm btn-secondary btn-open-graph" data-event-id="${escapeHtml(event.event_id)}">Open in Graph</button>
+        <button class="btn btn-sm btn-ghost btn-ack-event" data-event-id="${escapeHtml(event.event_id)}"${ackDisabled}>${ackLabel}</button>
+      </div>
+    </div>
+  `;
 }
 
 function renderTrendBars(history, maxHeight) {
@@ -3820,7 +4038,6 @@ function renderTagSignalRows(tagSignals) {
   if (!tagSignals || !tagSignals.length) {
     return '<div class="health-tag-empty">No tag data available yet.</div>';
   }
-
   return tagSignals
     .map((tag) => {
       const absZ = Math.abs(tag.z || 0);
@@ -3848,13 +4065,23 @@ function selectSubsystem(subId) {
   const clearBtn = document.getElementById('btn-agents-clear-subsystem');
   if (agentsState.selectedSubsystemId === subId) {
     agentsState.selectedSubsystemId = null;
+    agentsState.selectedEventId = null;
     if (clearBtn) clearBtn.style.display = 'none';
   } else {
     agentsState.selectedSubsystemId = subId;
+    agentsState.selectedEventId = null;
     if (clearBtn) clearBtn.style.display = '';
   }
   renderSubsystemHealthGrid();
-  renderAgentEventList();
+}
+
+function selectAgentEvent(eventId) {
+  if (agentsState.selectedEventId === eventId) {
+    agentsState.selectedEventId = null;
+  } else {
+    agentsState.selectedEventId = eventId;
+  }
+  renderSubsystemHealthGrid();
 }
 
 function updateAgentStatusUi(status, text) {
@@ -3868,95 +4095,6 @@ function updateAgentStatusUi(status, text) {
   el.statusText.textContent = text || normalized;
   if (el.btnStart) el.btnStart.disabled = normalized === 'running' || normalized === 'starting';
   if (el.btnStop) el.btnStop.disabled = !(normalized === 'running' || normalized === 'starting' || normalized === 'stopping');
-}
-
-function updateAgentMetrics(metrics = {}, heartbeatTs = null) {
-  const el = getAgentsElements();
-  if (el.metricCycle) el.metricCycle.textContent = String(metrics.cycleMs ?? metrics.lastCycleMs ?? 0);
-  if (el.metricCandidates) el.metricCandidates.textContent = String(metrics.candidates ?? metrics.lastCandidates ?? 0);
-  if (el.metricTriaged) el.metricTriaged.textContent = String(metrics.triaged ?? metrics.lastTriaged ?? 0);
-  if (el.metricEmitted) el.metricEmitted.textContent = String(metrics.emitted ?? metrics.lastEmitted ?? 0);
-  if (el.metricHeartbeat) el.metricHeartbeat.textContent = formatAgentTime(heartbeatTs || metrics.timestamp);
-}
-
-function getFilteredAgentEvents() {
-  const el = getAgentsElements();
-  const state = (el.filterState?.value || '').toLowerCase();
-  const severity = (el.filterSeverity?.value || '').toLowerCase();
-  const search = (el.filterSearch?.value || '').trim().toLowerCase();
-  const subFilter = agentsState.selectedSubsystemId || '';
-  return agentsState.events.filter((event) => {
-    if (state && String(event.state || '').toLowerCase() !== state) return false;
-    if (severity && String(event.severity || '').toLowerCase() !== severity) return false;
-    if (subFilter) {
-      const eventSubId = event.subsystem_id
-        || `${(event.subsystem_type || 'global')}:${(event.subsystem_name || 'all').toLowerCase()}`;
-      if (eventSubId !== subFilter) return false;
-    }
-    if (search) {
-      const haystack = [
-        event.summary,
-        event.source_tag,
-        event.tag_name,
-        event.subsystem_name,
-        event.subsystem_type,
-        ...(event.equipment || []),
-        ...(event.tags || []),
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-      if (!haystack.includes(search)) return false;
-    }
-    return true;
-  });
-}
-
-function renderAgentEventList() {
-  const el = getAgentsElements();
-  if (!el.list) return;
-  const events = getFilteredAgentEvents();
-  if (!events.length) {
-    const subName = agentsState.selectedSubsystemId
-      ? (agentsState.subsystemHealth[agentsState.selectedSubsystemId]?.subsystemName || agentsState.selectedSubsystemId)
-      : '';
-    const msg = subName
-      ? `No anomaly events for "${subName}".`
-      : 'No anomaly events match the current filters.';
-    el.list.innerHTML = `<div class="agents-empty">${escapeHtml(msg)}</div>`;
-    return;
-  }
-  el.list.innerHTML = events
-    .map((event) => {
-      const active = event.event_id === agentsState.selectedEventId ? ' active' : '';
-      const sev = String(event.severity || 'low').toLowerCase();
-      const equipment = (event.equipment || []).slice(0, 2).join(', ');
-      const subsystemLabel = event.subsystem_name
-        ? `${event.subsystem_type || 'subsystem'}: ${event.subsystem_name}`
-        : '';
-      const baseMeta = [event.tag_name || event.source_tag || '', equipment, subsystemLabel]
-        .filter(Boolean)
-        .join(' • ');
-      return `
-        <div class="agents-event-card${active}" data-event-id="${escapeHtml(event.event_id || '')}">
-          <div class="agents-event-line-top">
-            <span class="agents-severity sev-${escapeHtml(sev)}">${escapeHtml(sev)}</span>
-            <span class="agents-event-time">${escapeHtml(formatAgentTime(event.created_at))}</span>
-          </div>
-          <div class="agents-event-summary">${escapeHtml(event.summary || 'Untitled anomaly')}</div>
-          <div class="agents-event-meta">${escapeHtml(baseMeta)}</div>
-        </div>
-      `;
-    })
-    .join('');
-
-  el.list.querySelectorAll('.agents-event-card').forEach((card) => {
-    card.addEventListener('click', () => {
-      const eventId = card.getAttribute('data-event-id');
-      if (!eventId) return;
-      selectAgentEvent(eventId);
-    });
-  });
 }
 
 function resolveAgentGraphTarget(event) {
@@ -3973,102 +4111,6 @@ function resolveAgentGraphTarget(event) {
   return null;
 }
 
-function renderAgentEventDetails(event) {
-  const el = getAgentsElements();
-  if (!el.detail) return;
-  if (!event) {
-    el.detail.innerHTML = '<p class="text-muted">Select an anomaly event from the feed.</p>';
-    if (el.btnDeepAnalyze) el.btnDeepAnalyze.disabled = true;
-    if (el.btnOpenGraph) el.btnOpenGraph.disabled = true;
-    if (el.btnAck) el.btnAck.disabled = true;
-    return;
-  }
-
-  let checks = [];
-  let causes = [];
-  let safety = [];
-  try { checks = JSON.parse(event.recommended_checks_json || '[]'); } catch (e) {}
-  try { causes = JSON.parse(event.probable_causes_json || '[]'); } catch (e) {}
-  try { safety = JSON.parse(event.safety_notes_json || '[]'); } catch (e) {}
-
-  el.detail.innerHTML = `
-    <div class="agents-detail-grid">
-      <div class="agents-detail-item"><span class="agents-detail-label">Event ID</span><span class="agents-detail-value">${escapeHtml(event.event_id || '')}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">State</span><span class="agents-detail-value">${escapeHtml(event.state || '')}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">Severity</span><span class="agents-detail-value">${escapeHtml(event.severity || '')}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">Confidence</span><span class="agents-detail-value">${escapeHtml(String(event.confidence ?? ''))}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">Category</span><span class="agents-detail-value">${escapeHtml(event.category || '')}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">Timestamp</span><span class="agents-detail-value">${escapeHtml(formatAgentTime(event.created_at))}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">Subsystem Type</span><span class="agents-detail-value">${escapeHtml(event.subsystem_type || 'global')}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">Subsystem</span><span class="agents-detail-value">${escapeHtml(event.subsystem_name || 'all')}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">Source Tag</span><span class="agents-detail-value">${escapeHtml(event.source_tag || '')}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">Tag Name</span><span class="agents-detail-value">${escapeHtml(event.tag_name || '')}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">z-score</span><span class="agents-detail-value">${escapeHtml(String(event.z_score ?? '0'))}</span></div>
-      <div class="agents-detail-item"><span class="agents-detail-label">MAD score</span><span class="agents-detail-value">${escapeHtml(String(event.mad_score ?? '0'))}</span></div>
-    </div>
-    <div>
-      <div class="agents-detail-label">Summary</div>
-      <div>${escapeHtml(event.summary || '')}</div>
-    </div>
-    <div>
-      <div class="agents-detail-label">Explanation</div>
-      <div>${escapeHtml(event.explanation || '')}</div>
-    </div>
-    <div>
-      <div class="agents-detail-label">Probable Causes</div>
-      <ul class="agents-list">${(causes || []).map((x) => `<li>${escapeHtml(String(x))}</li>`).join('') || '<li>n/a</li>'}</ul>
-    </div>
-    <div>
-      <div class="agents-detail-label">Verification Checks</div>
-      <ul class="agents-list">${(checks || []).map((x) => `<li>${escapeHtml(String(x))}</li>`).join('') || '<li>n/a</li>'}</ul>
-    </div>
-    <div>
-      <div class="agents-detail-label">Safety Notes</div>
-      <ul class="agents-list">${(safety || []).map((x) => `<li>${escapeHtml(String(x))}</li>`).join('') || '<li>n/a</li>'}</ul>
-    </div>
-  `;
-
-  if (el.btnDeepAnalyze) {
-    el.btnDeepAnalyze.disabled = false;
-    el.btnDeepAnalyze.textContent = event.llm_triaged ? 'Re-Analyze' : 'Deep Analyze';
-  }
-  if (el.btnOpenGraph) el.btnOpenGraph.disabled = !resolveAgentGraphTarget(event);
-  if (el.btnAck) {
-    const state = String(event.state || '').toLowerCase();
-    if (state === 'acknowledged') {
-      el.btnAck.textContent = 'Clear';
-      el.btnAck.disabled = false;
-    } else if (state === 'cleared') {
-      el.btnAck.textContent = 'Cleared';
-      el.btnAck.disabled = true;
-    } else {
-      el.btnAck.textContent = 'Acknowledge';
-      el.btnAck.disabled = false;
-    }
-  }
-}
-
-async function selectAgentEvent(eventId) {
-  agentsState.selectedEventId = eventId;
-  const existing = agentsState.events.find((e) => e.event_id === eventId);
-  if (existing && existing.explanation && existing.recommended_checks_json) {
-    renderAgentEventList();
-    renderAgentEventDetails(existing);
-    return;
-  }
-  const detailResult = await window.api.agentsGetEvent(eventId);
-  if (detailResult.success && detailResult.event) {
-    const idx = agentsState.events.findIndex((e) => e.event_id === eventId);
-    if (idx >= 0) {
-      agentsState.events[idx] = { ...agentsState.events[idx], ...detailResult.event };
-    } else {
-      agentsState.events.unshift(detailResult.event);
-    }
-    renderAgentEventList();
-    renderAgentEventDetails(detailResult.event);
-  }
-}
-
 async function loadAgentEvents() {
   const el = getAgentsElements();
   const result = await window.api.agentsListEvents({
@@ -4079,12 +4121,7 @@ async function loadAgentEvents() {
   });
   if (!result.success) return;
   agentsState.events = Array.isArray(result.events) ? result.events : [];
-  renderAgentEventList();
-
-  if (agentsState.selectedEventId) {
-    const selected = agentsState.events.find((e) => e.event_id === agentsState.selectedEventId);
-    renderAgentEventDetails(selected || null);
-  }
+  renderSubsystemHealthGrid();
 }
 
 async function refreshAgentStatus() {
@@ -4097,7 +4134,6 @@ async function refreshAgentStatus() {
     agentsState.runId = status.runId || agentsState.runId;
     agentsState.status = status.status || 'running';
     updateAgentStatusUi(agentsState.status, `Run ${agentsState.runId}`);
-    updateAgentMetrics(status.metrics || {}, status.lastHeartbeatAt);
   } else {
     agentsState.status = 'idle';
     updateAgentStatusUi('idle', 'No active run');
@@ -4108,7 +4144,10 @@ async function startAgentsMonitoring() {
   const config = getAgentsConfigFromUI();
   agentsState.subsystemHealth = {};
   agentsState.subsystemHistory = {};
+  agentsState.agentStates = {};
   agentsState.selectedSubsystemId = null;
+  agentsState.selectedEventId = null;
+  agentsState.events = [];
   renderSubsystemHealthGrid();
   const clearSubBtn = document.getElementById('btn-agents-clear-subsystem');
   if (clearSubBtn) clearSubBtn.style.display = 'none';
@@ -4135,70 +4174,59 @@ async function stopAgentsMonitoring() {
   updateAgentStatusUi('stopped', 'Monitoring stopped');
 }
 
-async function deepAnalyzeSelectedEvent() {
-  if (!agentsState.selectedEventId) return;
-  const el = getAgentsElements();
-  if (el.btnDeepAnalyze) {
-    el.btnDeepAnalyze.disabled = true;
-    el.btnDeepAnalyze.textContent = 'Analyzing…';
+async function deepAnalyzeEvent(eventId, btnEl) {
+  const event = agentsState.events.find((e) => e.event_id === eventId);
+  if (!event) {
+    console.error('[Agents] deep-analyze: event not found in local state', eventId);
+    if (btnEl) { btnEl.textContent = 'Not Found'; btnEl.disabled = false; }
+    return;
   }
+  agentsState.pendingDeepAnalyze.add(eventId);
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Analyzing…'; }
   try {
-    const result = await window.api.agentsDeepAnalyze(agentsState.selectedEventId);
-    if (result.success && result.event) {
-      const idx = agentsState.events.findIndex((e) => e.event_id === agentsState.selectedEventId);
-      if (idx >= 0) agentsState.events[idx] = { ...agentsState.events[idx], ...result.event };
-      renderAgentEventList();
-      renderAgentEventDetails(result.event);
-    } else {
+    const result = await window.api.agentsDeepAnalyze(eventId, event);
+    if (!result.success) {
       console.error('[Agents] deep-analyze failed:', result.error);
-      if (el.btnDeepAnalyze) {
-        el.btnDeepAnalyze.textContent = 'Failed — Retry';
-        el.btnDeepAnalyze.disabled = false;
-      }
+      agentsState.pendingDeepAnalyze.delete(eventId);
+      if (btnEl) { btnEl.textContent = 'Failed — Retry'; btnEl.disabled = false; }
     }
+    // Button stays disabled — result arrives async via AGENT_EVENT with deepAnalyze=true
   } catch (err) {
     console.error('[Agents] deep-analyze error:', err);
-    if (el.btnDeepAnalyze) {
-      el.btnDeepAnalyze.textContent = 'Failed — Retry';
-      el.btnDeepAnalyze.disabled = false;
-    }
+    agentsState.pendingDeepAnalyze.delete(eventId);
+    if (btnEl) { btnEl.textContent = 'Failed — Retry'; btnEl.disabled = false; }
   }
 }
 
-async function acknowledgeSelectedAgentEvent() {
-  if (!agentsState.selectedEventId) return;
-  const selected = agentsState.events.find((e) => e.event_id === agentsState.selectedEventId);
-  const state = String(selected?.state || '').toLowerCase();
-  const result = state === 'acknowledged'
-    ? await window.api.agentsClearEvent(agentsState.selectedEventId, '')
-    : await window.api.agentsAckEvent(agentsState.selectedEventId, '');
+async function acknowledgeEvent(eventId) {
+  const event = agentsState.events.find((e) => e.event_id === eventId);
+  const st = String(event?.state || '').toLowerCase();
+  const result = st === 'acknowledged'
+    ? await window.api.agentsClearEvent(eventId, '')
+    : await window.api.agentsAckEvent(eventId, '');
   if (!result.success) return;
-  await loadAgentEvents();
-  const refreshed = agentsState.events.find((e) => e.event_id === agentsState.selectedEventId);
-  renderAgentEventDetails(refreshed || null);
+  const idx = agentsState.events.findIndex((e) => e.event_id === eventId);
+  if (idx >= 0) {
+    agentsState.events[idx].state = st === 'acknowledged' ? 'cleared' : 'acknowledged';
+  }
+  renderSubsystemHealthGrid();
 }
 
 function upsertRealtimeAgentEvent(payload) {
-  if (!payload || !payload.eventId) return;
-  const idx = agentsState.events.findIndex((e) => e.event_id === payload.eventId);
-  const next = {
-    event_id: payload.eventId,
-    severity: payload.severity || 'medium',
-    summary: payload.summary || 'Anomaly detected',
-    category: payload.category || 'deviation',
-    created_at: payload.createdAt || new Date().toISOString(),
-    source_tag: payload.entityRefs?.sourceTag || payload.entityRefs?.tag || '',
-    tag_name: payload.entityRefs?.tag || '',
-    subsystem_type: payload.entityRefs?.subsystemType || '',
-    subsystem_name: payload.entityRefs?.subsystemName || '',
-    state: 'open',
-  };
-  if (idx >= 0) {
-    agentsState.events[idx] = { ...agentsState.events[idx], ...next };
-  } else {
-    agentsState.events.unshift(next);
+  const evt = payload?.event;
+  if (!evt || !evt.event_id) return;
+  if (payload.deepAnalyze) {
+    agentsState.pendingDeepAnalyze.delete(evt.event_id);
+    if (evt.deep_analyze_error) {
+      console.error('[Agents] Deep analyze failed:', evt.deep_analyze_error);
+    } else {
+      console.log('[Agents] Deep analyze complete for', evt.event_id);
+    }
   }
-  renderAgentEventList();
+  const idx = agentsState.events.findIndex((e) => e.event_id === evt.event_id);
+  if (idx >= 0) agentsState.events[idx] = { ...agentsState.events[idx], ...evt };
+  else agentsState.events.unshift(evt);
+  renderSubsystemHealthGrid();
 }
 
 function ensureAgentListeners() {
@@ -4210,29 +4238,28 @@ function ensureAgentListeners() {
     if (payload.runId) agentsState.runId = payload.runId;
     agentsState.status = payload.state || agentsState.status;
     updateAgentStatusUi(agentsState.status, `Run ${agentsState.runId || 'n/a'}`);
-    updateAgentMetrics(payload, payload.timestamp);
+
     const diagnostics = payload.diagnostics || {};
     const phase = diagnostics.phase || '?';
-    console.log(`[Agents] phase=${phase} tags=${diagnostics.monitoredTags ?? '?'}`);
-
-    if (phase === 'cycle_complete') {
-      const signals = diagnostics.subsystemShiftSignals;
-      const subCount = Array.isArray(signals) ? signals.length : 0;
-      const evaluated = (diagnostics.evaluatedLinked || 0) + (diagnostics.evaluatedUnlinked || 0);
-      console.log(`[Agents] cycle_complete: ${subCount} subsystems, ${evaluated} evaluated, ${diagnostics.candidateLinked || 0} candidates`);
+    const subId = payload.subsystemId || diagnostics.subsystemId || '';
+    if (phase === 'triage_slow_candidate') {
+      console.warn(`[Agent ${subId}] SLOW TRIAGE: ${diagnostics.tag} use_llm=${diagnostics.use_llm} llm=${diagnostics.llm_ms}ms persist=${diagnostics.persist_ms}ms total=${diagnostics.total_ms}ms`);
+    } else if (phase === 'cycle_complete' && subId) {
+      const t = diagnostics.timingMs || {};
+      console.log(`[Agent ${subId}] cycle #${diagnostics.cycleCount || '?'} ${payload.cycleMs || diagnostics.avgCycleMs || 0}ms (read=${t.read || '?'}ms hist=${t.history || '?'}ms score=${t.score || '?'}ms triage=${t.triage || '?'}ms) ${payload.candidates || 0} cand`);
+    } else if (phase === 'agents_started' || phase === 'rediscovery_complete') {
+      console.log(`[Agents] ${phase}: ${diagnostics.agentCount || 0} agents`);
     }
 
-    updateSubsystemHealthFromDiagnostics(diagnostics);
+    updateSubsystemHealthFromStatus(payload);
   });
 
-  window.api.onAgentEvent((payload) => {
-    upsertRealtimeAgentEvent(payload);
-  });
+  window.api.onAgentEvent((payload) => upsertRealtimeAgentEvent(payload));
 
   window.api.onAgentError((payload) => {
     if (!payload) return;
-    console.error('[Agents error]', payload);
-    updateAgentStatusUi('error', payload.message || 'Agent runtime error');
+    console.error('[Agents error]', payload.code, payload.message);
+    if (!payload.recoverable) updateAgentStatusUi('error', payload.message || 'Agent runtime error');
   });
 
   window.api.onAgentComplete((payload) => {
@@ -4240,7 +4267,6 @@ function ensureAgentListeners() {
     console.log('[Agents] run complete, success=' + payload.success);
     agentsState.status = payload.success ? 'stopped' : 'failed';
     updateAgentStatusUi(agentsState.status, payload.reason || 'Run complete');
-    refreshAgentStatus();
   });
 }
 
@@ -4257,25 +4283,15 @@ function initAgentsTab() {
       await window.api.agentsCleanup(14);
       await loadAgentEvents();
     });
-    el.btnDeepAnalyze?.addEventListener('click', deepAnalyzeSelectedEvent);
-    el.btnAck?.addEventListener('click', acknowledgeSelectedAgentEvent);
-    el.btnOpenGraph?.addEventListener('click', () => {
-      const event = agentsState.events.find((e) => e.event_id === agentsState.selectedEventId);
-      if (!event) return;
-      const target = resolveAgentGraphTarget(event);
-      if (!target) return;
-      openGraphModal(target.name, target.type, event.summary || target.name);
-    });
-    el.filterState?.addEventListener('change', loadAgentEvents);
-    el.filterSeverity?.addEventListener('change', loadAgentEvents);
-    el.filterSearch?.addEventListener('input', renderAgentEventList);
-
+    el.filterState?.addEventListener('change', () => renderSubsystemHealthGrid());
+    el.filterSeverity?.addEventListener('change', () => renderSubsystemHealthGrid());
+    el.filterSearch?.addEventListener('input', () => renderSubsystemHealthGrid());
     const clearSubBtn = document.getElementById('btn-agents-clear-subsystem');
     clearSubBtn?.addEventListener('click', () => {
       agentsState.selectedSubsystemId = null;
+      agentsState.selectedEventId = null;
       clearSubBtn.style.display = 'none';
       renderSubsystemHealthGrid();
-      renderAgentEventList();
     });
   }
   refreshAgentStatus();

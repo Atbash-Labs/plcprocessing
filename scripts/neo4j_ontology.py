@@ -192,6 +192,9 @@ class OntologyGraph:
                 "CREATE INDEX hmitextlist_name IF NOT EXISTS FOR (htl:HMITextList) ON (htl.name)",
                 "CREATE INDEX plctagtable_name IF NOT EXISTS FOR (pt:PLCTagTable) ON (pt.name)",
                 "CREATE INDEX plctag_name IF NOT EXISTS FOR (ptg:PLCTag) ON (ptg.name)",
+                # ScadaTag lookup indexes (used by agent persist queries)
+                "CREATE INDEX scadatag_name IF NOT EXISTS FOR (t:ScadaTag) ON (t.name)",
+                "CREATE INDEX scadatag_opc_item_path IF NOT EXISTS FOR (t:ScadaTag) ON (t.opc_item_path)",
                 # Agent monitoring indexes
                 "CREATE INDEX anomalyevent_created IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.created_at)",
                 "CREATE INDEX anomalyevent_state IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.state)",

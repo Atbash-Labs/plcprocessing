@@ -79,8 +79,10 @@ contextBridge.exposeInMainWorld('api', {
   agentsGetEvent: (eventId) => ipcRenderer.invoke('agents:get-event', eventId),
   agentsAckEvent: (eventId, note) => ipcRenderer.invoke('agents:ack-event', eventId, note),
   agentsClearEvent: (eventId, note) => ipcRenderer.invoke('agents:clear-event', eventId, note),
-  agentsDeepAnalyze: (eventId) => ipcRenderer.invoke('agents:deep-analyze', eventId),
+  agentsDeepAnalyze: (eventId, eventData) => ipcRenderer.invoke('agents:deep-analyze', eventId, eventData),
   agentsCleanup: (retentionDays) => ipcRenderer.invoke('agents:cleanup', retentionDays),
+  agentsStartSubsystem: (subId) => ipcRenderer.invoke('agents:start-subsystem', subId),
+  agentsStopSubsystem: (subId) => ipcRenderer.invoke('agents:stop-subsystem', subId),
   
   // Database connections
   getDbConnections: () => ipcRenderer.invoke('get-db-connections'),
