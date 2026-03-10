@@ -4,6 +4,8 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 
 let mainWindow;
+let activeAgentRun = null;
+let isAppShuttingDown = false;
 
 // ---------------------------------------------------------------------------
 // Python backend configuration  (works in both dev and packaged modes)
@@ -88,6 +90,10 @@ function createWindow() {
   });
 
   mainWindow.loadFile('index.html');
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
   
   // Open DevTools in development
   if (process.argv.includes('--dev')) {
@@ -100,6 +106,20 @@ app.whenReady().then(createWindow);
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
+  }
+});
+
+app.on('before-quit', () => {
+  isAppShuttingDown = true;
+  console.info('[Shutdown] before-quit triggered');
+  if (activeAgentRun && activeAgentRun.process && !activeAgentRun.process.killed) {
+    try {
+      console.info(`[Shutdown] Stopping active agent run ${activeAgentRun.runId}`);
+      activeAgentRun.process.kill('SIGTERM');
+    } catch (err) {
+      // Ignore termination errors during shutdown.
+      console.warn('[Shutdown] Failed to terminate active agent process:', err.message);
+    }
   }
 });
 
@@ -124,27 +144,27 @@ function runPythonScript(scriptName, args = [], options = {}) {
       stdout += text;
       
       // Send streaming output to renderer if enabled
-      if (streaming && mainWindow) {
+      if (streaming) {
         // Parse and emit tool calls separately
         const lines = text.split('\n');
         for (const line of lines) {
           if (line.startsWith('[TOOL]')) {
-            mainWindow.webContents.send('tool-call', {
+            sendToRenderer('tool-call', {
               streamId,
               tool: line.replace('[TOOL]', '').trim()
-            });
+            }, 'runPythonScript stdout tool');
           } else if (line.startsWith('[DEBUG]')) {
-            mainWindow.webContents.send('stream-output', {
+            sendToRenderer('stream-output', {
               streamId,
               text: line,
               type: 'debug'
-            });
+            }, 'runPythonScript stdout debug');
           } else if (line.trim()) {
-            mainWindow.webContents.send('stream-output', {
+            sendToRenderer('stream-output', {
               streamId,
               text: line,
               type: 'output'
-            });
+            }, 'runPythonScript stdout output');
           }
         }
       }
@@ -155,21 +175,21 @@ function runPythonScript(scriptName, args = [], options = {}) {
       stderr += text;
       
       // Stream stderr too (useful for verbose output)
-      if (streaming && mainWindow) {
-        mainWindow.webContents.send('stream-output', {
+      if (streaming) {
+        sendToRenderer('stream-output', {
           streamId,
           text,
           type: 'stderr'
-        });
+        }, 'runPythonScript stderr');
       }
     });
 
     pythonProcess.on('close', (code) => {
-      if (streaming && mainWindow) {
-        mainWindow.webContents.send('stream-complete', {
+      if (streaming) {
+        sendToRenderer('stream-complete', {
           streamId,
           success: code === 0
-        });
+        }, 'runPythonScript close');
       }
       
       if (code === 0) {
@@ -185,13 +205,182 @@ function runPythonScript(scriptName, args = [], options = {}) {
   });
 }
 
+function normalizeAgentConfig(config = {}) {
+  const thresholds = (config && typeof config.thresholds === 'object' && config.thresholds) || {};
+  const scope = (config && typeof config.scope === 'object' && config.scope) || {};
+  return {
+    pollIntervalMs: Math.max(1000, Number(config.pollIntervalMs || 1000)),
+    historyWindowMinutes: Math.max(10, Number(config.historyWindowMinutes || 360)),
+    minHistoryPoints: Math.max(10, Number(config.minHistoryPoints || 30)),
+    maxMonitoredTags: Math.max(10, Number(config.maxMonitoredTags || 200)),
+    maxCandidatesPerCycle: Math.max(1, Number(config.maxCandidatesPerCycle || 25)),
+    maxCandidatesPerSubsystem: Math.max(1, Number(config.maxCandidatesPerSubsystem || 8)),
+    maxLlmTriagesPerCycle: Math.max(0, Number(config.maxLlmTriagesPerCycle ?? 5)),
+    maxLlmTriagesPerSubsystem: Math.max(0, Number(config.maxLlmTriagesPerSubsystem ?? 2)),
+    dedupCooldownMinutes: Math.max(1, Number(config.dedupCooldownMinutes || 10)),
+    retentionDays: Math.max(1, Number(config.retentionDays || 14)),
+    cleanupEveryCycles: Math.max(1, Number(config.cleanupEveryCycles || 40)),
+    thresholds: {
+      z: Number(thresholds.z ?? 3.0),
+      mad: Number(thresholds.mad ?? 3.5),
+      rate: Number(thresholds.rate ?? 0.0),
+      stalenessSec: Number(thresholds.stalenessSec ?? 120),
+      flatline_std_epsilon: Number(thresholds.flatline_std_epsilon ?? 1e-6),
+      stuck_window_size: Number(thresholds.stuck_window_size ?? 20),
+    },
+    scope: {
+      project: scope.project || null,
+      equipmentTags: Array.isArray(scope.equipmentTags) ? scope.equipmentTags : [],
+      tagRegex: scope.tagRegex || null,
+      subsystemMode: String(scope.subsystemMode || 'auto').toLowerCase() === 'global' ? 'global' : 'auto',
+      subsystemPriority: Array.isArray(scope.subsystemPriority) && scope.subsystemPriority.length
+        ? scope.subsystemPriority.map(String)
+        : ['view', 'equipment', 'group', 'global'],
+      subsystemInclude: Array.isArray(scope.subsystemInclude) ? scope.subsystemInclude.map(String) : [],
+      includeUnlinkedTags: Boolean(scope.includeUnlinkedTags),
+    },
+  };
+}
+
+function canSendToRenderer() {
+  if (!mainWindow) return false;
+  if (typeof mainWindow.isDestroyed === 'function' && mainWindow.isDestroyed()) return false;
+  const wc = mainWindow.webContents;
+  if (!wc) return false;
+  if (typeof wc.isDestroyed === 'function' && wc.isDestroyed()) return false;
+  return true;
+}
+
+function sendToRenderer(channel, payload, context = '') {
+  if (!canSendToRenderer()) {
+    if (isAppShuttingDown) {
+      console.info(`[Shutdown] Dropped renderer message ${channel}${context ? ` (${context})` : ''}`);
+    } else {
+      console.warn(`[IPC] Renderer unavailable for ${channel}${context ? ` (${context})` : ''}`);
+    }
+    return false;
+  }
+  try {
+    mainWindow.webContents.send(channel, payload);
+    return true;
+  } catch (err) {
+    console.warn(`[IPC] Failed sending ${channel}${context ? ` (${context})` : ''}: ${err.message}`);
+    return false;
+  }
+}
+
+function routeAgentMessage(channel, payload) {
+  const ok = sendToRenderer(channel, payload, 'agent-stream');
+  if (!ok) {
+    console.warn(`[Agent IPC] Failed to route message on ${channel}`);
+  }
+}
+
+function parseAgentLine(line) {
+  const trimmed = (line || '').trim();
+  if (!trimmed) return null;
+  const prefixes = [
+    { key: '[AGENT_STATUS]', channel: 'agent-status' },
+    { key: '[AGENT_EVENT]', channel: 'agent-event' },
+    { key: '[AGENT_ERROR]', channel: 'agent-error' },
+    { key: '[AGENT_COMPLETE]', channel: 'agent-complete' },
+  ];
+  for (const prefix of prefixes) {
+    if (!trimmed.startsWith(prefix.key)) continue;
+    const jsonText = trimmed.slice(prefix.key.length).trim();
+    try {
+      const payload = JSON.parse(jsonText);
+      return { channel: prefix.channel, payload };
+    } catch (err) {
+      return {
+        channel: 'agent-error',
+        payload: {
+          runId: activeAgentRun ? activeAgentRun.runId : null,
+          code: 'invalid_agent_json',
+          message: `Failed to parse agent stream line: ${trimmed.slice(0, 200)}`,
+          recoverable: true,
+          timestamp: new Date().toISOString(),
+        },
+      };
+    }
+  }
+  return null;
+}
+
+function handleAgentStdoutChunk(text) {
+  if (!activeAgentRun) return;
+  activeAgentRun.stdoutBuffer += text;
+  const lines = activeAgentRun.stdoutBuffer.split(/\r?\n/);
+  activeAgentRun.stdoutBuffer = lines.pop() || '';
+  for (const line of lines) {
+    const parsed = parseAgentLine(line);
+    if (!parsed) {
+      if (line.trim().startsWith('[AGENT')) {
+        console.warn('[Agent stream] Unparsed line:', line.slice(0, 300));
+      }
+      continue;
+    }
+    if (parsed.channel === 'agent-status' && parsed.payload) {
+      activeAgentRun.status = parsed.payload.state || activeAgentRun.status;
+      activeAgentRun.metrics = {
+        cycleMs: parsed.payload.cycleMs || 0,
+        candidates: parsed.payload.candidates || 0,
+        triaged: parsed.payload.triaged || 0,
+        emitted: parsed.payload.emitted || 0,
+        timestamp: parsed.payload.timestamp || new Date().toISOString(),
+      };
+    }
+    routeAgentMessage(parsed.channel, parsed.payload);
+  }
+}
+
+async function stopActiveAgent(reason = 'stopped_by_user') {
+  if (!activeAgentRun || !activeAgentRun.process || activeAgentRun.process.killed) {
+    return { success: false, error: 'No active agent run' };
+  }
+  const runId = activeAgentRun.runId;
+  activeAgentRun.status = 'stopping';
+
+  return new Promise((resolve) => {
+    const proc = activeAgentRun.process;
+    let settled = false;
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    proc.once('close', () => {
+      done({ success: true, runId, stoppedAt: new Date().toISOString(), reason });
+    });
+
+    try {
+      proc.kill('SIGTERM');
+    } catch (err) {
+      done({ success: false, error: err.message });
+      return;
+    }
+
+    setTimeout(() => {
+      if (proc.killed) return;
+      try {
+        proc.kill('SIGKILL');
+      } catch (err) {
+        // Ignore forced termination errors.
+      }
+    }, 5000);
+  });
+}
+
 // IPC Handlers
 
 // Select file dialog
 ipcMain.handle('select-file', async (event, options) => {
+  const properties = ['openFile'];
+  if (options && options.multiple) properties.push('multiSelections');
   const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
-    filters: options.filters || [
+    properties,
+    filters: (options && options.filters) || [
       { name: 'All Supported', extensions: ['json', 'sc', 'L5X', 'st', 'xml'] },
       { name: 'Ignition Backup', extensions: ['json'] },
       { name: 'Rockwell PLC', extensions: ['sc', 'L5X'] },
@@ -199,6 +388,9 @@ ipcMain.handle('select-file', async (event, options) => {
       { name: 'TIA Portal XML', extensions: ['xml'] }
     ]
   });
+  if (options && options.multiple) {
+    return { filePaths: result.filePaths || [] };
+  }
   return result.filePaths[0] || null;
 });
 
@@ -421,22 +613,22 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
         stderr += text;
         
         // Stream tool calls, debug info, and Claude response from stderr to frontend
-        if (mainWindow) {
+        if (canSendToRenderer()) {
           // Check for special prefixes first (they appear on their own lines)
           if (text.includes('[TOOL]') || text.includes('[DEBUG]') || text.includes('[INFO]')) {
             const lines = text.split('\n');
             for (const line of lines) {
               if (line.startsWith('[TOOL]')) {
-                mainWindow.webContents.send('tool-call', {
+                sendToRenderer('tool-call', {
                   streamId,
                   tool: line.replace('[TOOL]', '').trim()
-                });
+                }, 'troubleshoot stderr tool');
               } else if (line.startsWith('[DEBUG]') || line.startsWith('[INFO]')) {
-                mainWindow.webContents.send('stream-output', {
+                sendToRenderer('stream-output', {
                   streamId,
                   text: line,
                   type: 'debug'
-                });
+                }, 'troubleshoot stderr debug');
               }
             }
           } else if (text.includes('[STREAM]')) {
@@ -444,29 +636,29 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
             const streamStart = text.indexOf('[STREAM]');
             const afterStream = text.substring(streamStart + 8); // 8 = length of '[STREAM]'
             if (afterStream) {
-              mainWindow.webContents.send('stream-output', {
+              sendToRenderer('stream-output', {
                 streamId,
                 text: afterStream,
                 type: 'claude-stream'
-              });
+              }, 'troubleshoot stderr stream-start');
             }
           } else if (text && !text.startsWith('[')) {
             // Continuation of Claude streaming (no prefix)
-            mainWindow.webContents.send('stream-output', {
+            sendToRenderer('stream-output', {
               streamId,
               text: text,
               type: 'claude-stream'
-            });
+            }, 'troubleshoot stderr stream-cont');
           }
         }
       });
       
       proc.on('close', (code) => {
-        if (mainWindow) {
-          mainWindow.webContents.send('stream-complete', {
+        if (canSendToRenderer()) {
+          sendToRenderer('stream-complete', {
             streamId,
             success: code === 0
-          });
+          }, 'troubleshoot close');
         }
         
         if (code === 0) {
@@ -1019,25 +1211,25 @@ ipcMain.handle('graph:ai-propose', async (event, description) => {
         stderr += text;
         
         // Stream tool calls to frontend
-        if (mainWindow && text.includes('[TOOL]')) {
+        if (canSendToRenderer() && text.includes('[TOOL]')) {
           const lines = text.split('\n');
           for (const line of lines) {
             if (line.startsWith('[TOOL]')) {
-              mainWindow.webContents.send('tool-call', {
+              sendToRenderer('tool-call', {
                 streamId,
                 tool: line.replace('[TOOL]', '').trim()
-              });
+              }, 'ai-propose stderr tool');
             }
           }
         }
       });
       
       proc.on('close', (code) => {
-        if (mainWindow) {
-          mainWindow.webContents.send('stream-complete', {
+        if (canSendToRenderer()) {
+          sendToRenderer('stream-complete', {
             streamId,
             success: code === 0
-          });
+          }, 'ai-propose close');
         }
         
         if (code === 0) {
@@ -1304,7 +1496,9 @@ function readDbCredentials() {
   if (!fs.existsSync(credPath)) return {};
   try {
     return JSON.parse(fs.readFileSync(credPath, 'utf-8'));
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
 // Get database connections from Neo4j + credential status from db_credentials.json
@@ -1314,10 +1508,8 @@ ipcMain.handle('get-db-connections', async () => {
       const proc = spawnPythonProcess('neo4j_ontology.py', ['db-connections', '--json']);
 
       let stdout = '';
-      let stderr = '';
 
       proc.stdout.on('data', (data) => { stdout += data.toString(); });
-      proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
       proc.on('close', (code) => {
         if (code !== 0) {
@@ -1335,7 +1527,7 @@ ipcMain.handle('get-db-connections', async () => {
           }));
 
           resolve({ success: true, connections: enriched });
-        } catch (e) {
+        } catch {
           resolve({ success: true, connections: [] });
         }
       });
@@ -1349,7 +1541,7 @@ ipcMain.handle('get-db-connections', async () => {
 ipcMain.handle('save-db-credentials', async (event, credentials) => {
   try {
     const credPath = getDbCredentialsPath();
-    let existing = readDbCredentials();
+    const existing = readDbCredentials();
 
     for (const [name, cred] of Object.entries(credentials)) {
       existing[name] = {
@@ -1389,6 +1581,260 @@ ipcMain.handle('test-db-connection', async (event, connectionName) => {
         }
       });
     });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ============================================
+// Long-running Agent Monitoring IPC Handlers
+// ============================================
+
+ipcMain.handle('agents:start', async (event, rawConfig = {}) => {
+  if (activeAgentRun && activeAgentRun.process && !activeAgentRun.process.killed) {
+    return { success: false, error: `Agent run already active: ${activeAgentRun.runId}`, runId: activeAgentRun.runId };
+  }
+
+  const runId = `agent-${Date.now()}`;
+  const config = normalizeAgentConfig(rawConfig);
+
+  try {
+    const proc = spawnPythonProcess('anomaly_monitor.py', [
+      'run',
+      '--run-id',
+      runId,
+      '--config-json',
+      JSON.stringify(config),
+    ]);
+
+    activeAgentRun = {
+      runId,
+      process: proc,
+      status: 'starting',
+      startedAt: new Date().toISOString(),
+      metrics: {
+        cycleMs: 0,
+        candidates: 0,
+        triaged: 0,
+        emitted: 0,
+        timestamp: new Date().toISOString(),
+      },
+      stdoutBuffer: '',
+      config,
+    };
+
+    proc.stdout.on('data', (data) => {
+      handleAgentStdoutChunk(data.toString());
+    });
+
+    proc.stderr.on('data', (data) => {
+      const text = data.toString().trim();
+      if (!text) return;
+      console.warn('[Agent stderr]', text.slice(0, 500));
+      routeAgentMessage('agent-error', {
+        runId,
+        code: 'worker_stderr',
+        message: text,
+        recoverable: true,
+        timestamp: new Date().toISOString(),
+      });
+    });
+
+    proc.on('close', (code) => {
+      const hadActive = activeAgentRun && activeAgentRun.runId === runId;
+      if (hadActive) {
+        routeAgentMessage('agent-complete', {
+          runId,
+          success: code === 0,
+          reason: code === 0 ? 'completed' : 'worker_exit_error',
+          stoppedAt: new Date().toISOString(),
+        });
+        activeAgentRun = null;
+      }
+    });
+
+    proc.on('error', (err) => {
+      routeAgentMessage('agent-error', {
+        runId,
+        code: 'worker_spawn_error',
+        message: err.message,
+        recoverable: false,
+        timestamp: new Date().toISOString(),
+      });
+      activeAgentRun = null;
+    });
+
+    return { success: true, runId, startedAt: activeAgentRun.startedAt, config };
+  } catch (error) {
+    activeAgentRun = null;
+    return { success: false, error: error.message, runId };
+  }
+});
+
+ipcMain.handle('agents:status', async (event, runId) => {
+  if (activeAgentRun && (!runId || runId === activeAgentRun.runId)) {
+    return {
+      success: true,
+      runId: activeAgentRun.runId,
+      status: activeAgentRun.status,
+      metrics: activeAgentRun.metrics,
+      lastHeartbeatAt: activeAgentRun.metrics.timestamp,
+      startedAt: activeAgentRun.startedAt,
+      config: activeAgentRun.config,
+      active: true,
+    };
+  }
+
+  if (!runId) {
+    return { success: true, active: false, status: 'idle' };
+  }
+
+  try {
+    const output = await runPythonScript('anomaly_monitor.py', ['status', '--run-id', runId]);
+    const parsed = JSON.parse(output || '{}');
+    return parsed;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('agents:stop', async (event, runId = null) => {
+  if (!activeAgentRun) {
+    return { success: false, error: 'No active agent run' };
+  }
+  if (runId && runId !== activeAgentRun.runId) {
+    return { success: false, error: `Requested run ${runId} does not match active run ${activeAgentRun.runId}` };
+  }
+  return stopActiveAgent('stopped_by_user');
+});
+
+ipcMain.handle('agents:list-events', async (event, filters = {}) => {
+  const args = ['list-events'];
+  if (filters.limit) args.push('--limit', String(filters.limit));
+  if (filters.state) args.push('--state', String(filters.state));
+  if (filters.severity) args.push('--severity', String(filters.severity));
+  if (filters.runId) args.push('--run-id', String(filters.runId));
+
+  try {
+    const output = await runPythonScript('anomaly_monitor.py', args);
+    return JSON.parse(output || '{"success":true,"events":[]}');
+  } catch (error) {
+    return { success: false, error: error.message, events: [] };
+  }
+});
+
+ipcMain.handle('agents:get-event', async (event, eventId) => {
+  try {
+    const output = await runPythonScript('anomaly_monitor.py', ['get-event', '--event-id', String(eventId)]);
+    return JSON.parse(output || '{}');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('agents:ack-event', async (event, eventId, note = '') => {
+  try {
+    const args = ['ack-event', '--event-id', String(eventId)];
+    if (note) args.push('--note', String(note));
+    const output = await runPythonScript('anomaly_monitor.py', args);
+    return JSON.parse(output || '{}');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('agents:clear-event', async (event, eventId, note = '') => {
+  try {
+    const args = ['clear-event', '--event-id', String(eventId)];
+    if (note) args.push('--note', String(note));
+    const output = await runPythonScript('anomaly_monitor.py', args);
+    return JSON.parse(output || '{}');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('agents:deep-analyze', async (event, eventId, eventData) => {
+  if (!activeAgentRun || !activeAgentRun.process || activeAgentRun.process.killed) {
+    return { success: false, error: 'No active agent run — deep analyze requires a running agent' };
+  }
+  if (!eventData || !eventData.event_id) {
+    return { success: false, error: 'Missing event data' };
+  }
+  const sent = sendAgentCommand({ cmd: 'deep-analyze', event: eventData });
+  if (!sent) {
+    return { success: false, error: 'Failed to send command to agent process' };
+  }
+  return { success: true, pending: true, eventId: eventData.event_id };
+});
+
+ipcMain.handle('agents:cleanup', async (event, retentionDays = 14) => {
+  try {
+    const output = await runPythonScript('anomaly_monitor.py', [
+      'cleanup',
+      '--retention-days',
+      String(retentionDays),
+    ]);
+    return JSON.parse(output || '{}');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+function sendAgentCommand(cmd) {
+  if (activeAgentRun && activeAgentRun.process && activeAgentRun.process.stdin && activeAgentRun.process.stdin.writable) {
+    activeAgentRun.process.stdin.write(JSON.stringify(cmd) + '\n');
+    return true;
+  }
+  return false;
+}
+
+ipcMain.handle('agents:start-subsystem', async (event, subsystemId) => {
+  if (!activeAgentRun) return { success: false, error: 'No active agent run' };
+  const sent = sendAgentCommand({ cmd: 'start-agent', subsystemId });
+  return { success: sent, subsystemId };
+});
+
+ipcMain.handle('agents:stop-subsystem', async (event, subsystemId) => {
+  if (!activeAgentRun) return { success: false, error: 'No active agent run' };
+  const sent = sendAgentCommand({ cmd: 'stop-agent', subsystemId });
+  return { success: sent, subsystemId };
+});
+
+// ============================================
+// Artifact Ingestion IPC (P&IDs / SOPs / Diagrams via GPT-5.4)
+// ============================================
+
+ipcMain.handle('ingest-artifact', async (event, filePath, sourceKind = 'pid') => {
+  try {
+    sendToRenderer('stream-output', { text: `Ingesting ${path.basename(filePath)} as ${sourceKind}...\n` });
+    const output = await runPythonScript('artifact_ingest.py', [
+      filePath,
+      '--source-kind', sourceKind,
+      '--verbose',
+      '--json',
+    ], { streaming: true, streamId: 'artifact-ingest' });
+    const result = JSON.parse(output || '{}');
+    return { success: true, ...result };
+  } catch (error) {
+    sendToRenderer('stream-output', { text: `Ingestion error: ${error.message}\n` });
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('ingest-artifact-batch', async (event, files) => {
+  try {
+    const filePaths = files.map(f => f.path);
+    const sourceKind = files[0]?.sourceKind || 'pid';
+    sendToRenderer('stream-output', { text: `Ingesting ${files.length} artifact(s)...\n` });
+    const output = await runPythonScript('artifact_ingest.py', [
+      ...filePaths,
+      '--source-kind', sourceKind,
+      '--verbose',
+      '--json',
+    ], { streaming: true, streamId: 'artifact-ingest' });
+    const result = JSON.parse(output || '{}');
+    return { success: true, ...result };
   } catch (error) {
     return { success: false, error: error.message };
   }

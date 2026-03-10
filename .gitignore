@@ -9,8 +9,7 @@ venv/
 ENV/
 .venv
 
-# Test files and outputs
-tests/
+# Test outputs
 *_updated*.xml
 *_applied*.xml
 *_diffs/

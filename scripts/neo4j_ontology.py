@@ -9,7 +9,11 @@ import json
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional fallback for minimal envs
+    def load_dotenv(*_args, **_kwargs):
+        return False
 from neo4j import GraphDatabase, Driver, Session
 
 
@@ -91,6 +95,29 @@ class OntologyGraph:
     - HAS_SCREEN: HMIDevice -> HMIScreen
     - HAS_TEXT_LIST: HMIDevice -> HMITextList
     - MONITORS_TAG: HMIAlarm -> PLCTag
+
+    Process-Semantic Node Types:
+    - ProcessMedium: A material/utility stream (water, steam, product, etc.)
+    - UnitOperation: A canonical plant operation (pumping, heating, mixing, etc.)
+    - OperatingEnvelope: Normal ranges, alarm bands, trip windows for a parameter
+    - PhysicalPrinciple: A measurable physical quantity (temperature, pressure, flow)
+    - ChemicalSpecies: A chemical substance involved in plant processes
+    - Reaction: A chemical or physical transformation step
+
+    Process-Semantic Relationship Types:
+    - HANDLES_MEDIUM: Equipment -> ProcessMedium
+    - PERFORMS_OPERATION: Equipment -> UnitOperation
+    - HAS_OPERATING_ENVELOPE: Equipment -> OperatingEnvelope
+    - MEASURES: ScadaTag -> PhysicalPrinciple
+    - MONITORS_ENVELOPE: ScadaTag -> OperatingEnvelope
+    - IMPLEMENTS_CONTROL_OF: AOI -> UnitOperation
+    - USES_PRINCIPLE: UnitOperation -> PhysicalPrinciple
+    - INVOLVES_SPECIES: Reaction -> ChemicalSpecies
+    - PROCESSES_SPECIES: UnitOperation -> ChemicalSpecies
+    - HAS_REACTION: UnitOperation -> Reaction
+    - MEDIUM_CONTAINS: ProcessMedium -> ChemicalSpecies
+    - ENVELOPE_FOR_PRINCIPLE: OperatingEnvelope -> PhysicalPrinciple
+    - VISUALIZES: ViewComponent -> Equipment
     """
 
     def __init__(self, config: Optional[Neo4jConfig] = None):
@@ -147,6 +174,8 @@ class OntologyGraph:
                 "CREATE CONSTRAINT project_name IF NOT EXISTS FOR (p:Project) REQUIRE p.name IS UNIQUE",
                 "CREATE CONSTRAINT script_name IF NOT EXISTS FOR (s:Script) REQUIRE s.name IS UNIQUE",
                 "CREATE CONSTRAINT namedquery_name IF NOT EXISTS FOR (q:NamedQuery) REQUIRE q.name IS UNIQUE",
+                "CREATE CONSTRAINT agentrun_id IF NOT EXISTS FOR (r:AgentRun) REQUIRE r.run_id IS UNIQUE",
+                "CREATE CONSTRAINT anomalyevent_id IF NOT EXISTS FOR (e:AnomalyEvent) REQUIRE e.event_id IS UNIQUE",
             ]
 
             # Regular indexes
@@ -186,6 +215,21 @@ class OntologyGraph:
                 "CREATE INDEX hmitextlist_name IF NOT EXISTS FOR (htl:HMITextList) ON (htl.name)",
                 "CREATE INDEX plctagtable_name IF NOT EXISTS FOR (pt:PLCTagTable) ON (pt.name)",
                 "CREATE INDEX plctag_name IF NOT EXISTS FOR (ptg:PLCTag) ON (ptg.name)",
+                # ScadaTag lookup indexes (used by agent persist queries)
+                "CREATE INDEX scadatag_name IF NOT EXISTS FOR (t:ScadaTag) ON (t.name)",
+                "CREATE INDEX scadatag_opc_item_path IF NOT EXISTS FOR (t:ScadaTag) ON (t.opc_item_path)",
+                # Agent monitoring indexes
+                "CREATE INDEX anomalyevent_created IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.created_at)",
+                "CREATE INDEX anomalyevent_state IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.state)",
+                "CREATE INDEX anomalyevent_severity IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.severity)",
+                "CREATE INDEX anomalyevent_dedup_key IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.dedup_key)",
+                # Process-semantic layer indexes
+                "CREATE INDEX processmedium_name IF NOT EXISTS FOR (pm:ProcessMedium) ON (pm.name)",
+                "CREATE INDEX unitoperation_name IF NOT EXISTS FOR (uo:UnitOperation) ON (uo.name)",
+                "CREATE INDEX operatingenvelope_name IF NOT EXISTS FOR (oe:OperatingEnvelope) ON (oe.name)",
+                "CREATE INDEX physicalprinciple_name IF NOT EXISTS FOR (pp:PhysicalPrinciple) ON (pp.name)",
+                "CREATE INDEX chemicalspecies_name IF NOT EXISTS FOR (cs:ChemicalSpecies) ON (cs.name)",
+                "CREATE INDEX reaction_name IF NOT EXISTS FOR (rx:Reaction) ON (rx.name)",
             ]
 
             for constraint in constraints:
@@ -201,6 +245,95 @@ class OntologyGraph:
                 except Exception as e:
                     if "already exists" not in str(e).lower():
                         print(f"[WARNING] Index error: {e}")
+
+    def init_agent_monitoring_schema(self) -> None:
+        """Ensure agent monitoring labels and indexes exist."""
+        self.create_indexes()
+
+    def list_anomaly_events(
+        self,
+        limit: int = 100,
+        state: Optional[str] = None,
+        severity: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List persisted anomaly events for UI feeds."""
+        with self.session() as session:
+            clauses = []
+            params: Dict[str, Any] = {"limit": max(1, min(limit, 500))}
+            if state:
+                clauses.append("e.state = $state")
+                params["state"] = state
+            if severity:
+                clauses.append("e.severity = $severity")
+                params["severity"] = severity
+            if run_id:
+                clauses.append("e.run_id = $run_id")
+                params["run_id"] = run_id
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            query = f"""
+                MATCH (e:AnomalyEvent)
+                {where}
+                OPTIONAL MATCH (e)-[:OBSERVED_ON]->(t:ScadaTag)
+                OPTIONAL MATCH (e)-[:AFFECTS]->(eq:Equipment)
+                RETURN e, collect(DISTINCT t.name) AS tags, collect(DISTINCT eq.name) AS equipment
+                ORDER BY e.created_at DESC
+                LIMIT $limit
+            """
+            result = session.run(query, **params)
+            events: List[Dict[str, Any]] = []
+            for record in result:
+                node = record["e"]
+                props = dict(node)
+                props["tags"] = [x for x in record["tags"] if x]
+                props["equipment"] = [x for x in record["equipment"] if x]
+                events.append(props)
+            return events
+
+    def get_anomaly_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Get one anomaly event with linked context labels."""
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (e:AnomalyEvent {event_id: $event_id})
+                OPTIONAL MATCH (e)-[:OBSERVED_ON]->(t:ScadaTag)
+                OPTIONAL MATCH (e)-[:AFFECTS]->(eq:Equipment)
+                OPTIONAL MATCH (e)-[r:RELATED_TO]->(n)
+                RETURN e,
+                       collect(DISTINCT t.name) AS tags,
+                       collect(DISTINCT eq.name) AS equipment,
+                       collect(DISTINCT {type: type(r), label: labels(n)[0], name: coalesce(n.name, n.symptom, n.phrase)}) AS related
+                LIMIT 1
+                """,
+                event_id=event_id,
+            )
+            record = result.single()
+            if not record:
+                return None
+            data = dict(record["e"])
+            data["tags"] = [x for x in record["tags"] if x]
+            data["equipment"] = [x for x in record["equipment"] if x]
+            data["related"] = [
+                x for x in record["related"] if x and x.get("name")
+            ]
+            return data
+
+    def cleanup_anomaly_events(self, retention_days: int = 14) -> int:
+        """Delete old anomaly events outside retention window."""
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (e:AnomalyEvent)
+                WHERE e.created_at IS NOT NULL
+                  AND datetime(e.created_at) < datetime() - duration({days: $days})
+                WITH collect(e) AS old_events
+                FOREACH (n IN old_events | DETACH DELETE n)
+                RETURN size(old_events) AS deleted
+                """,
+                days=max(1, retention_days),
+            )
+            record = result.single()
+            return int(record["deleted"]) if record else 0
 
     def clear_all(self) -> None:
         """Clear all nodes and relationships. USE WITH CAUTION."""
@@ -2888,6 +3021,280 @@ class OntologyGraph:
             return {"item": item_data, "context": context}
 
     # =========================================================================
+    # Process-Semantic Layer Write Helpers
+    # =========================================================================
+
+    def create_process_medium(
+        self, name: str, category: str = "", phase: str = "",
+        description: str = "", purpose: str = "",
+        evidence_json: str = "",
+    ) -> str:
+        """Create or merge a ProcessMedium node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:ProcessMedium {name: $name})
+                SET n.category = COALESCE(n.category, $category),
+                    n.phase = COALESCE(n.phase, $phase),
+                    n.description = COALESCE(n.description, $description),
+                    n.purpose = COALESCE(n.purpose, $purpose),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                """,
+                {"name": name, "category": category, "phase": phase,
+                 "description": description, "purpose": purpose, "ev": evidence_json},
+            )
+        return name
+
+    def create_unit_operation(
+        self, name: str, category: str = "",
+        description: str = "", purpose: str = "",
+        evidence_json: str = "",
+    ) -> str:
+        """Create or merge a UnitOperation node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:UnitOperation {name: $name})
+                SET n.category = COALESCE(n.category, $category),
+                    n.description = COALESCE(n.description, $description),
+                    n.purpose = COALESCE(n.purpose, $purpose),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                """,
+                {"name": name, "category": category,
+                 "description": description, "purpose": purpose, "ev": evidence_json},
+            )
+        return name
+
+    def create_operating_envelope(
+        self, name: str, parameter: str = "", unit: str = "",
+        low_limit: float = None, low_warning: float = None,
+        normal_low: float = None, normal_high: float = None,
+        high_warning: float = None, high_limit: float = None,
+        trip_low: float = None, trip_high: float = None,
+        description: str = "", evidence_json: str = "",
+    ) -> str:
+        """Create or merge an OperatingEnvelope node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:OperatingEnvelope {name: $name})
+                SET n.parameter = COALESCE(n.parameter, $parameter),
+                    n.unit = COALESCE(n.unit, $unit),
+                    n.description = COALESCE(n.description, $description),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                FOREACH (_ IN CASE WHEN $low_limit IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.low_limit = $low_limit)
+                FOREACH (_ IN CASE WHEN $low_warning IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.low_warning = $low_warning)
+                FOREACH (_ IN CASE WHEN $normal_low IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.normal_low = $normal_low)
+                FOREACH (_ IN CASE WHEN $normal_high IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.normal_high = $normal_high)
+                FOREACH (_ IN CASE WHEN $high_warning IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.high_warning = $high_warning)
+                FOREACH (_ IN CASE WHEN $high_limit IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.high_limit = $high_limit)
+                FOREACH (_ IN CASE WHEN $trip_low IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.trip_low = $trip_low)
+                FOREACH (_ IN CASE WHEN $trip_high IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.trip_high = $trip_high)
+                """,
+                {"name": name, "parameter": parameter, "unit": unit,
+                 "description": description, "ev": evidence_json,
+                 "low_limit": low_limit, "low_warning": low_warning,
+                 "normal_low": normal_low, "normal_high": normal_high,
+                 "high_warning": high_warning, "high_limit": high_limit,
+                 "trip_low": trip_low, "trip_high": trip_high},
+            )
+        return name
+
+    def create_physical_principle(
+        self, name: str, category: str = "", unit_family: str = "",
+        description: str = "", evidence_json: str = "",
+    ) -> str:
+        """Create or merge a PhysicalPrinciple node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:PhysicalPrinciple {name: $name})
+                SET n.category = COALESCE(n.category, $category),
+                    n.unit_family = COALESCE(n.unit_family, $unit_family),
+                    n.description = COALESCE(n.description, $description),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                """,
+                {"name": name, "category": category,
+                 "unit_family": unit_family, "description": description,
+                 "ev": evidence_json},
+            )
+        return name
+
+    def create_chemical_species(
+        self, name: str, category: str = "", cas_number: str = "",
+        molecular_formula: str = "", description: str = "",
+        evidence_json: str = "",
+    ) -> str:
+        """Create or merge a ChemicalSpecies node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:ChemicalSpecies {name: $name})
+                SET n.category = COALESCE(n.category, $category),
+                    n.cas_number = COALESCE(n.cas_number, $cas_number),
+                    n.molecular_formula = COALESCE(n.molecular_formula, $molecular_formula),
+                    n.description = COALESCE(n.description, $description),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                """,
+                {"name": name, "category": category,
+                 "cas_number": cas_number, "molecular_formula": molecular_formula,
+                 "description": description, "ev": evidence_json},
+            )
+        return name
+
+    def create_reaction(
+        self, name: str, category: str = "", description: str = "",
+        conditions: str = "", evidence_json: str = "",
+    ) -> str:
+        """Create or merge a Reaction node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:Reaction {name: $name})
+                SET n.category = COALESCE(n.category, $category),
+                    n.description = COALESCE(n.description, $description),
+                    n.conditions = COALESCE(n.conditions, $conditions),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                """,
+                {"name": name, "category": category,
+                 "description": description, "conditions": conditions,
+                 "ev": evidence_json},
+            )
+        return name
+
+    def create_process_relationship(
+        self, source_label: str, source_name: str,
+        target_label: str, target_name: str,
+        rel_type: str, evidence_json: str = "",
+        properties: dict = None,
+    ) -> bool:
+        """Create a process-semantic relationship with provenance.
+
+        Only allows relationship types defined in PROCESS_RELATIONSHIPS.
+        Returns True if the relationship was created/updated.
+        """
+        from process_semantics import PROCESS_RELATIONSHIPS
+        if rel_type not in PROCESS_RELATIONSHIPS:
+            return False
+
+        prop_sets = ""
+        params = {
+            "src_name": source_name,
+            "tgt_name": target_name,
+            "ev": evidence_json,
+        }
+        if properties:
+            for k, v in properties.items():
+                param_key = f"prop_{k}"
+                prop_sets += f", r.{k} = ${param_key}"
+                params[param_key] = v
+
+        with self.session() as session:
+            session.run(
+                f"""
+                MATCH (src:{source_label} {{name: $src_name}})
+                MATCH (tgt:{target_label} {{name: $tgt_name}})
+                MERGE (src)-[r:{rel_type}]->(tgt)
+                SET r.evidence_items = CASE
+                        WHEN $ev = '' THEN r.evidence_items
+                        WHEN r.evidence_items IS NULL THEN $ev
+                        ELSE r.evidence_items + $ev
+                    END,
+                    r.last_evidence_at = datetime(){prop_sets}
+                """,
+                params,
+            )
+        return True
+
+    def get_process_context_for_equipment(self, equipment_name: str) -> Dict:
+        """Get process-semantic context for an equipment node.
+
+        Returns media handled, operations performed, operating envelopes,
+        and connected tags with their physical principles.
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (e:Equipment {name: $name})
+                OPTIONAL MATCH (e)-[:HANDLES_MEDIUM]->(pm:ProcessMedium)
+                OPTIONAL MATCH (e)-[:PERFORMS_OPERATION]->(uo:UnitOperation)
+                OPTIONAL MATCH (e)-[:HAS_OPERATING_ENVELOPE]->(oe:OperatingEnvelope)
+                OPTIONAL MATCH (e)<-[:MAPS_TO_SCADA]-(a:AOI)-[:IMPLEMENTS_CONTROL_OF]->(uo2:UnitOperation)
+                RETURN e.name AS name,
+                       collect(DISTINCT pm.name) AS media,
+                       collect(DISTINCT uo.name) AS operations,
+                       collect(DISTINCT {name: oe.name, parameter: oe.parameter,
+                                         normal_low: oe.normal_low, normal_high: oe.normal_high,
+                                         unit: oe.unit}) AS envelopes,
+                       collect(DISTINCT uo2.name) AS controlled_operations
+                """,
+                {"name": equipment_name},
+            )
+            record = result.single()
+            if not record:
+                return {}
+            return dict(record)
+
+    def get_process_context_for_tag(self, tag_name: str) -> Dict:
+        """Get process-semantic context for a SCADA tag."""
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (t:ScadaTag {name: $name})
+                OPTIONAL MATCH (t)-[:MEASURES]->(pp:PhysicalPrinciple)
+                OPTIONAL MATCH (t)-[:MONITORS_ENVELOPE]->(oe:OperatingEnvelope)
+                RETURN t.name AS name,
+                       collect(DISTINCT pp.name) AS measures,
+                       collect(DISTINCT {name: oe.name, parameter: oe.parameter,
+                                         normal_low: oe.normal_low, normal_high: oe.normal_high,
+                                         unit: oe.unit}) AS envelopes
+                """,
+                {"name": tag_name},
+            )
+            record = result.single()
+            if not record:
+                return {}
+            return dict(record)
+
+    # =========================================================================
     # Query Operations
     # =========================================================================
 
@@ -4192,12 +4599,22 @@ def main():
             "tia-projects",
             "tia-project-resources",
             "db-connections",
+            "init-agent-schema",
+            "list-anomaly-events",
+            "get-anomaly-event",
+            "cleanup-anomaly-events",
         ],
         help="Command to execute",
     )
     parser.add_argument("--file", "-f", help="JSON file for import/export")
     parser.add_argument("--query", "-q", help="Query string for search")
     parser.add_argument("--project", "-p", help="Project name for project-resources")
+    parser.add_argument("--event-id", help="Event ID for get-anomaly-event")
+    parser.add_argument("--state", help="Filter anomaly events by state")
+    parser.add_argument("--severity", help="Filter anomaly events by severity")
+    parser.add_argument("--run-id", help="Filter anomaly events by run_id")
+    parser.add_argument("--limit", type=int, default=100, help="Limit results for list commands")
+    parser.add_argument("--retention-days", type=int, default=14, help="Retention window in days")
     parser.add_argument("--json", action="store_true", help="Output in JSON format")
     parser.add_argument(
         "--enrichment-status",
@@ -4437,7 +4854,43 @@ def main():
                         f"  {c['name']} ({c['database_type']}) "
                         f"- {c['url']} [{enabled}]"
                     )
+        elif args.command == "init-agent-schema":
+            graph.init_agent_monitoring_schema()
+            print("[OK] Initialized agent monitoring schema")
 
+        elif args.command == "list-anomaly-events":
+            events = graph.list_anomaly_events(
+                limit=args.limit,
+                state=args.state,
+                severity=args.severity,
+                run_id=args.run_id,
+            )
+            if args.json:
+                print(json_module.dumps(events))
+            else:
+                print(f"Anomaly events: {len(events)}")
+                for event in events:
+                    print(
+                        f"- {event.get('event_id')} {event.get('severity')} "
+                        f"{event.get('summary', '')[:80]}"
+                    )
+
+        elif args.command == "get-anomaly-event":
+            if not args.event_id:
+                print("[ERROR] --event-id required for get-anomaly-event")
+                return
+            event = graph.get_anomaly_event(args.event_id)
+            if args.json:
+                print(json_module.dumps(event or {}))
+            else:
+                if not event:
+                    print(f"[ERROR] Event not found: {args.event_id}")
+                    return
+                print(json_module.dumps(event, indent=2))
+
+        elif args.command == "cleanup-anomaly-events":
+            deleted = graph.cleanup_anomaly_events(args.retention_days)
+            print(f"[OK] Deleted {deleted} anomaly events older than {args.retention_days} days")
 
 if __name__ == "__main__":
     main()

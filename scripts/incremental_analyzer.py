@@ -844,7 +844,37 @@ class IncrementalAnalyzer:
                     "hmi": item.get("hmi", ""),
                 }
 
+        # Inject process-semantic context when available
+        if item_type in ("Equipment", "AOI", "ScadaTag"):
+            context["process_semantics"] = self._get_process_context_for_items(
+                item_type, items
+            )
+
         return context
+
+    def _get_process_context_for_items(
+        self, item_type: str, items: List[Dict]
+    ) -> Dict[str, Any]:
+        """Fetch process-semantic context (media, operations, envelopes) for items."""
+        ctx: Dict[str, Any] = {}
+        for item in items:
+            name = item.get("name", "")
+            if not name:
+                continue
+            try:
+                if item_type == "Equipment":
+                    pctx = self._graph.get_process_context_for_equipment(name)
+                elif item_type == "ScadaTag":
+                    pctx = self._graph.get_process_context_for_tag(name)
+                elif item_type == "AOI":
+                    pctx = self._graph.get_process_context_for_equipment(name)
+                else:
+                    continue
+                if pctx and any(pctx.get(k) for k in pctx if k != "name"):
+                    ctx[name] = pctx
+            except Exception:
+                pass
+        return ctx
 
     def _get_system_prompt(self, item_type: str) -> str:
         """Get the system prompt for analyzing a specific item type."""
@@ -997,6 +1027,27 @@ displays and what operator tasks it supports.
                     parts.append(f"Mapped to PLC AOIs: {ctx['aois']}")
                 if ctx.get("udts"):
                     parts.append(f"Displays UDTs: {ctx['udts']}")
+
+            # Add process-semantic context if available
+            process_ctx = context.get("process_semantics", {}).get(name, {})
+            if process_ctx:
+                if process_ctx.get("media"):
+                    parts.append(f"Handles media: {process_ctx['media']}")
+                if process_ctx.get("operations"):
+                    parts.append(f"Performs operations: {process_ctx['operations']}")
+                if process_ctx.get("envelopes"):
+                    envs = process_ctx["envelopes"]
+                    env_strs = []
+                    for e in envs:
+                        if isinstance(e, dict) and e.get("name"):
+                            rng = f"{e.get('normal_low', '?')}–{e.get('normal_high', '?')} {e.get('unit', '')}"
+                            env_strs.append(f"{e['parameter']}: {rng}")
+                    if env_strs:
+                        parts.append(f"Operating envelopes: {', '.join(env_strs)}")
+                if process_ctx.get("measures"):
+                    parts.append(f"Measures: {process_ctx['measures']}")
+                if process_ctx.get("controlled_operations"):
+                    parts.append(f"Controls operations: {process_ctx['controlled_operations']}")
 
             parts.append("")
 

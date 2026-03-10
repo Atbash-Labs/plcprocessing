@@ -60,6 +60,10 @@ contextBridge.exposeInMainWorld('api', {
   graphAiPropose: (description) => ipcRenderer.invoke('graph:ai-propose', description),
   graphAiExplain: (nodeNames) => ipcRenderer.invoke('graph:ai-explain', nodeNames),
   
+  // Artifact Ingestion (P&IDs, SOPs, Engineering Diagrams via GPT-5.4)
+  ingestArtifact: (filePath, sourceKind) => ipcRenderer.invoke('ingest-artifact', filePath, sourceKind),
+  ingestArtifactBatch: (files) => ipcRenderer.invoke('ingest-artifact-batch', files),
+
   // DEXPI P&ID Conversion API
   dexpiConvert: (options) => ipcRenderer.invoke('dexpi:convert', options),
   dexpiExport: () => ipcRenderer.invoke('dexpi:export'),
@@ -70,6 +74,19 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   testIgnitionConnection: (options) => ipcRenderer.invoke('test-ignition-connection', options),
+
+  // Long-running agents monitoring
+  agentsStart: (config) => ipcRenderer.invoke('agents:start', config),
+  agentsStatus: (runId) => ipcRenderer.invoke('agents:status', runId),
+  agentsStop: (runId) => ipcRenderer.invoke('agents:stop', runId),
+  agentsListEvents: (filters) => ipcRenderer.invoke('agents:list-events', filters),
+  agentsGetEvent: (eventId) => ipcRenderer.invoke('agents:get-event', eventId),
+  agentsAckEvent: (eventId, note) => ipcRenderer.invoke('agents:ack-event', eventId, note),
+  agentsClearEvent: (eventId, note) => ipcRenderer.invoke('agents:clear-event', eventId, note),
+  agentsDeepAnalyze: (eventId, eventData) => ipcRenderer.invoke('agents:deep-analyze', eventId, eventData),
+  agentsCleanup: (retentionDays) => ipcRenderer.invoke('agents:cleanup', retentionDays),
+  agentsStartSubsystem: (subId) => ipcRenderer.invoke('agents:start-subsystem', subId),
+  agentsStopSubsystem: (subId) => ipcRenderer.invoke('agents:stop-subsystem', subId),
   
   // Database connections
   getDbConnections: () => ipcRenderer.invoke('get-db-connections'),
@@ -91,6 +108,26 @@ contextBridge.exposeInMainWorld('api', {
     const handler = (event, data) => callback(data);
     ipcRenderer.on('stream-complete', handler);
     return () => ipcRenderer.removeListener('stream-complete', handler);
+  },
+  onAgentStatus: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('agent-status', handler);
+    return () => ipcRenderer.removeListener('agent-status', handler);
+  },
+  onAgentEvent: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('agent-event', handler);
+    return () => ipcRenderer.removeListener('agent-event', handler);
+  },
+  onAgentError: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('agent-error', handler);
+    return () => ipcRenderer.removeListener('agent-error', handler);
+  },
+  onAgentComplete: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('agent-complete', handler);
+    return () => ipcRenderer.removeListener('agent-complete', handler);
   }
 });
 

@@ -838,6 +838,17 @@ class GraphRenderer {
       'HMIScreen': 'siemens-hmi', 'hmiscreen': 'siemens-hmi',
       'PLCTagTable': 'plc', 'plctagtable': 'plc',
       'PLCTag': 'plc', 'plctag': 'plc',
+      // Process-semantic layer
+      'ProcessMedium': 'process', 'processmedium': 'process',
+      'UnitOperation': 'process', 'unitoperation': 'process',
+      'OperatingEnvelope': 'process', 'operatingenvelope': 'process',
+      'PhysicalPrinciple': 'process', 'physicalprinciple': 'process',
+      'ChemicalSpecies': 'process', 'chemicalspecies': 'process',
+      'Reaction': 'process', 'reaction': 'process',
+      // Anomaly + safety
+      'AgentRun': 'anomaly', 'agentrun': 'anomaly',
+      'AnomalyEvent': 'anomaly', 'anomalyevent': 'anomaly',
+      'SafetyElement': 'safety', 'safetyelement': 'safety',
     };
     return typeMap[type] || 'other';
   }
@@ -855,6 +866,11 @@ class GraphRenderer {
       'mes': '#00897B',
       'siemens': '#0288D1',
       'siemens-hmi': '#0097A7',
+      'process': '#00ACC1',
+      'anomaly': '#F44336',
+      'safety': '#D32F2F',
+      'patterns': '#795548',
+      'flows': '#E91E63',
       'other': '#9E9E9E'
     };
     const group = this._getGroupForType(type);

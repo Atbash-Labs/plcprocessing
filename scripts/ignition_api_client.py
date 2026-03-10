@@ -17,12 +17,17 @@ Configuration via environment variables:
 import os
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, quote
 
 import requests
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional fallback for minimal envs
+    def load_dotenv(*_args, **_kwargs):
+        return False
 
 load_dotenv()
 
@@ -235,7 +240,11 @@ class IgnitionApiClient:
                 for p in normalised
             ]
 
-        return self._parse_tags_response(normalised, data)
+        return self._parse_tags_response(
+            normalised,
+            data,
+            fallback_timestamp=datetime.now(timezone.utc).isoformat(),
+        )
 
     # --------------------------------------------------------------------- #
     #  Tag history – WebDev module endpoint
@@ -243,60 +252,55 @@ class IgnitionApiClient:
 
     @staticmethod
     def _local_iso_to_utc(dt_str: str) -> str:
-        """Convert a bare ISO datetime string (assumed local) to UTC.
+        """
+        Convert a bare ISO datetime string (assumed local time) to UTC.
 
-        If the string already has a timezone indicator (Z, +, -)
-        or looks like epoch milliseconds, it is returned unchanged.
+        If the input already contains timezone info or appears to be epoch
+        milliseconds, it is returned unchanged.
         """
         from datetime import datetime, timezone
 
-        s = str(dt_str).strip()
+        text = str(dt_str).strip()
+        if not text:
+            return text
 
-        # Epoch ms – pass through
-        if s.isdigit():
-            return s
+        # Epoch millis (or seconds) should pass through unchanged.
+        if text.isdigit():
+            return text
 
-        # Already has TZ info – pass through
-        if s.endswith("Z") or "+" in s[10:] or s[10:].count("-") > 0:
-            return s
+        # Already timezone-aware.
+        if text.endswith("Z") or "+" in text[10:] or text[10:].count("-") > 0:
+            return text
 
         try:
-            naive = datetime.fromisoformat(s)
-            local_dt = naive.astimezone()          # attach local TZ
+            naive = datetime.fromisoformat(text)
+            local_dt = naive.astimezone()
             utc_dt = local_dt.astimezone(timezone.utc)
             return utc_dt.strftime("%Y-%m-%dT%H:%M:%S")
         except (ValueError, TypeError):
-            return s
+            return text
 
     def query_tag_history(
         self,
         tag_paths: List[str],
         start_date: str,
         end_date: str,
-        return_size: int = 100,
+        return_size: int = 200,
         aggregation_mode: str = "Average",
         return_format: str = "Wide",
         interval_minutes: Optional[int] = None,
         include_bounding_values: bool = False,
     ) -> Optional[Any]:
-        """Query historical tag values via the WebDev queryTagHistory endpoint.
-
-        Bare ISO datetime strings (no timezone suffix) are assumed to be in
-        the server's local timezone and are converted to UTC before sending
-        to the gateway (which interprets all times as UTC).
-
-        Args:
-            tag_paths: Tag paths with provider prefix, e.g. ['[default]Folder/Tag'].
-            start_date: ISO datetime string (local) or epoch ms.
-            end_date: ISO datetime string (local) or epoch ms.
-            return_size: Max rows to return (default 100).
-            aggregation_mode: Average, MinMax, LastValue, Sum, Minimum, Maximum.
-            return_format: Wide or Tall.
-            interval_minutes: Aggregation interval in minutes.
-            include_bounding_values: Include values at boundaries.
         """
-        normalised = [self._ensure_provider_prefix(p) for p in tag_paths]
+        Query historical tag values from the WebDev queryTagHistory endpoint.
 
+        Dates may be passed as local ISO strings; they are converted to UTC
+        to match Ignition endpoint expectations.
+        """
+        if not tag_paths:
+            return {"error": "No tag paths provided", "tagPaths": []}
+
+        normalised = [self._ensure_provider_prefix(p) for p in tag_paths]
         utc_start = self._local_iso_to_utc(start_date)
         utc_end = self._local_iso_to_utc(end_date)
 
@@ -304,19 +308,17 @@ class IgnitionApiClient:
             "tagPaths": ",".join(normalised),
             "startDate": utc_start,
             "endDate": utc_end,
-            "returnSize": return_size,
+            "returnSize": int(return_size),
             "aggregationMode": aggregation_mode,
             "returnFormat": return_format,
-            "includeBoundingValues": str(include_bounding_values).lower(),
+            "includeBoundingValues": str(bool(include_bounding_values)).lower(),
         }
         if interval_minutes is not None:
-            params["intervalMinutes"] = interval_minutes
+            params["intervalMinutes"] = int(interval_minutes)
 
         data = self._get("system/webdev/Axilon/queryTagHistory", params=params)
-
         if data is None:
             return {"error": "API request failed or not configured", "tagPaths": normalised}
-
         return data
 
     # --------------------------------------------------------------------- #
@@ -347,11 +349,36 @@ class IgnitionApiClient:
             return path
         return f"[default]{path}"
 
-    _TAG_ITEM_KNOWN_KEYS = {"value", "quality", "tagPath", "isGood",
-                             "timestamp", "t", "dataType", "data_type"}
+    _TAG_ITEM_KNOWN_KEYS = {
+        "value",
+        "v",
+        "quality",
+        "q",
+        "tagPath",
+        "path",
+        "fullPath",
+        "isGood",
+        "timestamp",
+        "t",
+        "ts",
+        "time",
+        "timeStamp",
+        "dateTime",
+        "datetime",
+        "lastChange",
+        "lastChanged",
+        "timestampMs",
+        "eventTime",
+        "dataType",
+        "data_type",
+    }
 
     @staticmethod
-    def _parse_tags_response(paths: List[str], data: Any) -> List["TagValue"]:
+    def _parse_tags_response(
+        paths: List[str],
+        data: Any,
+        fallback_timestamp: Optional[str] = None,
+    ) -> List["TagValue"]:
         """Parse the response from the WebDev getTags endpoint.
 
         Expected shape: {"allGood": bool, "success": bool, "count": N,
@@ -370,9 +397,41 @@ class IgnitionApiClient:
             return [TagValue(path=p, value=data, quality="Unknown") for p in paths]
 
         by_path: Dict[str, dict] = {}
+
+        def extract_item_path(item: Dict[str, Any]) -> Optional[str]:
+            for key in ("tagPath", "path", "fullPath"):
+                val = item.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            return None
+
+        def extract_item_timestamp(item: Dict[str, Any]) -> Optional[str]:
+            for key in (
+                "timestamp",
+                "t",
+                "ts",
+                "time",
+                "timeStamp",
+                "dateTime",
+                "datetime",
+                "lastChange",
+                "lastChanged",
+                "timestampMs",
+                "eventTime",
+            ):
+                val = item.get(key)
+                if val is None:
+                    continue
+                text = str(val).strip()
+                if text:
+                    return text
+            return None
+
         for item in items:
-            if isinstance(item, dict) and "tagPath" in item:
-                by_path[item["tagPath"]] = item
+            if isinstance(item, dict):
+                item_path = extract_item_path(item)
+                if item_path:
+                    by_path[item_path] = item
 
         results: List[TagValue] = []
         for i, path in enumerate(paths):
@@ -383,13 +442,22 @@ class IgnitionApiClient:
             if item is None:
                 results.append(TagValue(path=path, error="No data returned for this path"))
             elif isinstance(item, dict):
+                ts = extract_item_timestamp(item)
+                inferred_timestamp = False
+                if not ts and fallback_timestamp:
+                    ts = fallback_timestamp
+                    inferred_timestamp = True
                 extra = {k: v for k, v in item.items()
                          if k not in IgnitionApiClient._TAG_ITEM_KNOWN_KEYS} or None
+                if inferred_timestamp:
+                    if extra is None:
+                        extra = {}
+                    extra["timestamp_inferred"] = True
                 results.append(TagValue(
-                    path=item.get("tagPath", path),
-                    value=item.get("value"),
-                    quality=str(item.get("quality", "Good" if item.get("isGood") else "Unknown")),
-                    timestamp=item.get("timestamp") or item.get("t"),
+                    path=extract_item_path(item) or path,
+                    value=item.get("value", item.get("v")),
+                    quality=str(item.get("quality", item.get("q", "Good" if item.get("isGood") else "Unknown"))),
+                    timestamp=ts,
                     data_type=item.get("dataType") or item.get("data_type"),
                     config=extra,
                 ))

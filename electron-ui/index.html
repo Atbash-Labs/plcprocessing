@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://unpkg.com;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://unpkg.com;">
   <title>Axilon</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -35,6 +35,13 @@
             <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
           </svg>
           <span class="nav-label">Assist</span>
+        </button>
+        <button class="nav-btn" data-tab="agents" title="Long-Running Agents">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 5h7v7H4zM13 5h7v7h-7zM4 14h7v7H4z"/>
+            <path d="M16.5 14.5l1.5 1.5 3-3"/>
+          </svg>
+          <span class="nav-label">Agents</span>
         </button>
         <button class="nav-btn" data-tab="database" title="Database">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -212,6 +219,33 @@
             <button class="btn btn-primary" id="btn-ingest-workbench">Select Folder</button>
           </div>
           
+          <div class="card">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="12" y1="18" x2="12" y2="12"/>
+                <line x1="9" y1="15" x2="12" y2="12"/>
+                <line x1="15" y1="15" x2="12" y2="12"/>
+              </svg>
+            </div>
+            <h3>P&IDs / SOPs / Diagrams</h3>
+            <p>Import process documents — GPT-5.4 extracts equipment, media, operations, and links them to the ontology</p>
+            <div class="form-group" style="margin-top: 0.5rem;">
+              <select id="artifact-source-kind" class="input input-sm" style="width: 100%;">
+                <option value="pid">P&ID (image or PDF)</option>
+                <option value="sop">SOP (text or PDF)</option>
+                <option value="diagram">Engineering Diagram</option>
+              </select>
+            </div>
+            <div style="display: flex; gap: 0.5rem;">
+              <button class="btn btn-primary" id="btn-select-artifact">Select File(s)</button>
+              <button class="btn btn-secondary" id="btn-ingest-artifact" disabled>Ingest</button>
+            </div>
+            <div id="artifact-file-list" class="text-sm text-muted" style="margin-top: 0.25rem;"></div>
+            <div id="artifact-ingest-status" class="text-sm" style="margin-top: 0.25rem; display: none;"></div>
+          </div>
+
           <div class="card">
             <div class="card-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -532,6 +566,75 @@
         </div>
       </section>
 
+      <!-- Agents Tab -->
+      <section class="tab-content" id="tab-agents">
+        <header class="tab-header">
+          <h2>Subsystem Agents</h2>
+          <p>Per-subsystem anomaly monitoring with independent agent threads</p>
+        </header>
+
+        <div class="agents-topbar">
+          <div class="agents-run-controls">
+            <button class="btn btn-primary" id="btn-agents-start">Start All Agents</button>
+            <button class="btn btn-secondary" id="btn-agents-stop" disabled>Stop All</button>
+            <button class="btn btn-ghost" id="btn-agents-refresh">Refresh Events</button>
+            <button class="btn btn-ghost" id="btn-agents-cleanup">Cleanup Old</button>
+          </div>
+          <div class="agents-run-status">
+            <span class="status-chip" id="agents-status-chip">Idle</span>
+            <span class="agents-status-text" id="agents-status-text">No active run</span>
+          </div>
+        </div>
+
+        <div class="agents-config-row">
+          <label>Poll (ms)</label>
+          <input class="input input-sm" id="agents-config-poll-ms" type="number" min="1000" step="1000" value="1000">
+          <label>History (min)</label>
+          <input class="input input-sm" id="agents-config-history-min" type="number" min="10" step="10" value="360">
+          <label>Min Points</label>
+          <input class="input input-sm" id="agents-config-min-points" type="number" min="10" step="5" value="30">
+          <label class="agents-toggle-label">
+            <input type="checkbox" id="agents-config-auto-llm"> Auto LLM
+          </label>
+          <label>Max/Cycle</label>
+          <input class="input input-sm" id="agents-config-max-llm" type="number" min="1" step="1" value="5">
+          <label>Z</label>
+          <input class="input input-sm" id="agents-config-threshold-z" type="number" min="0.5" step="0.5" value="3">
+          <label>MAD</label>
+          <input class="input input-sm" id="agents-config-threshold-mad" type="number" min="0.5" step="0.5" value="3.5">
+          <label>Stale (sec)</label>
+          <input class="input input-sm" id="agents-config-staleness-sec" type="number" min="10" step="10" value="120">
+        </div>
+
+        <div class="agents-health-section">
+          <div class="agents-health-header">
+            <h3>Subsystem Agents</h3>
+            <div class="agents-health-actions">
+              <div class="agents-feed-filters">
+                <select class="input input-sm" id="agents-filter-state">
+                  <option value="">All states</option>
+                  <option value="open">Open</option>
+                  <option value="acknowledged">Acknowledged</option>
+                  <option value="cleared">Cleared</option>
+                </select>
+                <select class="input input-sm" id="agents-filter-severity">
+                  <option value="">All severity</option>
+                  <option value="critical">Critical</option>
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+                <input class="input input-sm" id="agents-filter-search" placeholder="Search tag/equipment">
+              </div>
+              <button class="btn btn-ghost btn-sm" id="btn-agents-clear-subsystem" style="display:none">Show All</button>
+            </div>
+          </div>
+          <div class="agents-health-grid" id="agents-health-grid">
+            <div class="agents-health-empty">Start monitoring to see subsystem agents.</div>
+          </div>
+        </div>
+      </section>
+
       <!-- Database Tab -->
       <section class="tab-content" id="tab-database">
         <header class="tab-header">
@@ -630,7 +733,9 @@
                   <option value="siemens-hmi">Siemens HMI</option>
                   <option value="mes">MES Layer</option>
                   <option value="troubleshooting">Troubleshooting</option>
+                  <option value="anomaly">Anomalies</option>
                   <option value="flows">Flows</option>
+                  <option value="process">Process Layer</option>
                 </select>
               </div>
               <div class="toolbar-separator"></div>
@@ -724,6 +829,24 @@
                     <div class="legend-item">
                       <span class="legend-color" style="background: #0097A7;"></span>
                       <span class="legend-label">HMI (Alarm / Screen / Script)</span>
+                    </div>
+                  </div>
+                  <div class="legend-group">
+                    <div class="legend-group-title">Process Layer</div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: #00ACC1;"></span>
+                      <span class="legend-label">Medium / Operation / Envelope</span>
+                    </div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: #00ACC1;"></span>
+                      <span class="legend-label">Principle / Species / Reaction</span>
+                    </div>
+                  </div>
+                  <div class="legend-group">
+                    <div class="legend-group-title">Anomalies</div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: #F44336;"></span>
+                      <span class="legend-label">Agent Run / Event</span>
                     </div>
                   </div>
                   <div class="legend-group">
@@ -886,6 +1009,14 @@
                       <option value="Material">Material</option>
                       <option value="Batch">Batch</option>
                       <option value="Operation">Operation</option>
+                    </optgroup>
+                    <optgroup label="Process">
+                      <option value="ProcessMedium">ProcessMedium</option>
+                      <option value="UnitOperation">UnitOperation</option>
+                      <option value="OperatingEnvelope">OperatingEnvelope</option>
+                      <option value="PhysicalPrinciple">PhysicalPrinciple</option>
+                      <option value="ChemicalSpecies">ChemicalSpecies</option>
+                      <option value="Reaction">Reaction</option>
                     </optgroup>
                   </select>
                 </div>
@@ -1400,6 +1531,14 @@ Execution time: 12ms</code>
               <div class="legend-item">
                 <span class="legend-color" style="background: #0097A7;"></span>
                 <span class="legend-label">Siemens HMI</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-color" style="background: #00ACC1;"></span>
+                <span class="legend-label">Process (Medium/Op/Principle)</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-color" style="background: #F44336;"></span>
+                <span class="legend-label">Anomalies</span>
               </div>
             </div>
           </div>
