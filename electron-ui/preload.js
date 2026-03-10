@@ -60,6 +60,10 @@ contextBridge.exposeInMainWorld('api', {
   graphAiPropose: (description) => ipcRenderer.invoke('graph:ai-propose', description),
   graphAiExplain: (nodeNames) => ipcRenderer.invoke('graph:ai-explain', nodeNames),
   
+  // Artifact Ingestion (P&IDs, SOPs, Engineering Diagrams via GPT-5.4)
+  ingestArtifact: (filePath, sourceKind) => ipcRenderer.invoke('ingest-artifact', filePath, sourceKind),
+  ingestArtifactBatch: (files) => ipcRenderer.invoke('ingest-artifact-batch', files),
+
   // DEXPI P&ID Conversion API
   dexpiConvert: (options) => ipcRenderer.invoke('dexpi:convert', options),
   dexpiExport: () => ipcRenderer.invoke('dexpi:export'),

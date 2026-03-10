@@ -1834,7 +1834,7 @@ async function loadGraphData() {
   if (loading) loading.classList.add('active');
   
   try {
-    const result = await window.api.graphLoad({ limit: 500 });
+    const result = await window.api.graphLoad({});
     
     if (result.success && graphRenderer) {
       graphRenderer.loadData(result);
@@ -2113,11 +2113,47 @@ document.getElementById('graph-search')?.addEventListener('input', (e) => {
   }
 });
 
-document.getElementById('graph-filter')?.addEventListener('change', (e) => {
-  if (graphRenderer) {
-    graphRenderer.filterByType(e.target.value);
+const GRAPH_FILTER_LABELS = {
+  plc: ['AOI', 'Tag', 'PLCTagTable', 'PLCTag'],
+  scada: ['UDT', 'Equipment', 'View', 'ViewComponent', 'ScadaTag', 'Script', 'NamedQuery', 'Project', 'GatewayEvent'],
+  siemens: ['TiaProject', 'PLCDevice', 'HMIDevice', 'HMIConnection'],
+  'siemens-hmi': ['HMIAlarm', 'HMIAlarmClass', 'HMIScript', 'HMIScreen', 'HMITagTable', 'HMITextList'],
+  mes: ['Material', 'Batch', 'ProductionOrder', 'Operation', 'CriticalControlPoint', 'ProcessDeviation'],
+  troubleshooting: ['FaultSymptom', 'FaultCause', 'OperatorPhrase', 'CommonPhrase', 'Intent'],
+  anomaly: ['AgentRun', 'AnomalyEvent'],
+  flows: ['DataFlow', 'EndToEndFlow'],
+  process: ['ProcessMedium', 'UnitOperation', 'OperatingEnvelope', 'PhysicalPrinciple', 'ChemicalSpecies', 'Reaction'],
+};
+
+document.getElementById('graph-filter')?.addEventListener('change', async (e) => {
+  const value = e.target.value;
+  if (value === 'all') {
+    await loadGraphData();
+  } else if (GRAPH_FILTER_LABELS[value]) {
+    await loadGraphDataFiltered(GRAPH_FILTER_LABELS[value]);
+  } else {
+    if (graphRenderer) graphRenderer.filterByType(value);
   }
 });
+
+async function loadGraphDataFiltered(nodeTypes) {
+  const loading = document.getElementById('graph-loading');
+  if (loading) loading.classList.add('active');
+
+  try {
+    const result = await window.api.graphLoad({ types: nodeTypes });
+    if (result.success && graphRenderer) {
+      graphRenderer.loadData(result);
+      if (loading) loading.classList.remove('active');
+    } else {
+      console.error('Failed to load filtered graph:', result.error);
+      if (loading) loading.innerHTML = `<p>Error: ${result.error}</p>`;
+    }
+  } catch (error) {
+    console.error('Failed to load filtered graph:', error);
+    if (loading) loading.innerHTML = `<p>Error: ${error.message}</p>`;
+  }
+}
 
 document.getElementById('btn-layout-force')?.addEventListener('click', () => {
   if (graphRenderer) {
@@ -3379,6 +3415,95 @@ btnSaveSettings?.addEventListener('click', async () => {
     setTimeout(() => { btnSaveSettings.textContent = 'Save Settings'; }, 2000);
   } finally {
     btnSaveSettings.disabled = false;
+  }
+});
+
+// ============================================
+// Artifact Ingestion (P&IDs / SOPs / Diagrams)
+// ============================================
+
+const btnSelectArtifact = document.getElementById('btn-select-artifact');
+const btnIngestArtifact = document.getElementById('btn-ingest-artifact');
+const artifactSourceKind = document.getElementById('artifact-source-kind');
+const artifactFileList = document.getElementById('artifact-file-list');
+const artifactIngestStatus = document.getElementById('artifact-ingest-status');
+
+let selectedArtifactFiles = [];
+
+btnSelectArtifact?.addEventListener('click', async () => {
+  const extensions = ['png', 'jpg', 'jpeg', 'bmp', 'tiff', 'tif', 'webp', 'gif', 'pdf', 'txt', 'md'];
+  const result = await api.selectFile({
+    filters: [{ name: 'Supported Files', extensions }],
+    multiple: true,
+  });
+
+  if (result && result.filePaths && result.filePaths.length > 0) {
+    selectedArtifactFiles = result.filePaths;
+    if (artifactFileList) {
+      artifactFileList.innerHTML = selectedArtifactFiles
+        .map(f => `<div>${f.split(/[\\/]/).pop()}</div>`)
+        .join('');
+    }
+    if (btnIngestArtifact) btnIngestArtifact.disabled = false;
+  }
+});
+
+btnIngestArtifact?.addEventListener('click', async () => {
+  if (selectedArtifactFiles.length === 0) return;
+
+  const sourceKind = artifactSourceKind ? artifactSourceKind.value : 'pid';
+  btnIngestArtifact.disabled = true;
+  btnIngestArtifact.textContent = 'Ingesting...';
+
+  appendOutput(`\n[Artifact Ingest] Processing ${selectedArtifactFiles.length} file(s) as ${sourceKind}...\n`);
+
+  try {
+    const files = selectedArtifactFiles.map(p => ({ path: p, sourceKind }));
+    const result = await api.ingestArtifactBatch(files);
+
+    if (result.success) {
+      if (result.node_details && result.node_details.length > 0) {
+        appendOutput(`[Artifact Ingest] Node updates (${result.node_details.length}):\n`);
+        for (const d of result.node_details) {
+          appendOutput(`  + ${d}\n`);
+        }
+      }
+      if (result.concept_details && result.concept_details.length > 0) {
+        appendOutput(`[Artifact Ingest] Process concepts (${result.concept_details.length}):\n`);
+        for (const d of result.concept_details) {
+          appendOutput(`  + ${d}\n`);
+        }
+      }
+      if (result.relationship_details && result.relationship_details.length > 0) {
+        appendOutput(`[Artifact Ingest] Relationships (${result.relationship_details.length}):\n`);
+        for (const d of result.relationship_details) {
+          appendOutput(`  ~ ${d}\n`);
+        }
+      }
+      appendOutput(
+        `[Artifact Ingest] Summary: ${result.nodes_updated || 0} node updates, ` +
+        `${result.concepts_created || 0} process concepts, ` +
+        `${result.relationships_created || 0} relationships\n`
+      );
+      if (result.errors && result.errors.length > 0) {
+        appendOutput(`[Artifact Ingest] ${result.errors.length} error(s):\n`);
+        for (const err of result.errors) {
+          appendOutput(`  - ${typeof err === 'string' ? err : JSON.stringify(err)}\n`);
+        }
+      }
+      if (artifactIngestStatus) {
+        artifactIngestStatus.style.display = 'block';
+        artifactIngestStatus.textContent =
+          `${result.nodes_updated || 0} updates, ${result.concepts_created || 0} concepts, ${result.relationships_created || 0} rels`;
+      }
+    } else {
+      appendOutput(`[Artifact Ingest] Error: ${result.error || 'Unknown error'}\n`);
+    }
+  } catch (err) {
+    appendOutput(`[Artifact Ingest] Error: ${err.message}\n`);
+  } finally {
+    btnIngestArtifact.disabled = false;
+    btnIngestArtifact.textContent = 'Ingest';
   }
 });
 

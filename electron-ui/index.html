@@ -222,6 +222,33 @@
           <div class="card">
             <div class="card-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="12" y1="18" x2="12" y2="12"/>
+                <line x1="9" y1="15" x2="12" y2="12"/>
+                <line x1="15" y1="15" x2="12" y2="12"/>
+              </svg>
+            </div>
+            <h3>P&IDs / SOPs / Diagrams</h3>
+            <p>Import process documents — GPT-5.4 extracts equipment, media, operations, and links them to the ontology</p>
+            <div class="form-group" style="margin-top: 0.5rem;">
+              <select id="artifact-source-kind" class="input input-sm" style="width: 100%;">
+                <option value="pid">P&ID (image or PDF)</option>
+                <option value="sop">SOP (text or PDF)</option>
+                <option value="diagram">Engineering Diagram</option>
+              </select>
+            </div>
+            <div style="display: flex; gap: 0.5rem;">
+              <button class="btn btn-primary" id="btn-select-artifact">Select File(s)</button>
+              <button class="btn btn-secondary" id="btn-ingest-artifact" disabled>Ingest</button>
+            </div>
+            <div id="artifact-file-list" class="text-sm text-muted" style="margin-top: 0.25rem;"></div>
+            <div id="artifact-ingest-status" class="text-sm" style="margin-top: 0.25rem; display: none;"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
                 <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
               </svg>
@@ -708,6 +735,7 @@
                   <option value="troubleshooting">Troubleshooting</option>
                   <option value="anomaly">Anomalies</option>
                   <option value="flows">Flows</option>
+                  <option value="process">Process Layer</option>
                 </select>
               </div>
               <div class="toolbar-separator"></div>
@@ -801,6 +829,24 @@
                     <div class="legend-item">
                       <span class="legend-color" style="background: #0097A7;"></span>
                       <span class="legend-label">HMI (Alarm / Screen / Script)</span>
+                    </div>
+                  </div>
+                  <div class="legend-group">
+                    <div class="legend-group-title">Process Layer</div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: #00ACC1;"></span>
+                      <span class="legend-label">Medium / Operation / Envelope</span>
+                    </div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: #00ACC1;"></span>
+                      <span class="legend-label">Principle / Species / Reaction</span>
+                    </div>
+                  </div>
+                  <div class="legend-group">
+                    <div class="legend-group-title">Anomalies</div>
+                    <div class="legend-item">
+                      <span class="legend-color" style="background: #F44336;"></span>
+                      <span class="legend-label">Agent Run / Event</span>
                     </div>
                   </div>
                   <div class="legend-group">
@@ -963,6 +1009,14 @@
                       <option value="Material">Material</option>
                       <option value="Batch">Batch</option>
                       <option value="Operation">Operation</option>
+                    </optgroup>
+                    <optgroup label="Process">
+                      <option value="ProcessMedium">ProcessMedium</option>
+                      <option value="UnitOperation">UnitOperation</option>
+                      <option value="OperatingEnvelope">OperatingEnvelope</option>
+                      <option value="PhysicalPrinciple">PhysicalPrinciple</option>
+                      <option value="ChemicalSpecies">ChemicalSpecies</option>
+                      <option value="Reaction">Reaction</option>
                     </optgroup>
                   </select>
                 </div>
@@ -1477,6 +1531,14 @@ Execution time: 12ms</code>
               <div class="legend-item">
                 <span class="legend-color" style="background: #0097A7;"></span>
                 <span class="legend-label">Siemens HMI</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-color" style="background: #00ACC1;"></span>
+                <span class="legend-label">Process (Medium/Op/Principle)</span>
+              </div>
+              <div class="legend-item">
+                <span class="legend-color" style="background: #F44336;"></span>
+                <span class="legend-label">Anomalies</span>
               </div>
             </div>
           </div>

@@ -376,9 +376,11 @@ async function stopActiveAgent(reason = 'stopped_by_user') {
 
 // Select file dialog
 ipcMain.handle('select-file', async (event, options) => {
+  const properties = ['openFile'];
+  if (options && options.multiple) properties.push('multiSelections');
   const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
-    filters: options.filters || [
+    properties,
+    filters: (options && options.filters) || [
       { name: 'All Supported', extensions: ['json', 'sc', 'L5X', 'st', 'xml'] },
       { name: 'Ignition Backup', extensions: ['json'] },
       { name: 'Rockwell PLC', extensions: ['sc', 'L5X'] },
@@ -386,6 +388,9 @@ ipcMain.handle('select-file', async (event, options) => {
       { name: 'TIA Portal XML', extensions: ['xml'] }
     ]
   });
+  if (options && options.multiple) {
+    return { filePaths: result.filePaths || [] };
+  }
   return result.filePaths[0] || null;
 });
 
@@ -1794,4 +1799,43 @@ ipcMain.handle('agents:stop-subsystem', async (event, subsystemId) => {
   if (!activeAgentRun) return { success: false, error: 'No active agent run' };
   const sent = sendAgentCommand({ cmd: 'stop-agent', subsystemId });
   return { success: sent, subsystemId };
+});
+
+// ============================================
+// Artifact Ingestion IPC (P&IDs / SOPs / Diagrams via GPT-5.4)
+// ============================================
+
+ipcMain.handle('ingest-artifact', async (event, filePath, sourceKind = 'pid') => {
+  try {
+    sendToRenderer('stream-output', { text: `Ingesting ${path.basename(filePath)} as ${sourceKind}...\n` });
+    const output = await runPythonScript('artifact_ingest.py', [
+      filePath,
+      '--source-kind', sourceKind,
+      '--verbose',
+      '--json',
+    ], { streaming: true, streamId: 'artifact-ingest' });
+    const result = JSON.parse(output || '{}');
+    return { success: true, ...result };
+  } catch (error) {
+    sendToRenderer('stream-output', { text: `Ingestion error: ${error.message}\n` });
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('ingest-artifact-batch', async (event, files) => {
+  try {
+    const filePaths = files.map(f => f.path);
+    const sourceKind = files[0]?.sourceKind || 'pid';
+    sendToRenderer('stream-output', { text: `Ingesting ${files.length} artifact(s)...\n` });
+    const output = await runPythonScript('artifact_ingest.py', [
+      ...filePaths,
+      '--source-kind', sourceKind,
+      '--verbose',
+      '--json',
+    ], { streaming: true, streamId: 'artifact-ingest' });
+    const result = JSON.parse(output || '{}');
+    return { success: true, ...result };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 });

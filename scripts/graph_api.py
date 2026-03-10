@@ -79,6 +79,13 @@ class GraphAPI:
         "vendor": "mes",
         "agentrun": "anomaly",
         "anomalyevent": "anomaly",
+        # Process-semantic layer
+        "processmedium": "process",
+        "unitoperation": "process",
+        "operatingenvelope": "process",
+        "physicalprinciple": "process",
+        "chemicalspecies": "process",
+        "reaction": "process",
     }
 
     # Color palette for node types
@@ -94,7 +101,38 @@ class GraphAPI:
         "overview": "#607D8B",
         "mes": "#00897B",
         "anomaly": "#F44336",
+        "process": "#00ACC1",
         "other": "#9E9E9E",
+    }
+
+    # Schema-driven contract for the richer ontology.
+    # Maps label -> metadata for display, search, edit, and relationship rules.
+    NODE_LABEL_META = {
+        "AOI":               {"key": "name", "display": "name", "searchable": ["name", "purpose", "description"], "group": "plc"},
+        "Tag":               {"key": "name", "display": "name", "searchable": ["name", "description"],            "group": "plc"},
+        "UDT":               {"key": "name", "display": "name", "searchable": ["name", "purpose"],                "group": "scada"},
+        "Equipment":         {"key": "name", "display": "name", "searchable": ["name", "purpose", "type"],        "group": "scada"},
+        "View":              {"key": "name", "display": "name", "searchable": ["name", "purpose"],                "group": "scada"},
+        "ViewComponent":     {"key": "path", "display": "name", "searchable": ["path", "name", "purpose"],        "group": "scada-component"},
+        "ScadaTag":          {"key": "name", "display": "name", "searchable": ["name", "purpose"],                "group": "scada-tag"},
+        "Script":            {"key": "name", "display": "name", "searchable": ["name", "purpose"],                "group": "scada"},
+        "NamedQuery":        {"key": "name", "display": "name", "searchable": ["name", "purpose"],                "group": "scada"},
+        "FaultSymptom":      {"key": "symptom", "display": "symptom", "searchable": ["symptom"],                  "group": "troubleshooting"},
+        "FaultCause":        {"key": "cause",   "display": "cause",   "searchable": ["cause"],                    "group": "troubleshooting"},
+        "OperatorPhrase":    {"key": "phrase",  "display": "phrase",  "searchable": ["phrase"],                   "group": "troubleshooting"},
+        "Material":          {"key": "name", "display": "name", "searchable": ["name"],                           "group": "mes"},
+        "Batch":             {"key": "name", "display": "name", "searchable": ["name"],                           "group": "mes"},
+        "ProductionOrder":   {"key": "name", "display": "name", "searchable": ["name"],                           "group": "mes"},
+        "Operation":         {"key": "name", "display": "name", "searchable": ["name"],                           "group": "mes"},
+        "CriticalControlPoint": {"key": "name", "display": "name", "searchable": ["name"],                        "group": "mes"},
+        "ProcessMedium":     {"key": "name", "display": "name", "searchable": ["name", "description", "category"], "group": "process"},
+        "UnitOperation":     {"key": "name", "display": "name", "searchable": ["name", "description", "category"], "group": "process"},
+        "OperatingEnvelope": {"key": "name", "display": "name", "searchable": ["name", "parameter"],               "group": "process"},
+        "PhysicalPrinciple": {"key": "name", "display": "name", "searchable": ["name", "category"],                "group": "process"},
+        "ChemicalSpecies":   {"key": "name", "display": "name", "searchable": ["name", "category"],                "group": "process"},
+        "Reaction":          {"key": "name", "display": "name", "searchable": ["name", "category"],                "group": "process"},
+        "AgentRun":          {"key": "run_id", "display": "run_id", "searchable": ["run_id"],                      "group": "anomaly"},
+        "AnomalyEvent":      {"key": "event_id", "display": "summary", "searchable": ["summary", "event_id"],     "group": "anomaly"},
     }
 
     def __init__(self, graph: Optional[OntologyGraph] = None):
@@ -150,7 +188,7 @@ class GraphAPI:
     # =========================================================================
 
     def load_graph(
-        self, node_types: Optional[List[str]] = None, limit: int = 500
+        self, node_types: Optional[List[str]] = None, limit: int = 10000
     ) -> Dict:
         """
         Load graph data for visualization.
@@ -822,6 +860,8 @@ class GraphAPI:
             "nodeTypes": labels,
             "relationshipTypes": sorted(relationships),
             "groups": list(set(self.NODE_GROUPS.values())),
+            "labelMeta": self.NODE_LABEL_META,
+            "groupColors": self.NODE_COLORS,
         }
 
 
@@ -833,7 +873,7 @@ def main():
     # Load graph
     load_parser = subparsers.add_parser("load", help="Load graph data")
     load_parser.add_argument("--types", nargs="*", help="Node types to include")
-    load_parser.add_argument("--limit", type=int, default=500, help="Max nodes")
+    load_parser.add_argument("--limit", type=int, default=10000, help="Max nodes")
 
     # Get neighbors
     neighbors_parser = subparsers.add_parser("neighbors", help="Get node neighbors")
@@ -910,6 +950,15 @@ def main():
     # Schema
     subparsers.add_parser("schema", help="Get graph schema")
 
+    # Ingest artifact
+    ingest_parser = subparsers.add_parser("ingest-artifact", help="Ingest a P&ID/SOP/diagram")
+    ingest_parser.add_argument("file_path", help="Path to the artifact file")
+    ingest_parser.add_argument(
+        "--source-kind", default="pid",
+        choices=["pid", "sop", "diagram"],
+        help="Source type (default: pid)",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -957,6 +1006,10 @@ def main():
             result = api.apply_batch(changes)
         elif args.command == "schema":
             result = api.get_schema()
+        elif args.command == "ingest-artifact":
+            from artifact_ingest import ArtifactIngester
+            ingester = ArtifactIngester(graph=api._get_graph(), verbose=True)
+            result = ingester.ingest_file(args.file_path, args.source_kind)
         else:
             output_error(f"Unknown command: {args.command}")
             return

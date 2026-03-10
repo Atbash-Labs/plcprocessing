@@ -95,6 +95,29 @@ class OntologyGraph:
     - HAS_SCREEN: HMIDevice -> HMIScreen
     - HAS_TEXT_LIST: HMIDevice -> HMITextList
     - MONITORS_TAG: HMIAlarm -> PLCTag
+
+    Process-Semantic Node Types:
+    - ProcessMedium: A material/utility stream (water, steam, product, etc.)
+    - UnitOperation: A canonical plant operation (pumping, heating, mixing, etc.)
+    - OperatingEnvelope: Normal ranges, alarm bands, trip windows for a parameter
+    - PhysicalPrinciple: A measurable physical quantity (temperature, pressure, flow)
+    - ChemicalSpecies: A chemical substance involved in plant processes
+    - Reaction: A chemical or physical transformation step
+
+    Process-Semantic Relationship Types:
+    - HANDLES_MEDIUM: Equipment -> ProcessMedium
+    - PERFORMS_OPERATION: Equipment -> UnitOperation
+    - HAS_OPERATING_ENVELOPE: Equipment -> OperatingEnvelope
+    - MEASURES: ScadaTag -> PhysicalPrinciple
+    - MONITORS_ENVELOPE: ScadaTag -> OperatingEnvelope
+    - IMPLEMENTS_CONTROL_OF: AOI -> UnitOperation
+    - USES_PRINCIPLE: UnitOperation -> PhysicalPrinciple
+    - INVOLVES_SPECIES: Reaction -> ChemicalSpecies
+    - PROCESSES_SPECIES: UnitOperation -> ChemicalSpecies
+    - HAS_REACTION: UnitOperation -> Reaction
+    - MEDIUM_CONTAINS: ProcessMedium -> ChemicalSpecies
+    - ENVELOPE_FOR_PRINCIPLE: OperatingEnvelope -> PhysicalPrinciple
+    - VISUALIZES: ViewComponent -> Equipment
     """
 
     def __init__(self, config: Optional[Neo4jConfig] = None):
@@ -200,6 +223,13 @@ class OntologyGraph:
                 "CREATE INDEX anomalyevent_state IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.state)",
                 "CREATE INDEX anomalyevent_severity IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.severity)",
                 "CREATE INDEX anomalyevent_dedup_key IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.dedup_key)",
+                # Process-semantic layer indexes
+                "CREATE INDEX processmedium_name IF NOT EXISTS FOR (pm:ProcessMedium) ON (pm.name)",
+                "CREATE INDEX unitoperation_name IF NOT EXISTS FOR (uo:UnitOperation) ON (uo.name)",
+                "CREATE INDEX operatingenvelope_name IF NOT EXISTS FOR (oe:OperatingEnvelope) ON (oe.name)",
+                "CREATE INDEX physicalprinciple_name IF NOT EXISTS FOR (pp:PhysicalPrinciple) ON (pp.name)",
+                "CREATE INDEX chemicalspecies_name IF NOT EXISTS FOR (cs:ChemicalSpecies) ON (cs.name)",
+                "CREATE INDEX reaction_name IF NOT EXISTS FOR (rx:Reaction) ON (rx.name)",
             ]
 
             for constraint in constraints:
@@ -2989,6 +3019,280 @@ class OntologyGraph:
             item_data = dict(record["item"])
             context = {k: v for k, v in dict(record).items() if k != "item"}
             return {"item": item_data, "context": context}
+
+    # =========================================================================
+    # Process-Semantic Layer Write Helpers
+    # =========================================================================
+
+    def create_process_medium(
+        self, name: str, category: str = "", phase: str = "",
+        description: str = "", purpose: str = "",
+        evidence_json: str = "",
+    ) -> str:
+        """Create or merge a ProcessMedium node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:ProcessMedium {name: $name})
+                SET n.category = COALESCE(n.category, $category),
+                    n.phase = COALESCE(n.phase, $phase),
+                    n.description = COALESCE(n.description, $description),
+                    n.purpose = COALESCE(n.purpose, $purpose),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                """,
+                {"name": name, "category": category, "phase": phase,
+                 "description": description, "purpose": purpose, "ev": evidence_json},
+            )
+        return name
+
+    def create_unit_operation(
+        self, name: str, category: str = "",
+        description: str = "", purpose: str = "",
+        evidence_json: str = "",
+    ) -> str:
+        """Create or merge a UnitOperation node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:UnitOperation {name: $name})
+                SET n.category = COALESCE(n.category, $category),
+                    n.description = COALESCE(n.description, $description),
+                    n.purpose = COALESCE(n.purpose, $purpose),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                """,
+                {"name": name, "category": category,
+                 "description": description, "purpose": purpose, "ev": evidence_json},
+            )
+        return name
+
+    def create_operating_envelope(
+        self, name: str, parameter: str = "", unit: str = "",
+        low_limit: float = None, low_warning: float = None,
+        normal_low: float = None, normal_high: float = None,
+        high_warning: float = None, high_limit: float = None,
+        trip_low: float = None, trip_high: float = None,
+        description: str = "", evidence_json: str = "",
+    ) -> str:
+        """Create or merge an OperatingEnvelope node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:OperatingEnvelope {name: $name})
+                SET n.parameter = COALESCE(n.parameter, $parameter),
+                    n.unit = COALESCE(n.unit, $unit),
+                    n.description = COALESCE(n.description, $description),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                FOREACH (_ IN CASE WHEN $low_limit IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.low_limit = $low_limit)
+                FOREACH (_ IN CASE WHEN $low_warning IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.low_warning = $low_warning)
+                FOREACH (_ IN CASE WHEN $normal_low IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.normal_low = $normal_low)
+                FOREACH (_ IN CASE WHEN $normal_high IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.normal_high = $normal_high)
+                FOREACH (_ IN CASE WHEN $high_warning IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.high_warning = $high_warning)
+                FOREACH (_ IN CASE WHEN $high_limit IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.high_limit = $high_limit)
+                FOREACH (_ IN CASE WHEN $trip_low IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.trip_low = $trip_low)
+                FOREACH (_ IN CASE WHEN $trip_high IS NOT NULL THEN [1] ELSE [] END |
+                    SET n.trip_high = $trip_high)
+                """,
+                {"name": name, "parameter": parameter, "unit": unit,
+                 "description": description, "ev": evidence_json,
+                 "low_limit": low_limit, "low_warning": low_warning,
+                 "normal_low": normal_low, "normal_high": normal_high,
+                 "high_warning": high_warning, "high_limit": high_limit,
+                 "trip_low": trip_low, "trip_high": trip_high},
+            )
+        return name
+
+    def create_physical_principle(
+        self, name: str, category: str = "", unit_family: str = "",
+        description: str = "", evidence_json: str = "",
+    ) -> str:
+        """Create or merge a PhysicalPrinciple node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:PhysicalPrinciple {name: $name})
+                SET n.category = COALESCE(n.category, $category),
+                    n.unit_family = COALESCE(n.unit_family, $unit_family),
+                    n.description = COALESCE(n.description, $description),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                """,
+                {"name": name, "category": category,
+                 "unit_family": unit_family, "description": description,
+                 "ev": evidence_json},
+            )
+        return name
+
+    def create_chemical_species(
+        self, name: str, category: str = "", cas_number: str = "",
+        molecular_formula: str = "", description: str = "",
+        evidence_json: str = "",
+    ) -> str:
+        """Create or merge a ChemicalSpecies node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:ChemicalSpecies {name: $name})
+                SET n.category = COALESCE(n.category, $category),
+                    n.cas_number = COALESCE(n.cas_number, $cas_number),
+                    n.molecular_formula = COALESCE(n.molecular_formula, $molecular_formula),
+                    n.description = COALESCE(n.description, $description),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                """,
+                {"name": name, "category": category,
+                 "cas_number": cas_number, "molecular_formula": molecular_formula,
+                 "description": description, "ev": evidence_json},
+            )
+        return name
+
+    def create_reaction(
+        self, name: str, category: str = "", description: str = "",
+        conditions: str = "", evidence_json: str = "",
+    ) -> str:
+        """Create or merge a Reaction node with provenance."""
+        with self.session() as session:
+            session.run(
+                """
+                MERGE (n:Reaction {name: $name})
+                SET n.category = COALESCE(n.category, $category),
+                    n.description = COALESCE(n.description, $description),
+                    n.conditions = COALESCE(n.conditions, $conditions),
+                    n.evidence_items = CASE
+                        WHEN $ev = '' THEN n.evidence_items
+                        WHEN n.evidence_items IS NULL THEN $ev
+                        ELSE n.evidence_items + $ev
+                    END,
+                    n.last_evidence_at = datetime()
+                """,
+                {"name": name, "category": category,
+                 "description": description, "conditions": conditions,
+                 "ev": evidence_json},
+            )
+        return name
+
+    def create_process_relationship(
+        self, source_label: str, source_name: str,
+        target_label: str, target_name: str,
+        rel_type: str, evidence_json: str = "",
+        properties: dict = None,
+    ) -> bool:
+        """Create a process-semantic relationship with provenance.
+
+        Only allows relationship types defined in PROCESS_RELATIONSHIPS.
+        Returns True if the relationship was created/updated.
+        """
+        from process_semantics import PROCESS_RELATIONSHIPS
+        if rel_type not in PROCESS_RELATIONSHIPS:
+            return False
+
+        prop_sets = ""
+        params = {
+            "src_name": source_name,
+            "tgt_name": target_name,
+            "ev": evidence_json,
+        }
+        if properties:
+            for k, v in properties.items():
+                param_key = f"prop_{k}"
+                prop_sets += f", r.{k} = ${param_key}"
+                params[param_key] = v
+
+        with self.session() as session:
+            session.run(
+                f"""
+                MATCH (src:{source_label} {{name: $src_name}})
+                MATCH (tgt:{target_label} {{name: $tgt_name}})
+                MERGE (src)-[r:{rel_type}]->(tgt)
+                SET r.evidence_items = CASE
+                        WHEN $ev = '' THEN r.evidence_items
+                        WHEN r.evidence_items IS NULL THEN $ev
+                        ELSE r.evidence_items + $ev
+                    END,
+                    r.last_evidence_at = datetime(){prop_sets}
+                """,
+                params,
+            )
+        return True
+
+    def get_process_context_for_equipment(self, equipment_name: str) -> Dict:
+        """Get process-semantic context for an equipment node.
+
+        Returns media handled, operations performed, operating envelopes,
+        and connected tags with their physical principles.
+        """
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (e:Equipment {name: $name})
+                OPTIONAL MATCH (e)-[:HANDLES_MEDIUM]->(pm:ProcessMedium)
+                OPTIONAL MATCH (e)-[:PERFORMS_OPERATION]->(uo:UnitOperation)
+                OPTIONAL MATCH (e)-[:HAS_OPERATING_ENVELOPE]->(oe:OperatingEnvelope)
+                OPTIONAL MATCH (e)<-[:MAPS_TO_SCADA]-(a:AOI)-[:IMPLEMENTS_CONTROL_OF]->(uo2:UnitOperation)
+                RETURN e.name AS name,
+                       collect(DISTINCT pm.name) AS media,
+                       collect(DISTINCT uo.name) AS operations,
+                       collect(DISTINCT {name: oe.name, parameter: oe.parameter,
+                                         normal_low: oe.normal_low, normal_high: oe.normal_high,
+                                         unit: oe.unit}) AS envelopes,
+                       collect(DISTINCT uo2.name) AS controlled_operations
+                """,
+                {"name": equipment_name},
+            )
+            record = result.single()
+            if not record:
+                return {}
+            return dict(record)
+
+    def get_process_context_for_tag(self, tag_name: str) -> Dict:
+        """Get process-semantic context for a SCADA tag."""
+        with self.session() as session:
+            result = session.run(
+                """
+                MATCH (t:ScadaTag {name: $name})
+                OPTIONAL MATCH (t)-[:MEASURES]->(pp:PhysicalPrinciple)
+                OPTIONAL MATCH (t)-[:MONITORS_ENVELOPE]->(oe:OperatingEnvelope)
+                RETURN t.name AS name,
+                       collect(DISTINCT pp.name) AS measures,
+                       collect(DISTINCT {name: oe.name, parameter: oe.parameter,
+                                         normal_low: oe.normal_low, normal_high: oe.normal_high,
+                                         unit: oe.unit}) AS envelopes
+                """,
+                {"name": tag_name},
+            )
+            record = result.single()
+            if not record:
+                return {}
+            return dict(record)
 
     # =========================================================================
     # Query Operations
