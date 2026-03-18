@@ -25,6 +25,17 @@ navButtons.forEach(btn => {
   });
 });
 
+function activateTab(tabId) {
+  navButtons.forEach(b => b.classList.remove('active'));
+  document.querySelector(`[data-tab="${tabId}"]`)?.classList.add('active');
+  tabContents.forEach(tab => {
+    tab.classList.remove('active');
+    if (tab.id === `tab-${tabId}`) {
+      tab.classList.add('active');
+    }
+  });
+}
+
 // ============================================
 // Loading Overlay
 // ============================================
@@ -3674,6 +3685,7 @@ const agentsState = {
   selectedSubsystemId: null,
   listenersReady: false,
   subsystemHealth: {},
+  subsystemOrder: [],
   subsystemHistory: {},
   agentStates: {},
   pendingDeepAnalyze: new Set(),
@@ -3765,6 +3777,22 @@ function getFilteredEventsForSubsystem(subId) {
   });
 }
 
+function ensureSubsystemOrder(subId) {
+  if (!subId) return;
+  if (!agentsState.subsystemOrder.includes(subId)) {
+    agentsState.subsystemOrder.push(subId);
+  }
+}
+
+function getPreferredEventIdForSubsystem(subId) {
+  const events = getFilteredEventsForSubsystem(subId);
+  if (!events.length) return null;
+  if (agentsState.selectedEventId && events.some((event) => event.event_id === agentsState.selectedEventId)) {
+    return agentsState.selectedEventId;
+  }
+  return events[0].event_id;
+}
+
 function updateSubsystemHealthFromStatus(payload) {
   const diagnostics = payload.diagnostics || {};
   const phase = diagnostics.phase || '';
@@ -3787,6 +3815,7 @@ function updateSubsystemHealthFromStatus(payload) {
         agentsState.agentStates[sid] = {
           state: 'running', cycleCount: 0, avgCycleMs: 0, totalCandidates: 0, totalTriaged: 0,
         };
+        ensureSubsystemOrder(sid);
       }
     }
   }
@@ -3798,6 +3827,7 @@ function updateSubsystemHealthFromStatus(payload) {
         const sid = sig.subsystemId || subId;
         const healthLevel = computeHealthLevel(sig);
         agentsState.subsystemHealth[sid] = { ...sig, healthLevel };
+        ensureSubsystemOrder(sid);
         if (!agentsState.subsystemHistory[sid]) agentsState.subsystemHistory[sid] = [];
         const history = agentsState.subsystemHistory[sid];
         history.push({
@@ -3892,12 +3922,11 @@ function renderSubsystemHealthGrid() {
     return;
   }
 
-  const severityOrder = { critical: 0, warning: 1, elevated: 2, healthy: 3 };
+  const orderMap = new Map(agentsState.subsystemOrder.map((subId, index) => [subId, index]));
   entries.sort((a, b) => {
-    const sa = severityOrder[a[1].healthLevel] ?? 3;
-    const sb = severityOrder[b[1].healthLevel] ?? 3;
-    if (sa !== sb) return sa - sb;
-    return (b[1].candidate || 0) - (a[1].candidate || 0);
+    const ia = orderMap.get(a[0]) ?? Number.MAX_SAFE_INTEGER;
+    const ib = orderMap.get(b[0]) ?? Number.MAX_SAFE_INTEGER;
+    return ia - ib;
   });
 
   container.innerHTML = entries
@@ -3939,12 +3968,21 @@ function renderSubsystemHealthGrid() {
         const tagRows = renderTagSignalRows(sig.tagSignals || []);
         const tagCount = (sig.tagSignals || []).length;
         const subEvents = getFilteredEventsForSubsystem(subId);
+        const preferredEventId = getPreferredEventIdForSubsystem(subId);
+        if (preferredEventId && preferredEventId !== agentsState.selectedEventId) {
+          agentsState.selectedEventId = preferredEventId;
+        }
         const eventRows = renderSubsystemEventRows(subEvents);
         const eventCount = subEvents.length;
         expandedBody = `
           <div class="health-expanded-body">
             <div class="health-expanded-trend">${bigTrend}</div>
             <div class="health-tag-list-header">
+              <h4>Events</h4>
+              <span>${eventCount} live event${eventCount === 1 ? '' : 's'}</span>
+            </div>
+            <div class="health-event-list">${eventRows}</div>
+            <div class="health-tag-list-header" style="margin-top:var(--space-3)">
               <h4>Tags</h4>
               <span>${tagCount} tags</span>
             </div>
@@ -3952,11 +3990,6 @@ function renderSubsystemHealthGrid() {
               <span>Name</span><span>Trend</span><span>z-score</span><span>Avg</span><span>Current</span>
             </div>
             <div class="health-tag-list">${tagRows}</div>
-            <div class="health-tag-list-header" style="margin-top:var(--space-3)">
-              <h4>Events</h4>
-              <span>${eventCount} events</span>
-            </div>
-            <div class="health-event-list">${eventRows}</div>
           </div>
         `;
       } else {
@@ -3982,7 +4015,7 @@ function renderSubsystemHealthGrid() {
               <span class="health-stat-value">${evaluated}</span>
             </div>
             <div class="health-stat">
-              <span class="health-stat-label">Anomalies</span>
+              <span class="health-stat-label">Candidates</span>
               <span class="health-stat-value${anomalyClass}">${candidates}</span>
             </div>
             <div class="health-stat">
@@ -4024,11 +4057,11 @@ function renderSubsystemHealthGrid() {
     });
   });
 
-  container.querySelectorAll('.health-event-detail-actions .btn-deep-analyze').forEach((btn) => {
+  container.querySelectorAll('.health-event-detail-actions .btn-ai-enrich').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const eventId = btn.getAttribute('data-event-id');
-      if (eventId) deepAnalyzeEvent(eventId, btn);
+      if (eventId) aiEnrichEvent(eventId, btn);
     });
   });
 
@@ -4037,6 +4070,14 @@ function renderSubsystemHealthGrid() {
       e.stopPropagation();
       const eventId = btn.getAttribute('data-event-id');
       if (eventId) acknowledgeEvent(eventId);
+    });
+  });
+
+  container.querySelectorAll('.health-event-detail-actions .btn-create-case').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const eventId = btn.getAttribute('data-event-id');
+      if (eventId) await createCaseFromAgentEvent(eventId, btn);
     });
   });
 
@@ -4091,7 +4132,7 @@ function renderInlineEventDetail(event) {
   const ackLabel = st === 'acknowledged' ? 'Clear' : (st === 'cleared' ? 'Cleared' : 'Acknowledge');
   const ackDisabled = st === 'cleared' ? ' disabled' : '';
   const isPending = agentsState.pendingDeepAnalyze.has(event.event_id);
-  const analyzeLabel = isPending ? 'Analyzing…' : (event.deep_analyzed ? 'Re-Analyze' : 'Deep Analyze');
+  const analyzeLabel = isPending ? 'Enriching…' : 'AI Enrich';
   const analyzeDisabled = isPending ? ' disabled' : '';
 
   return `
@@ -4109,7 +4150,8 @@ function renderInlineEventDetail(event) {
       ${checks.length ? `<div class="detail-section"><span class="detail-label">Checks</span><ul class="agents-list">${checks.map((x) => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul></div>` : ''}
       ${safety.length ? `<div class="detail-section"><span class="detail-label">Safety</span><ul class="agents-list">${safety.map((x) => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul></div>` : ''}
       <div class="health-event-detail-actions">
-        <button class="btn btn-sm btn-primary btn-deep-analyze" data-event-id="${escapeHtml(event.event_id)}"${analyzeDisabled}>${analyzeLabel}</button>
+        <button class="btn btn-sm btn-primary btn-ai-enrich" data-event-id="${escapeHtml(event.event_id)}"${analyzeDisabled}>${analyzeLabel}</button>
+        <button class="btn btn-sm btn-secondary btn-create-case" data-event-id="${escapeHtml(event.event_id)}">Investigate</button>
         <button class="btn btn-sm btn-secondary btn-open-graph" data-event-id="${escapeHtml(event.event_id)}">Open in Graph</button>
         <button class="btn btn-sm btn-ghost btn-ack-event" data-event-id="${escapeHtml(event.event_id)}"${ackDisabled}>${ackLabel}</button>
       </div>
@@ -4194,7 +4236,7 @@ function selectSubsystem(subId) {
     if (clearBtn) clearBtn.style.display = 'none';
   } else {
     agentsState.selectedSubsystemId = subId;
-    agentsState.selectedEventId = null;
+    agentsState.selectedEventId = getPreferredEventIdForSubsystem(subId);
     if (clearBtn) clearBtn.style.display = '';
   }
   renderSubsystemHealthGrid();
@@ -4268,6 +4310,7 @@ async function refreshAgentStatus() {
 async function startAgentsMonitoring() {
   const config = getAgentsConfigFromUI();
   agentsState.subsystemHealth = {};
+  agentsState.subsystemOrder = [];
   agentsState.subsystemHistory = {};
   agentsState.agentStates = {};
   agentsState.selectedSubsystemId = null;
@@ -4352,6 +4395,454 @@ function upsertRealtimeAgentEvent(payload) {
   if (idx >= 0) agentsState.events[idx] = { ...agentsState.events[idx], ...evt };
   else agentsState.events.unshift(evt);
   renderSubsystemHealthGrid();
+}
+
+// ============================================
+// Cases Tab — Investigation workspace
+// ============================================
+
+const casesState = {
+  initialized: false,
+  cases: [],
+  selectedCaseId: null,
+  currentCase: null,
+  currentReport: null,
+};
+
+function getCasesElements() {
+  return {
+    list: document.getElementById('cases-list'),
+    detail: document.getElementById('cases-detail'),
+    statusChip: document.getElementById('cases-status-chip'),
+    statusText: document.getElementById('cases-status-text'),
+    countLabel: document.getElementById('cases-count-label'),
+    filterStatus: document.getElementById('cases-filter-status'),
+    btnRefresh: document.getElementById('btn-cases-refresh'),
+    btnGenerate: document.getElementById('btn-cases-generate-report'),
+    btnSaveReport: document.getElementById('btn-cases-save-report'),
+  };
+}
+
+function normalizeCaseStatus(status) {
+  const value = String(status || 'open').toLowerCase();
+  if (value === 'in review') return 'in_review';
+  return value;
+}
+
+function formatCaseDate(ts) {
+  if (!ts) return 'n/a';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return String(ts);
+  return d.toLocaleString();
+}
+
+function parseCaseListValue(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).map(String);
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed.filter(Boolean).map(String);
+    } catch {
+      return [value];
+    }
+  }
+  return [];
+}
+
+function parseCaseJsonObject(value) {
+  if (value && typeof value === 'object') return value;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function updateCasesToolbar() {
+  const el = getCasesElements();
+  const selected = casesState.currentCase;
+  if (el.countLabel) {
+    const count = casesState.cases.length;
+    el.countLabel.textContent = `${count} case${count === 1 ? '' : 's'}`;
+  }
+  if (el.btnGenerate) el.btnGenerate.disabled = !selected;
+  if (el.btnSaveReport) el.btnSaveReport.disabled = !casesState.currentReport;
+  if (el.statusChip) {
+    el.statusChip.className = 'status-chip';
+    if (selected) {
+      el.statusChip.textContent = String(selected.status || 'open');
+      if (String(selected.status || '').toLowerCase() === 'closed') {
+        el.statusChip.classList.add('running');
+      }
+    } else {
+      el.statusChip.textContent = 'Cases';
+    }
+  }
+  if (el.statusText) {
+    el.statusText.textContent = selected
+      ? `Selected ${selected.case_id || ''}`
+      : 'Select a case or create one from the Agents tab.';
+  }
+}
+
+function renderCaseList() {
+  const el = getCasesElements();
+  if (!el.list) return;
+  if (!casesState.cases.length) {
+    el.list.innerHTML = '<div class="cases-empty">No investigation cases yet. Promote an anomaly from the Agents tab to start one.</div>';
+    updateCasesToolbar();
+    return;
+  }
+
+  el.list.innerHTML = casesState.cases.map((item) => {
+    const selectedClass = item.case_id === casesState.selectedCaseId ? ' selected' : '';
+    const status = normalizeCaseStatus(item.status);
+    return `
+      <div class="case-list-item${selectedClass}" data-case-id="${escapeHtml(item.case_id || '')}">
+        <div class="case-list-topline">
+          <span class="case-list-title" title="${escapeHtml(item.title || item.case_id || '')}">${escapeHtml(item.title || item.case_id || 'Untitled case')}</span>
+          <span class="case-pill status-${escapeHtml(status)}">${escapeHtml(status.replace('_', ' '))}</span>
+        </div>
+        <div class="case-list-meta">
+          <span>${escapeHtml(item.severity || 'unknown')} severity</span>
+          <span>${escapeHtml(item.subsystem_name || item.subsystem_id || 'unscoped')}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  el.list.querySelectorAll('.case-list-item').forEach((node) => {
+    node.addEventListener('click', async () => {
+      const caseId = node.getAttribute('data-case-id');
+      if (caseId) await loadCaseDetails(caseId);
+    });
+  });
+
+  updateCasesToolbar();
+}
+
+function renderCaseDetail() {
+  const el = getCasesElements();
+  if (!el.detail) return;
+
+  if (!casesState.currentCase) {
+    el.detail.innerHTML = '<div class="cases-empty cases-empty-detail">Choose a case to inspect the event context, capture notes, and generate a report.</div>';
+    updateCasesToolbar();
+    return;
+  }
+
+  const item = casesState.currentCase;
+  const event = item.event || {};
+  const probableCauses = parseCaseListValue(item.probable_causes_json || event.probable_causes_json);
+  const recommendedChecks = parseCaseListValue(item.recommended_checks_json || event.recommended_checks_json);
+  const draftCauses = parseCaseListValue(item.draft_probable_causes_json);
+  const draftChecks = parseCaseListValue(item.draft_recommended_checks_json);
+  const draftContext = parseCaseJsonObject(item.draft_context_json);
+  const tags = Array.isArray(item.tags) ? item.tags : [];
+  const equipment = Array.isArray(item.equipment) ? item.equipment : [];
+  const draftStatus = String(item.draft_status || '').toLowerCase();
+  const hasDraft = Boolean(item.draft_summary || item.draft_explanation || draftCauses.length || draftChecks.length);
+  const dependencySummary = [
+    ...(draftContext.upstream_views || []).map((name) => `Upstream: ${name}`),
+    ...(draftContext.downstream_views || []).map((name) => `Downstream: ${name}`),
+  ];
+  const reportHtml = casesState.currentReport
+    ? `<pre class="case-report-output">${escapeHtml(casesState.currentReport.markdown || '')}</pre>`
+    : '<div class="cases-empty" style="padding:0">Generate a report to create a shareable post-incident narrative.</div>';
+
+  el.detail.innerHTML = `
+    <div class="case-detail-header">
+      <div class="case-detail-title-block">
+        <h3>${escapeHtml(item.title || 'Untitled case')}</h3>
+        <div class="case-detail-subtitle">Case ID <code>${escapeHtml(item.case_id || '')}</code> linked to event <code>${escapeHtml(item.source_event_id || 'n/a')}</code></div>
+      </div>
+      <span class="case-pill status-${escapeHtml(normalizeCaseStatus(item.status))}">${escapeHtml(normalizeCaseStatus(item.status).replace('_', ' '))}</span>
+    </div>
+
+    <div class="case-detail-grid">
+      <div class="case-detail-stat"><span class="case-detail-stat-label">Subsystem</span><span class="case-detail-stat-value">${escapeHtml(item.subsystem_name || item.subsystem_id || 'Unknown')}</span></div>
+      <div class="case-detail-stat"><span class="case-detail-stat-label">Source Tag</span><span class="case-detail-stat-value">${escapeHtml(item.source_tag || event.source_tag || 'n/a')}</span></div>
+      <div class="case-detail-stat"><span class="case-detail-stat-label">Severity</span><span class="case-detail-stat-value">${escapeHtml(item.severity || 'unknown')}</span></div>
+      <div class="case-detail-stat"><span class="case-detail-stat-label">Last Updated</span><span class="case-detail-stat-value">${escapeHtml(formatCaseDate(item.updated_at))}</span></div>
+    </div>
+
+    <div class="case-form-grid">
+      <div class="case-form-field">
+        <label for="case-status-input">Status</label>
+        <select class="input" id="case-status-input">
+          <option value="open"${normalizeCaseStatus(item.status) === 'open' ? ' selected' : ''}>Open</option>
+          <option value="in_review"${normalizeCaseStatus(item.status) === 'in_review' ? ' selected' : ''}>In Review</option>
+          <option value="closed"${normalizeCaseStatus(item.status) === 'closed' ? ' selected' : ''}>Closed</option>
+        </select>
+      </div>
+      <div class="case-form-field">
+        <label for="case-owner-input">Owner</label>
+        <input class="input" id="case-owner-input" value="${escapeHtml(item.owner || '')}" placeholder="Responsible operator or engineer">
+      </div>
+      <div class="case-form-field">
+        <label for="case-disposition-input">Disposition</label>
+        <input class="input" id="case-disposition-input" value="${escapeHtml(item.disposition || '')}" placeholder="Awaiting root cause, mitigated, resolved...">
+      </div>
+      <div class="case-form-field">
+        <label for="case-summary-input">Working Summary</label>
+        <input class="input" id="case-summary-input" value="${escapeHtml(item.summary || '')}" placeholder="Short investigation headline">
+      </div>
+      <div class="case-form-field case-form-field-full">
+        <label for="case-explanation-input">Investigation Narrative</label>
+        <textarea class="input" id="case-explanation-input" rows="4" placeholder="What happened and why does it matter?">${escapeHtml(item.explanation || '')}</textarea>
+      </div>
+      <div class="case-form-field case-form-field-full">
+        <label for="case-notes-input">Operator Notes</label>
+        <textarea class="input" id="case-notes-input" rows="4" placeholder="Evidence, timeline, observations...">${escapeHtml(item.notes || '')}</textarea>
+      </div>
+      <div class="case-form-field case-form-field-full">
+        <label for="case-resolution-input">Resolution Notes</label>
+        <textarea class="input" id="case-resolution-input" rows="4" placeholder="Corrective action, reset steps, remaining follow-ups...">${escapeHtml(item.resolution_notes || '')}</textarea>
+      </div>
+    </div>
+
+    <div class="case-form-actions">
+      <button class="btn btn-primary" id="btn-case-save">Save Case</button>
+      <button class="btn btn-secondary" id="btn-case-generate-draft">AI Enrich Draft</button>
+      <button class="btn btn-secondary" id="btn-case-generate-report">Generate Report</button>
+    </div>
+
+    ${hasDraft ? `
+      <div class="case-draft-panel">
+        <div class="case-draft-header">
+          <h4>AI Draft</h4>
+          <span class="case-pill status-${escapeHtml(draftStatus || 'open')}">${escapeHtml((draftStatus || 'pending_approval').replace('_', ' '))}</span>
+        </div>
+        ${item.draft_summary ? `<div class="case-draft-summary">${escapeHtml(item.draft_summary)}</div>` : ''}
+        ${item.draft_explanation ? `<div class="case-draft-narrative">${escapeHtml(item.draft_explanation)}</div>` : ''}
+        ${dependencySummary.length ? `<div class="case-draft-deps">${dependencySummary.map((x) => `<span class="case-dependency-chip">${escapeHtml(x)}</span>`).join('')}</div>` : ''}
+        <div class="case-linked-lists">
+          <div class="case-linked-panel">
+            <h4>Draft Probable Causes</h4>
+            ${draftCauses.length ? `<ul>${draftCauses.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '<div class="cases-empty" style="padding:0">No draft probable causes.</div>'}
+          </div>
+          <div class="case-linked-panel">
+            <h4>Draft Recommended Checks</h4>
+            ${draftChecks.length ? `<ul>${draftChecks.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '<div class="cases-empty" style="padding:0">No draft checks.</div>'}
+          </div>
+        </div>
+        <div class="case-form-actions">
+          <button class="btn btn-primary" id="btn-case-approve-draft">Approve Draft</button>
+          <button class="btn btn-ghost" id="btn-case-reject-draft">Reject Draft</button>
+          <button class="btn btn-secondary" id="btn-case-regenerate-draft">Regenerate Draft</button>
+        </div>
+      </div>
+    ` : ''}
+
+    <div class="case-linked-lists">
+      <div class="case-linked-panel">
+        <h4>Probable Causes</h4>
+        ${probableCauses.length ? `<ul>${probableCauses.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '<div class="cases-empty" style="padding:0">No probable causes recorded yet.</div>'}
+      </div>
+      <div class="case-linked-panel">
+        <h4>Recommended Checks</h4>
+        ${recommendedChecks.length ? `<ul>${recommendedChecks.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '<div class="cases-empty" style="padding:0">No recommended checks recorded yet.</div>'}
+      </div>
+      <div class="case-linked-panel">
+        <h4>Linked Tags</h4>
+        ${tags.length ? `<ul>${tags.map((x) => `<li><code>${escapeHtml(x)}</code></li>`).join('')}</ul>` : '<div class="cases-empty" style="padding:0">No linked tags.</div>'}
+      </div>
+      <div class="case-linked-panel">
+        <h4>Linked Equipment</h4>
+        ${equipment.length ? `<ul>${equipment.map((x) => `<li><code>${escapeHtml(x)}</code></li>`).join('')}</ul>` : '<div class="cases-empty" style="padding:0">No linked equipment.</div>'}
+      </div>
+    </div>
+
+    <div class="case-report-panel">
+      <h4>Generated Report</h4>
+      ${reportHtml}
+    </div>
+  `;
+
+  document.getElementById('btn-case-save')?.addEventListener('click', saveSelectedCase);
+  document.getElementById('btn-case-generate-draft')?.addEventListener('click', generateSelectedCaseDraft);
+  document.getElementById('btn-case-generate-report')?.addEventListener('click', generateSelectedCaseReport);
+  document.getElementById('btn-case-approve-draft')?.addEventListener('click', approveSelectedCaseDraft);
+  document.getElementById('btn-case-reject-draft')?.addEventListener('click', rejectSelectedCaseDraft);
+  document.getElementById('btn-case-regenerate-draft')?.addEventListener('click', generateSelectedCaseDraft);
+
+  updateCasesToolbar();
+}
+
+async function loadCaseDetails(caseId) {
+  const result = await window.api.casesGet(caseId);
+  if (!result.success || !result.case) return;
+  casesState.selectedCaseId = caseId;
+  casesState.currentCase = result.case;
+  casesState.currentReport = null;
+  renderCaseList();
+  renderCaseDetail();
+}
+
+async function loadCases(preferredCaseId = null) {
+  const el = getCasesElements();
+  const result = await window.api.casesList({
+    limit: 100,
+    status: el.filterStatus?.value || undefined,
+  });
+  if (!result.success) {
+    if (el.list) el.list.innerHTML = `<div class="cases-empty">Failed to load cases: ${escapeHtml(result.error || 'Unknown error')}</div>`;
+    return;
+  }
+
+  casesState.cases = Array.isArray(result.cases) ? result.cases : [];
+  renderCaseList();
+
+  const nextCaseId = preferredCaseId || casesState.selectedCaseId;
+  if (nextCaseId && casesState.cases.some((item) => item.case_id === nextCaseId)) {
+    await loadCaseDetails(nextCaseId);
+    return;
+  }
+
+  casesState.selectedCaseId = null;
+  casesState.currentCase = null;
+  casesState.currentReport = null;
+  renderCaseDetail();
+}
+
+async function createCaseFromAgentEvent(eventId, btnEl) {
+  const event = agentsState.events.find((item) => item.event_id === eventId);
+  if (!event) return;
+  const originalText = btnEl?.textContent;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = 'Opening…';
+  }
+  try {
+    const result = await window.api.casesCreateFromEvent(event);
+    if (!result.success || !result.case) return;
+    casesState.selectedCaseId = result.case.case_id;
+    casesState.currentCase = result.case;
+    casesState.currentReport = null;
+    activateTab('cases');
+    setTimeout(initCasesTab, 50);
+    await loadCases(result.case.case_id);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = originalText || 'Investigate';
+    }
+  }
+}
+
+async function aiEnrichEvent(eventId, btnEl) {
+  const event = agentsState.events.find((item) => item.event_id === eventId);
+  if (!event) return;
+  const originalText = btnEl?.textContent;
+  agentsState.pendingDeepAnalyze.add(eventId);
+  renderSubsystemHealthGrid();
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = 'Enriching…';
+  }
+  try {
+    const caseResult = await window.api.casesCreateFromEvent(event);
+    if (!caseResult.success || !caseResult.case) return;
+    const draftResult = await window.api.casesGenerateDraft(caseResult.case.case_id);
+    casesState.selectedCaseId = caseResult.case.case_id;
+    casesState.currentCase = draftResult.case || caseResult.case;
+    casesState.currentReport = null;
+    activateTab('cases');
+    setTimeout(initCasesTab, 50);
+    await loadCases(caseResult.case.case_id);
+  } finally {
+    agentsState.pendingDeepAnalyze.delete(eventId);
+    renderSubsystemHealthGrid();
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = originalText || 'AI Enrich';
+    }
+  }
+}
+
+async function generateSelectedCaseDraft() {
+  if (!casesState.currentCase?.case_id) return;
+  const result = await window.api.casesGenerateDraft(casesState.currentCase.case_id);
+  if (!result.success || !result.case) return;
+  casesState.currentCase = result.case;
+  casesState.selectedCaseId = result.case.case_id;
+  casesState.currentReport = null;
+  await loadCases(result.case.case_id);
+}
+
+async function approveSelectedCaseDraft() {
+  if (!casesState.currentCase?.case_id) return;
+  const result = await window.api.casesApproveDraft(casesState.currentCase.case_id);
+  if (!result.success || !result.case) return;
+  casesState.currentCase = result.case;
+  casesState.selectedCaseId = result.case.case_id;
+  await loadCases(result.case.case_id);
+}
+
+async function rejectSelectedCaseDraft() {
+  if (!casesState.currentCase?.case_id) return;
+  const result = await window.api.casesRejectDraft(casesState.currentCase.case_id);
+  if (!result.success || !result.case) return;
+  casesState.currentCase = result.case;
+  casesState.selectedCaseId = result.case.case_id;
+  await loadCases(result.case.case_id);
+}
+
+async function saveSelectedCase() {
+  if (!casesState.currentCase?.case_id) return;
+  const patch = {
+    status: document.getElementById('case-status-input')?.value || 'open',
+    owner: document.getElementById('case-owner-input')?.value || '',
+    disposition: document.getElementById('case-disposition-input')?.value || '',
+    summary: document.getElementById('case-summary-input')?.value || '',
+    explanation: document.getElementById('case-explanation-input')?.value || '',
+    notes: document.getElementById('case-notes-input')?.value || '',
+    resolution_notes: document.getElementById('case-resolution-input')?.value || '',
+  };
+  const result = await window.api.casesUpdate(casesState.currentCase.case_id, patch);
+  if (!result.success || !result.case) return;
+  casesState.currentCase = result.case;
+  casesState.selectedCaseId = result.case.case_id;
+  casesState.currentReport = null;
+  await loadCases(result.case.case_id);
+}
+
+async function generateSelectedCaseReport() {
+  if (!casesState.currentCase?.case_id) return;
+  const result = await window.api.casesGenerateReport(casesState.currentCase.case_id);
+  if (!result.success) return;
+  casesState.currentReport = {
+    markdown: result.markdown || '',
+    filename: result.filename || `investigation_${casesState.currentCase.case_id}.md`,
+  };
+  if (result.case) {
+    casesState.currentCase = result.case;
+  }
+  renderCaseDetail();
+}
+
+async function saveSelectedCaseReport() {
+  if (!casesState.currentReport) return;
+  await window.api.casesSaveReport(casesState.currentReport.filename, casesState.currentReport.markdown);
+}
+
+function initCasesTab() {
+  const el = getCasesElements();
+  if (!el.list || casesState.initialized) {
+    if (el.list) loadCases(casesState.selectedCaseId);
+    return;
+  }
+
+  casesState.initialized = true;
+  el.btnRefresh?.addEventListener('click', () => loadCases(casesState.selectedCaseId));
+  el.filterStatus?.addEventListener('change', () => loadCases(null));
+  el.btnGenerate?.addEventListener('click', generateSelectedCaseReport);
+  el.btnSaveReport?.addEventListener('click', saveSelectedCaseReport);
+  loadCases(casesState.selectedCaseId);
 }
 
 function ensureAgentListeners() {
@@ -4448,6 +4939,9 @@ navButtons.forEach(btn => {
     if (btn.dataset.tab === 'agents') {
       setTimeout(initAgentsTab, 100);
     }
+    if (btn.dataset.tab === 'cases') {
+      setTimeout(initCasesTab, 100);
+    }
   });
 });
 
@@ -4460,5 +4954,6 @@ setTimeout(() => {
   loadSettings();
   loadDbConnections();
   ensureAgentListeners();
+  initCasesTab();
 }, 500);
 

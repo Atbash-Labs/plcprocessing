@@ -40,6 +40,9 @@ class GraphRenderer {
     };
     
     this.cy = null;
+    this.resizeObserver = null;
+    this.boundWindowResize = this._handleResize.bind(this);
+    this.resizeFrame = null;
     this.currentLayout = this.options.layout;
     this.pendingChanges = {
       nodes: { create: [], update: [], delete: [] },
@@ -58,6 +61,7 @@ class GraphRenderer {
     };
     
     this._initCytoscape();
+    this._initResizeHandling();
   }
   
   /**
@@ -274,6 +278,29 @@ class GraphRenderer {
     });
     
     this._setupEventHandlers();
+  }
+
+  _initResizeHandling() {
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => this._handleResize());
+      this.resizeObserver.observe(this.container);
+    }
+
+    window.addEventListener('resize', this.boundWindowResize);
+  }
+
+  _handleResize() {
+    if (!this.cy) return;
+
+    if (this.resizeFrame) {
+      window.cancelAnimationFrame(this.resizeFrame);
+    }
+
+    this.resizeFrame = window.requestAnimationFrame(() => {
+      this.resizeFrame = null;
+      if (!this.cy) return;
+      this.cy.resize();
+    });
   }
   
   /**
@@ -912,6 +939,15 @@ class GraphRenderer {
    * Destroy the renderer
    */
   destroy() {
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
+    window.removeEventListener('resize', this.boundWindowResize);
+    if (this.resizeFrame) {
+      window.cancelAnimationFrame(this.resizeFrame);
+      this.resizeFrame = null;
+    }
     if (this.cy) {
       this.cy.destroy();
       this.cy = null;

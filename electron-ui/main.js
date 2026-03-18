@@ -205,6 +205,61 @@ function runPythonScript(scriptName, args = [], options = {}) {
   });
 }
 
+function runPythonScriptWithStdin(scriptName, args = [], payload = null) {
+  return new Promise((resolve, reject) => {
+    const pythonProcess = spawnPythonProcess(scriptName, args);
+    let stdout = '';
+    let stderr = '';
+
+    pythonProcess.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    pythonProcess.on('close', (code) => {
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(stderr || `Process exited with code ${code}`));
+      }
+    });
+
+    pythonProcess.on('error', (err) => {
+      reject(err);
+    });
+
+    if (payload !== null && pythonProcess.stdin) {
+      pythonProcess.stdin.write(typeof payload === 'string' ? payload : JSON.stringify(payload));
+    }
+    if (pythonProcess.stdin) {
+      pythonProcess.stdin.end();
+    }
+  });
+}
+
+function parseJsonFromMixedOutput(output, fallback = {}) {
+  const text = String(output || '').trim();
+  if (!text) return fallback;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      if (!line.startsWith('{') && !line.startsWith('[')) continue;
+      try {
+        return JSON.parse(line);
+      } catch {
+        // Continue scanning upward.
+      }
+    }
+  }
+  return fallback;
+}
+
 function normalizeAgentConfig(config = {}) {
   const thresholds = (config && typeof config.thresholds === 'object' && config.thresholds) || {};
   const scope = (config && typeof config.scope === 'object' && config.scope) || {};
@@ -1799,6 +1854,104 @@ ipcMain.handle('agents:stop-subsystem', async (event, subsystemId) => {
   if (!activeAgentRun) return { success: false, error: 'No active agent run' };
   const sent = sendAgentCommand({ cmd: 'stop-agent', subsystemId });
   return { success: sent, subsystemId };
+});
+
+// ============================================
+// Investigation Cases IPC Handlers
+// ============================================
+
+ipcMain.handle('cases:list', async (event, filters = {}) => {
+  const args = ['list'];
+  if (filters.limit) args.push('--limit', String(filters.limit));
+  if (filters.status) args.push('--status', String(filters.status));
+  try {
+    const output = await runPythonScript('case_api.py', args);
+    return parseJsonFromMixedOutput(output, { success: true, cases: [] });
+  } catch (error) {
+    return { success: false, error: error.message, cases: [] };
+  }
+});
+
+ipcMain.handle('cases:get', async (event, caseId) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['get', '--case-id', String(caseId)]);
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:create-from-event', async (event, eventPayload = {}) => {
+  try {
+    const output = await runPythonScriptWithStdin('case_api.py', ['create-from-event'], eventPayload);
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:update', async (event, caseId, patch = {}) => {
+  try {
+    const output = await runPythonScriptWithStdin('case_api.py', ['update', '--case-id', String(caseId)], patch);
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:generate-draft', async (event, caseId) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['generate-draft', '--case-id', String(caseId)]);
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid draft response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:approve-draft', async (event, caseId) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['approve-draft', '--case-id', String(caseId)]);
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid draft response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:reject-draft', async (event, caseId) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['reject-draft', '--case-id', String(caseId)]);
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid draft response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:generate-report', async (event, caseId) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['generate-report', '--case-id', String(caseId)]);
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid report response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:save-report', async (event, suggestedFilename, markdown) => {
+  try {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save Investigation Report',
+      defaultPath: suggestedFilename || 'investigation_report.md',
+      filters: [
+        { name: 'Markdown', extensions: ['md'] },
+        { name: 'Text', extensions: ['txt'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+    fs.writeFileSync(result.filePath, String(markdown || ''), 'utf-8');
+    return { success: true, filePath: result.filePath };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 });
 
 // ============================================
