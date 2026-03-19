@@ -131,7 +131,7 @@ app.on('activate', () => {
 
 // Helper to run Python scripts with optional streaming
 function runPythonScript(scriptName, args = [], options = {}) {
-  const { streaming = false, streamId = null } = options;
+  const { streaming = false, streamId = null, target = 'default' } = options;
   
   return new Promise((resolve, reject) => {
     const pythonProcess = spawnPythonProcess(scriptName, args);
@@ -151,17 +151,20 @@ function runPythonScript(scriptName, args = [], options = {}) {
           if (line.startsWith('[TOOL]')) {
             sendToRenderer('tool-call', {
               streamId,
+              target,
               tool: line.replace('[TOOL]', '').trim()
             }, 'runPythonScript stdout tool');
           } else if (line.startsWith('[DEBUG]')) {
             sendToRenderer('stream-output', {
               streamId,
+              target,
               text: line,
               type: 'debug'
             }, 'runPythonScript stdout debug');
           } else if (line.trim()) {
             sendToRenderer('stream-output', {
               streamId,
+              target,
               text: line,
               type: 'output'
             }, 'runPythonScript stdout output');
@@ -178,6 +181,7 @@ function runPythonScript(scriptName, args = [], options = {}) {
       if (streaming) {
         sendToRenderer('stream-output', {
           streamId,
+          target,
           text,
           type: 'stderr'
         }, 'runPythonScript stderr');
@@ -188,6 +192,7 @@ function runPythonScript(scriptName, args = [], options = {}) {
       if (streaming) {
         sendToRenderer('stream-complete', {
           streamId,
+          target,
           success: code === 0
         }, 'runPythonScript close');
       }
@@ -205,21 +210,65 @@ function runPythonScript(scriptName, args = [], options = {}) {
   });
 }
 
-function runPythonScriptWithStdin(scriptName, args = [], payload = null) {
+function runPythonScriptWithStdin(scriptName, args = [], payload = null, options = {}) {
+  const { streaming = false, streamId = null, target = 'default' } = options;
   return new Promise((resolve, reject) => {
     const pythonProcess = spawnPythonProcess(scriptName, args);
     let stdout = '';
     let stderr = '';
 
     pythonProcess.stdout.on('data', (data) => {
-      stdout += data.toString();
+      const text = data.toString();
+      stdout += text;
+      if (streaming) {
+        const lines = text.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('[TOOL]')) {
+            sendToRenderer('tool-call', {
+              streamId,
+              target,
+              tool: line.replace('[TOOL]', '').trim()
+            }, 'runPythonScriptWithStdin stdout tool');
+          } else if (line.startsWith('[DEBUG]')) {
+            sendToRenderer('stream-output', {
+              streamId,
+              target,
+              text: line,
+              type: 'debug'
+            }, 'runPythonScriptWithStdin stdout debug');
+          } else if (line.trim()) {
+            sendToRenderer('stream-output', {
+              streamId,
+              target,
+              text: line,
+              type: 'output'
+            }, 'runPythonScriptWithStdin stdout output');
+          }
+        }
+      }
     });
 
     pythonProcess.stderr.on('data', (data) => {
-      stderr += data.toString();
+      const text = data.toString();
+      stderr += text;
+      if (streaming) {
+        sendToRenderer('stream-output', {
+          streamId,
+          target,
+          text,
+          type: 'stderr'
+        }, 'runPythonScriptWithStdin stderr');
+      }
     });
 
     pythonProcess.on('close', (code) => {
+      if (streaming) {
+        sendToRenderer('stream-complete', {
+          streamId,
+          target,
+          success: code === 0
+        }, 'runPythonScriptWithStdin close');
+      }
       if (code === 0) {
         resolve(stdout);
       } else {
@@ -740,6 +789,115 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
         }
       });
       
+      proc.on('error', (err) => {
+        resolve({ success: false, error: err.message, streamId });
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message, streamId };
+  }
+});
+
+ipcMain.handle('cases:assistant-query', async (event, question, history, context, options = {}) => {
+  const streamId = options.streamId || `cases-assistant-${Date.now()}`;
+  const target = options.target || 'cases-assistant';
+
+  try {
+    const payload = JSON.stringify({
+      question: question,
+      history: history || [],
+      context: context || '',
+    });
+
+    return new Promise((resolve) => {
+      const proc = spawnPythonProcess('troubleshoot.py', ['--history', '-v']);
+
+      proc.stdin.write(payload);
+      proc.stdin.end();
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      proc.stderr.on('data', (data) => {
+        const text = data.toString();
+        stderr += text;
+
+        if (canSendToRenderer()) {
+          if (text.includes('[TOOL]') || text.includes('[DEBUG]') || text.includes('[INFO]')) {
+            const lines = text.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('[TOOL]')) {
+                sendToRenderer('tool-call', {
+                  streamId,
+                  target,
+                  tool: line.replace('[TOOL]', '').trim()
+                }, 'cases assistant stderr tool');
+              } else if (line.startsWith('[DEBUG]') || line.startsWith('[INFO]')) {
+                sendToRenderer('stream-output', {
+                  streamId,
+                  target,
+                  text: line,
+                  type: 'debug'
+                }, 'cases assistant stderr debug');
+              }
+            }
+          } else if (text.includes('[STREAM]')) {
+            const streamStart = text.indexOf('[STREAM]');
+            const afterStream = text.substring(streamStart + 8);
+            if (afterStream) {
+              sendToRenderer('stream-output', {
+                streamId,
+                target,
+                text: afterStream,
+                type: 'claude-stream'
+              }, 'cases assistant stderr stream-start');
+            }
+          } else if (text && !text.startsWith('[')) {
+            sendToRenderer('stream-output', {
+              streamId,
+              target,
+              text: text,
+              type: 'claude-stream'
+            }, 'cases assistant stderr stream-cont');
+          }
+        }
+      });
+
+      proc.on('close', (code) => {
+        if (canSendToRenderer()) {
+          sendToRenderer('stream-complete', {
+            streamId,
+            target,
+            success: code === 0
+          }, 'cases assistant close');
+        }
+
+        if (code === 0) {
+          try {
+            const result = JSON.parse(stdout);
+            resolve({
+              success: true,
+              response: result.response,
+              history: result.history,
+              streamId
+            });
+          } catch (e) {
+            resolve({ success: true, response: stdout, history: [], streamId });
+          }
+        } else {
+          const cleanError = stderr
+            .split('\n')
+            .filter(line => !line.startsWith('[TOOL]') && !line.startsWith('[DEBUG]'))
+            .join('\n')
+            .trim();
+          resolve({ success: false, error: cleanError || 'Case investigator query failed', streamId });
+        }
+      });
+
       proc.on('error', (err) => {
         resolve({ success: false, error: err.message, streamId });
       });
@@ -1860,75 +2018,120 @@ ipcMain.handle('agents:stop-subsystem', async (event, subsystemId) => {
 // Investigation Cases IPC Handlers
 // ============================================
 
-ipcMain.handle('cases:list', async (event, filters = {}) => {
+ipcMain.handle('cases:list', async (event, filters = {}, options = {}) => {
   const args = ['list'];
   if (filters.limit) args.push('--limit', String(filters.limit));
   if (filters.status) args.push('--status', String(filters.status));
   try {
-    const output = await runPythonScript('case_api.py', args);
+    const output = await runPythonScript('case_api.py', args, {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
     return parseJsonFromMixedOutput(output, { success: true, cases: [] });
   } catch (error) {
     return { success: false, error: error.message, cases: [] };
   }
 });
 
-ipcMain.handle('cases:get', async (event, caseId) => {
+ipcMain.handle('cases:get', async (event, caseId, options = {}) => {
   try {
-    const output = await runPythonScript('case_api.py', ['get', '--case-id', String(caseId)]);
+    const output = await runPythonScript('case_api.py', ['get', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
     return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case response' });
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('cases:create-from-event', async (event, eventPayload = {}) => {
+ipcMain.handle('cases:create-from-event', async (event, eventPayload = {}, options = {}) => {
   try {
-    const output = await runPythonScriptWithStdin('case_api.py', ['create-from-event'], eventPayload);
+    const output = await runPythonScriptWithStdin('case_api.py', ['create-from-event'], eventPayload, {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
     return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case response' });
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('cases:update', async (event, caseId, patch = {}) => {
+ipcMain.handle('cases:update', async (event, caseId, patch = {}, options = {}) => {
   try {
-    const output = await runPythonScriptWithStdin('case_api.py', ['update', '--case-id', String(caseId)], patch);
+    const output = await runPythonScriptWithStdin('case_api.py', ['update', '--case-id', String(caseId)], patch, {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
     return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case response' });
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('cases:generate-draft', async (event, caseId) => {
+ipcMain.handle('cases:delete', async (event, caseId, options = {}) => {
   try {
-    const output = await runPythonScript('case_api.py', ['generate-draft', '--case-id', String(caseId)]);
+    const output = await runPythonScript('case_api.py', ['delete', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid delete response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:generate-draft', async (event, caseId, options = {}) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['generate-draft', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
     return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid draft response' });
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('cases:approve-draft', async (event, caseId) => {
+ipcMain.handle('cases:approve-draft', async (event, caseId, options = {}) => {
   try {
-    const output = await runPythonScript('case_api.py', ['approve-draft', '--case-id', String(caseId)]);
+    const output = await runPythonScript('case_api.py', ['approve-draft', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
     return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid draft response' });
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('cases:reject-draft', async (event, caseId) => {
+ipcMain.handle('cases:reject-draft', async (event, caseId, options = {}) => {
   try {
-    const output = await runPythonScript('case_api.py', ['reject-draft', '--case-id', String(caseId)]);
+    const output = await runPythonScript('case_api.py', ['reject-draft', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
     return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid draft response' });
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('cases:generate-report', async (event, caseId) => {
+ipcMain.handle('cases:generate-report', async (event, caseId, options = {}) => {
   try {
-    const output = await runPythonScript('case_api.py', ['generate-report', '--case-id', String(caseId)]);
+    const output = await runPythonScript('case_api.py', ['generate-report', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
     return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid report response' });
   } catch (error) {
     return { success: false, error: error.message };

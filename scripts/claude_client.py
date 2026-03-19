@@ -1291,6 +1291,7 @@ class ClaudeClient:
         max_tool_rounds: int = 50,  # High limit - Claude self-regulates
         use_tools: bool = True,
         verbose: bool = False,
+        require_data_query: bool = False,
     ) -> Dict[str, Any]:
         """
         Query Claude expecting a JSON response.
@@ -1307,6 +1308,7 @@ class ClaudeClient:
             max_tool_rounds=max_tool_rounds,
             use_tools=use_tools,
             verbose=verbose,
+            require_data_query=require_data_query,
         )
 
         # Extract JSON from response

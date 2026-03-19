@@ -89,14 +89,16 @@ contextBridge.exposeInMainWorld('api', {
   agentsStopSubsystem: (subId) => ipcRenderer.invoke('agents:stop-subsystem', subId),
 
   // Investigation cases
-  casesList: (filters) => ipcRenderer.invoke('cases:list', filters),
-  casesGet: (caseId) => ipcRenderer.invoke('cases:get', caseId),
-  casesCreateFromEvent: (eventPayload) => ipcRenderer.invoke('cases:create-from-event', eventPayload),
-  casesUpdate: (caseId, patch) => ipcRenderer.invoke('cases:update', caseId, patch),
-  casesGenerateDraft: (caseId) => ipcRenderer.invoke('cases:generate-draft', caseId),
-  casesApproveDraft: (caseId) => ipcRenderer.invoke('cases:approve-draft', caseId),
-  casesRejectDraft: (caseId) => ipcRenderer.invoke('cases:reject-draft', caseId),
-  casesGenerateReport: (caseId) => ipcRenderer.invoke('cases:generate-report', caseId),
+  casesList: (filters, options) => ipcRenderer.invoke('cases:list', filters, options),
+  casesGet: (caseId, options) => ipcRenderer.invoke('cases:get', caseId, options),
+  casesCreateFromEvent: (eventPayload, options) => ipcRenderer.invoke('cases:create-from-event', eventPayload, options),
+  casesUpdate: (caseId, patch, options) => ipcRenderer.invoke('cases:update', caseId, patch, options),
+  casesDelete: (caseId, options) => ipcRenderer.invoke('cases:delete', caseId, options),
+  casesGenerateDraft: (caseId, options) => ipcRenderer.invoke('cases:generate-draft', caseId, options),
+  casesApproveDraft: (caseId, options) => ipcRenderer.invoke('cases:approve-draft', caseId, options),
+  casesRejectDraft: (caseId, options) => ipcRenderer.invoke('cases:reject-draft', caseId, options),
+  casesGenerateReport: (caseId, options) => ipcRenderer.invoke('cases:generate-report', caseId, options),
+  casesAssistantQuery: (question, history, context, options) => ipcRenderer.invoke('cases:assistant-query', question, history, context, options),
   casesSaveReport: (suggestedFilename, markdown) => ipcRenderer.invoke('cases:save-report', suggestedFilename, markdown),
   
   // Database connections

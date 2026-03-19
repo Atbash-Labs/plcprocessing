@@ -59,6 +59,9 @@ def main() -> int:
     p_update = sub.add_parser("update", help="Update case fields from stdin JSON")
     p_update.add_argument("--case-id", required=True)
 
+    p_delete = sub.add_parser("delete", help="Delete an investigation case")
+    p_delete.add_argument("--case-id", required=True)
+
     p_draft = sub.add_parser("generate-draft", help="Generate an AI draft for a case")
     p_draft.add_argument("--case-id", required=True)
 
@@ -101,6 +104,14 @@ def main() -> int:
                 output_json({"success": False, "error": f"Case not found: {args.case_id}"})
                 return 1
             output_json({"success": True, "case": case})
+            return 0
+
+        if args.command == "delete":
+            deleted = graph.delete_investigation_case(args.case_id)
+            if not deleted:
+                output_json({"success": False, "error": f"Case not found: {args.case_id}"})
+                return 1
+            output_json({"success": True, "case_id": args.case_id})
             return 0
 
         if args.command == "generate-draft":

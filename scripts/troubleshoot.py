@@ -148,7 +148,7 @@ def run_interactive():
 
 
 def ask_single(
-    question: str, history: List[Dict] = None, verbose: bool = False
+    question: str, history: List[Dict] = None, verbose: bool = False, context: str = ""
 ) -> Dict:
     """
     Ask a troubleshooting question with optional conversation history.
@@ -164,16 +164,27 @@ def ask_single(
     client = ClaudeClient(enable_tools=True)
 
     try:
+        effective_question = question
+        if context:
+            effective_question = (
+                "Authoritative case context for this investigation:\n"
+                f"{context}\n\n"
+                "Use this context together with tool calls against the ontology and connected systems.\n\n"
+                f"Investigator question:\n{question}"
+            )
+
         # Build messages from history + new question
         if history:
             messages = list(history)
-            messages.append({"role": "user", "content": question})
+            messages_for_model = list(history)
+            messages_for_model.append({"role": "user", "content": effective_question})
         else:
-            messages = [{"role": "user", "content": question}]
+            messages = []
+            messages_for_model = [{"role": "user", "content": effective_question}]
 
         result = client.query(
             system_prompt=SYSTEM_PROMPT,
-            messages=messages,
+            messages=messages_for_model,
             max_tokens=4000,
             use_tools=True,
             verbose=verbose,
@@ -188,7 +199,9 @@ def ask_single(
                 print(f"\n[DEBUG] Made {len(tool_calls)} tool calls", file=sys.stderr)
 
         # Update history with the new exchange
-        updated_history = messages + [{"role": "assistant", "content": response}]
+        updated_history = list(history or [])
+        updated_history.append({"role": "user", "content": question})
+        updated_history.append({"role": "assistant", "content": response})
 
         return {"response": response, "history": updated_history}
 
@@ -212,8 +225,9 @@ def ask_with_history_json(history_json: str, verbose: bool = False) -> str:
         data = json.loads(history_json)
         question = data.get("question", "")
         history = data.get("history", [])
+        context = data.get("context", "")
 
-        result = ask_single(question, history=history, verbose=verbose)
+        result = ask_single(question, history=history, verbose=verbose, context=context)
 
         return json.dumps(result, ensure_ascii=False)
     except json.JSONDecodeError as e:

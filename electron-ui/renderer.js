@@ -413,6 +413,7 @@ async function sendMessage() {
   
   // Set up tool call listener for this request (returns cleanup function)
   const cleanupToolCall = window.api.onToolCall((data) => {
+    if (data?.target === 'cases-assistant') return;
     const chip = document.createElement('span');
     chip.className = 'tool-call-chip';
     chip.innerHTML = `<span class="tool-icon">&gt;</span> ${data.tool}`;
@@ -434,6 +435,7 @@ async function sendMessage() {
   };
   
   const cleanupStream = window.api.onStreamOutput((data) => {
+    if (data?.target === 'cases-assistant') return;
     if (data.type === 'claude-stream' && data.text) {
       if (!streamingStarted) {
         streamingStarted = true;
@@ -1769,6 +1771,7 @@ document.getElementById('btn-ingest-workbench').addEventListener('click', async 
 
 // Listen for streaming output from Python scripts
 window.api.onStreamOutput((data) => {
+  if (['cases', 'cases-assistant'].includes(data?.target)) return;
   if (data.type === 'debug') {
     // Show debug lines in output panel with special styling
     appendOutput(`${data.text}\n`);
@@ -1785,11 +1788,13 @@ window.api.onStreamOutput((data) => {
 
 // Listen for tool calls
 window.api.onToolCall((data) => {
+  if (['cases', 'cases-assistant'].includes(data?.target)) return;
   appendOutput(`[TOOL] ${data.tool}\n`);
 });
 
 // Listen for stream completion
 window.api.onStreamComplete((data) => {
+  if (['cases', 'cases-assistant'].includes(data?.target)) return;
   if (data.success) {
     appendOutput('\n[OK] Operation complete!\n');
   }
@@ -3689,7 +3694,25 @@ const agentsState = {
   subsystemHistory: {},
   agentStates: {},
   pendingDeepAnalyze: new Set(),
+  eventActionStatus: {},
 };
+
+function setAgentEventActionStatus(eventId, action, message, options = {}) {
+  if (!eventId) return;
+  agentsState.eventActionStatus[eventId] = {
+    action,
+    message: String(message || ''),
+    tone: options.tone || 'pending',
+    buttonLabel: options.buttonLabel || '',
+  };
+  renderSubsystemHealthGrid();
+}
+
+function clearAgentEventActionStatus(eventId) {
+  if (!eventId || !agentsState.eventActionStatus[eventId]) return;
+  delete agentsState.eventActionStatus[eventId];
+  renderSubsystemHealthGrid();
+}
 
 function getAgentsElements() {
   return {
@@ -4057,14 +4080,6 @@ function renderSubsystemHealthGrid() {
     });
   });
 
-  container.querySelectorAll('.health-event-detail-actions .btn-ai-enrich').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const eventId = btn.getAttribute('data-event-id');
-      if (eventId) aiEnrichEvent(eventId, btn);
-    });
-  });
-
   container.querySelectorAll('.health-event-detail-actions .btn-ack-event').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -4131,9 +4146,15 @@ function renderInlineEventDetail(event) {
   const st = String(event.state || '').toLowerCase();
   const ackLabel = st === 'acknowledged' ? 'Clear' : (st === 'cleared' ? 'Cleared' : 'Acknowledge');
   const ackDisabled = st === 'cleared' ? ' disabled' : '';
-  const isPending = agentsState.pendingDeepAnalyze.has(event.event_id);
-  const analyzeLabel = isPending ? 'Enriching…' : 'AI Enrich';
-  const analyzeDisabled = isPending ? ' disabled' : '';
+  const actionState = agentsState.eventActionStatus[event.event_id] || null;
+  const actionPending = actionState?.tone === 'pending';
+  const createLabel = actionState?.action === 'create-case'
+    ? (actionState.buttonLabel || 'Creating...')
+    : 'Create Case';
+  const createDisabled = actionPending ? ' disabled' : '';
+  const actionStatusHtml = actionState?.message
+    ? `<div class="health-event-action-status tone-${escapeHtml(actionState.tone || 'pending')}">${escapeHtml(actionState.message)}</div>`
+    : '';
 
   return `
     <div class="health-event-detail" onclick="event.stopPropagation()">
@@ -4150,11 +4171,11 @@ function renderInlineEventDetail(event) {
       ${checks.length ? `<div class="detail-section"><span class="detail-label">Checks</span><ul class="agents-list">${checks.map((x) => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul></div>` : ''}
       ${safety.length ? `<div class="detail-section"><span class="detail-label">Safety</span><ul class="agents-list">${safety.map((x) => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul></div>` : ''}
       <div class="health-event-detail-actions">
-        <button class="btn btn-sm btn-primary btn-ai-enrich" data-event-id="${escapeHtml(event.event_id)}"${analyzeDisabled}>${analyzeLabel}</button>
-        <button class="btn btn-sm btn-secondary btn-create-case" data-event-id="${escapeHtml(event.event_id)}">Investigate</button>
+        <button class="btn btn-sm btn-primary btn-create-case" data-event-id="${escapeHtml(event.event_id)}"${createDisabled}>${createLabel}</button>
         <button class="btn btn-sm btn-secondary btn-open-graph" data-event-id="${escapeHtml(event.event_id)}">Open in Graph</button>
         <button class="btn btn-sm btn-ghost btn-ack-event" data-event-id="${escapeHtml(event.event_id)}"${ackDisabled}>${ackLabel}</button>
       </div>
+      ${actionStatusHtml}
     </div>
   `;
 }
@@ -4407,6 +4428,16 @@ const casesState = {
   selectedCaseId: null,
   currentCase: null,
   currentReport: null,
+  isLoadingList: false,
+  isLoadingDetail: false,
+  statusOverride: null,
+  actionState: null,
+  logStreamIds: new Set(),
+  logListenersReady: false,
+  assistantSessions: {},
+  assistantListenersReady: false,
+  listRequestSeq: 0,
+  detailRequestSeq: 0,
 };
 
 function getCasesElements() {
@@ -4420,7 +4451,320 @@ function getCasesElements() {
     btnRefresh: document.getElementById('btn-cases-refresh'),
     btnGenerate: document.getElementById('btn-cases-generate-report'),
     btnSaveReport: document.getElementById('btn-cases-save-report'),
+    log: document.getElementById('cases-log'),
+    btnClearLog: document.getElementById('btn-clear-cases-log'),
   };
+}
+
+function appendCasesLog(text, clear = false) {
+  const log = getCasesElements().log;
+  if (!log) return;
+  if (clear) log.textContent = '';
+  log.textContent += text;
+  log.scrollTop = log.scrollHeight;
+}
+
+function createCaseStreamContext(actionLabel, target = 'cases') {
+  const streamId = `cases-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  casesState.logStreamIds.add(streamId);
+  appendCasesLog(`\n[${actionLabel}] ${new Date().toLocaleTimeString()}\n`);
+  return {
+    streamId,
+    target,
+  };
+}
+
+function completeCaseStream(streamId, success) {
+  if (!streamId) return;
+  if (!casesState.logStreamIds.has(streamId)) return;
+  casesState.logStreamIds.delete(streamId);
+  appendCasesLog(success ? '[OK] Case action complete.\n' : '[ERROR] Case action failed.\n');
+}
+
+function appendCasesUiDebugLog(message) {
+  appendCasesLog(`[UI DEBUG] ${message}\n`);
+}
+
+function ensureCasesLogListeners() {
+  if (casesState.logListenersReady) return;
+  casesState.logListenersReady = true;
+
+  window.api.onStreamOutput((data) => {
+    if (!['cases', 'cases-assistant'].includes(data?.target) || !data.streamId || !casesState.logStreamIds.has(data.streamId)) return;
+    if (data.type === 'claude-stream') return;
+    if (data.type === 'stderr') {
+      const text = String(data.text || '');
+      if (!text.includes('GqlStatusObject') && !text.includes('Received notification')) {
+        appendCasesLog(text.endsWith('\n') ? text : `${text}\n`);
+      }
+      return;
+    }
+    if (data.text) appendCasesLog(`${data.text}\n`);
+  });
+
+  window.api.onToolCall((data) => {
+    if (!['cases', 'cases-assistant'].includes(data?.target) || !data.streamId || !casesState.logStreamIds.has(data.streamId)) return;
+    appendCasesLog(`[TOOL] ${data.tool}\n`);
+  });
+
+  window.api.onStreamComplete((data) => {
+    if (!['cases', 'cases-assistant'].includes(data?.target) || !data.streamId) return;
+    completeCaseStream(data.streamId, Boolean(data.success));
+  });
+}
+
+function setCasesStatusOverride(chip, text, tone = 'pending') {
+  casesState.statusOverride = {
+    chip: String(chip || 'Loading'),
+    text: String(text || ''),
+    tone,
+  };
+  updateCasesToolbar();
+}
+
+function clearCasesStatusOverride() {
+  if (!casesState.statusOverride) return;
+  casesState.statusOverride = null;
+  updateCasesToolbar();
+}
+
+function setCaseActionState(action, message, options = {}) {
+  casesState.actionState = {
+    action,
+    message: String(message || ''),
+    tone: options.tone || 'pending',
+    buttonLabel: options.buttonLabel || '',
+  };
+  if (options.statusChip || options.statusText) {
+    setCasesStatusOverride(options.statusChip || 'Working', options.statusText || message || '', options.tone || 'pending');
+  }
+  updateCasesToolbar();
+  renderCaseDetail();
+}
+
+function clearCaseActionState() {
+  if (!casesState.actionState) return;
+  casesState.actionState = null;
+  updateCasesToolbar();
+  renderCaseDetail();
+}
+
+function getCaseAssistantSession(caseId) {
+  if (!caseId) return { history: [], turns: [] };
+  if (!casesState.assistantSessions[caseId]) {
+    casesState.assistantSessions[caseId] = {
+      history: [],
+      turns: [],
+    };
+  }
+  return casesState.assistantSessions[caseId];
+}
+
+function buildCaseAssistantContext(caseData) {
+  if (!caseData) return '';
+  const event = caseData.event || {};
+  const tags = Array.isArray(caseData.tags) ? caseData.tags : [];
+  const equipment = Array.isArray(caseData.equipment) ? caseData.equipment : [];
+  return [
+    `Case ID: ${caseData.case_id || ''}`,
+    `Title: ${caseData.title || ''}`,
+    `Status: ${caseData.status || ''}`,
+    `Severity: ${caseData.severity || ''}`,
+    `Subsystem: ${caseData.subsystem_name || caseData.subsystem_id || ''}`,
+    `Source tag: ${caseData.source_tag || event.source_tag || ''}`,
+    `Event summary: ${event.summary || caseData.summary || ''}`,
+    `Operator context: ${caseData.operator_context || ''}`,
+    `Investigator notes: ${caseData.notes || ''}`,
+    `Resolution notes: ${caseData.resolution_notes || ''}`,
+    `Linked tags: ${tags.join(', ')}`,
+    `Linked equipment: ${equipment.join(', ')}`,
+  ].filter(Boolean).join('\n');
+}
+
+function renderCaseAssistantTranscript(caseData) {
+  const session = getCaseAssistantSession(caseData?.case_id);
+  if (!session.turns.length) {
+    return '<div class="cases-empty" style="padding:0">Ask the investigator assistant to inspect this case using the same tools as the troubleshooting agent.</div>';
+  }
+  return session.turns.map((turn) => {
+    const toolCallsHtml = turn.toolCalls?.length
+      ? `<div class="case-assistant-tool-calls" data-case-assistant-tools="${escapeHtml(turn.streamId || '')}">${turn.toolCalls.map((tool) => `<span class="tool-call-chip">${escapeHtml(tool)}</span>`).join('')}</div>`
+      : '';
+    const responseText = turn.error || turn.response || (turn.pending ? 'Working...' : '');
+    const responseClass = turn.error ? ' error' : '';
+    return `
+      <div class="case-assistant-turn" data-case-assistant-turn="${escapeHtml(turn.streamId || '')}">
+        <div class="case-assistant-user">${escapeHtml(turn.question || '')}</div>
+        ${toolCallsHtml}
+        <div class="case-assistant-response${responseClass}" data-case-assistant-response="${escapeHtml(turn.streamId || '')}">${escapeHtml(responseText || '')}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function summarizeAssistantResponse(text, maxLen = 320) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= maxLen) return normalized;
+  const truncated = normalized.slice(0, maxLen);
+  const sentenceBreak = Math.max(
+    truncated.lastIndexOf('. '),
+    truncated.lastIndexOf('; '),
+    truncated.lastIndexOf('! '),
+    truncated.lastIndexOf('? ')
+  );
+  if (sentenceBreak > Math.floor(maxLen * 0.5)) {
+    return `${truncated.slice(0, sentenceBreak + 1).trim()}`;
+  }
+  return `${truncated.trim()}...`;
+}
+
+function buildCaseAssistantNarrativeSummary(caseId) {
+  const session = getCaseAssistantSession(caseId);
+  const completedTurns = (session.turns || []).filter((turn) => !turn.pending && !turn.error && (turn.response || '').trim());
+  if (!completedTurns.length) return '';
+
+  const uniqueTools = [...new Set(
+    completedTurns.flatMap((turn) => Array.isArray(turn.toolCalls) ? turn.toolCalls : [])
+  )];
+
+  const lines = ['Investigator assistant summary:'];
+  completedTurns.forEach((turn, index) => {
+    lines.push(`${index + 1}. ${turn.question}`);
+    lines.push(`   Findings: ${summarizeAssistantResponse(turn.response)}`);
+    if (turn.toolCalls?.length) {
+      lines.push(`   Tools used: ${[...new Set(turn.toolCalls)].join(', ')}`);
+    }
+  });
+
+  if (uniqueTools.length) {
+    lines.push(`Overall tools referenced: ${uniqueTools.join(', ')}`);
+  }
+
+  return lines.join('\n');
+}
+
+function appendAssistantSummaryToNarrative() {
+  const caseId = casesState.currentCase?.case_id;
+  if (!caseId) return;
+  const explanationInput = document.getElementById('case-explanation-input');
+  if (!explanationInput) return;
+  const summary = buildCaseAssistantNarrativeSummary(caseId);
+  if (!summary) return;
+  const existing = explanationInput.value.trim();
+  explanationInput.value = existing ? `${existing}\n\n${summary}` : summary;
+  explanationInput.focus();
+  explanationInput.selectionStart = explanationInput.selectionEnd = explanationInput.value.length;
+}
+
+function getCaseAssistantTranscriptElement() {
+  return document.querySelector('.case-assistant-transcript');
+}
+
+function escapeForAttribute(value) {
+  return CSS.escape(String(value || ''));
+}
+
+function ensureCaseAssistantTurnDom(turn) {
+  const transcript = getCaseAssistantTranscriptElement();
+  if (!transcript || !turn?.streamId) return null;
+  const selector = `[data-case-assistant-turn="${escapeForAttribute(turn.streamId)}"]`;
+  let turnEl = transcript.querySelector(selector);
+  if (turnEl) return turnEl;
+
+  const userText = escapeHtml(turn.question || '');
+  turnEl = document.createElement('div');
+  turnEl.className = 'case-assistant-turn';
+  turnEl.setAttribute('data-case-assistant-turn', turn.streamId);
+  turnEl.innerHTML = `
+    <div class="case-assistant-user">${userText}</div>
+    <div class="case-assistant-response" data-case-assistant-response="${escapeHtml(turn.streamId)}">${escapeHtml(turn.pending ? 'Working...' : (turn.response || ''))}</div>
+  `;
+  transcript.appendChild(turnEl);
+  transcript.scrollTop = transcript.scrollHeight;
+  return turnEl;
+}
+
+function appendCaseAssistantToolCallDom(streamId, tool) {
+  const turnEl = document.querySelector(`[data-case-assistant-turn="${escapeForAttribute(streamId)}"]`);
+  if (!turnEl) return;
+  let toolsEl = turnEl.querySelector(`[data-case-assistant-tools="${escapeForAttribute(streamId)}"]`);
+  if (!toolsEl) {
+    toolsEl = document.createElement('div');
+    toolsEl.className = 'case-assistant-tool-calls';
+    toolsEl.setAttribute('data-case-assistant-tools', streamId);
+    const responseEl = turnEl.querySelector(`[data-case-assistant-response="${escapeForAttribute(streamId)}"]`);
+    if (responseEl) {
+      turnEl.insertBefore(toolsEl, responseEl);
+    } else {
+      turnEl.appendChild(toolsEl);
+    }
+  }
+  const chip = document.createElement('span');
+  chip.className = 'tool-call-chip';
+  chip.textContent = String(tool || 'tool');
+  toolsEl.appendChild(chip);
+  const transcript = getCaseAssistantTranscriptElement();
+  if (transcript) transcript.scrollTop = transcript.scrollHeight;
+}
+
+function appendCaseAssistantResponseChunkDom(streamId, text) {
+  const responseEl = document.querySelector(`[data-case-assistant-response="${escapeForAttribute(streamId)}"]`);
+  if (!responseEl) return;
+  if (responseEl.textContent === 'Working...') responseEl.textContent = '';
+  responseEl.textContent += text || '';
+  responseEl.classList.remove('error');
+  const transcript = getCaseAssistantTranscriptElement();
+  if (transcript) transcript.scrollTop = transcript.scrollHeight;
+}
+
+function finalizeCaseAssistantTurnDom(streamId, options = {}) {
+  const responseEl = document.querySelector(`[data-case-assistant-response="${escapeForAttribute(streamId)}"]`);
+  if (!responseEl) return;
+  if (options.error) {
+    responseEl.textContent = options.error;
+    responseEl.classList.add('error');
+  } else if (!responseEl.textContent.trim()) {
+    responseEl.textContent = 'Done.';
+  }
+}
+
+function ensureCaseAssistantListeners() {
+  if (casesState.assistantListenersReady) return;
+  casesState.assistantListenersReady = true;
+
+  const findTurnByStreamId = (streamId) => {
+    for (const session of Object.values(casesState.assistantSessions)) {
+      const turn = session.turns.find((item) => item.streamId === streamId);
+      if (turn) return turn;
+    }
+    return null;
+  };
+
+  window.api.onToolCall((data) => {
+    if (data?.target !== 'cases-assistant' || !data.streamId) return;
+    const turn = findTurnByStreamId(data.streamId);
+    if (!turn) return;
+    turn.toolCalls = turn.toolCalls || [];
+    turn.toolCalls.push(String(data.tool || 'tool'));
+    appendCaseAssistantToolCallDom(data.streamId, data.tool);
+  });
+
+  window.api.onStreamOutput((data) => {
+    if (data?.target !== 'cases-assistant' || !data.streamId || data.type !== 'claude-stream') return;
+    const turn = findTurnByStreamId(data.streamId);
+    if (!turn) return;
+    turn.response = `${turn.response || ''}${data.text || ''}`;
+    appendCaseAssistantResponseChunkDom(data.streamId, data.text || '');
+  });
+
+  window.api.onStreamComplete((data) => {
+    if (data?.target !== 'cases-assistant' || !data.streamId) return;
+    const turn = findTurnByStreamId(data.streamId);
+    if (!turn) return;
+    turn.pending = false;
+    finalizeCaseAssistantTurnDom(data.streamId);
+  });
 }
 
 function normalizeCaseStatus(status) {
@@ -4465,33 +4809,71 @@ function parseCaseJsonObject(value) {
 function updateCasesToolbar() {
   const el = getCasesElements();
   const selected = casesState.currentCase;
+  const actionState = casesState.actionState;
+  const actionPending = actionState?.tone === 'pending';
   if (el.countLabel) {
     const count = casesState.cases.length;
     el.countLabel.textContent = `${count} case${count === 1 ? '' : 's'}`;
   }
-  if (el.btnGenerate) el.btnGenerate.disabled = !selected;
-  if (el.btnSaveReport) el.btnSaveReport.disabled = !casesState.currentReport;
-  if (el.statusChip) {
-    el.statusChip.className = 'status-chip';
-    if (selected) {
-      el.statusChip.textContent = String(selected.status || 'open');
-      if (String(selected.status || '').toLowerCase() === 'closed') {
-        el.statusChip.classList.add('running');
-      }
-    } else {
-      el.statusChip.textContent = 'Cases';
+  if (el.btnRefresh) {
+    el.btnRefresh.disabled = casesState.isLoadingList || casesState.isLoadingDetail || actionPending;
+    el.btnRefresh.textContent = casesState.isLoadingList ? 'Refreshing...' : 'Refresh';
+  }
+  if (el.btnGenerate) {
+    el.btnGenerate.disabled = !selected || casesState.isLoadingList || casesState.isLoadingDetail || actionPending;
+    el.btnGenerate.textContent = actionState?.action === 'generate-report'
+      ? (actionState.buttonLabel || 'Generating...')
+      : 'Generate Report';
+  }
+  if (el.btnSaveReport) {
+    el.btnSaveReport.disabled = !casesState.currentReport || casesState.isLoadingList || casesState.isLoadingDetail || actionPending;
+    el.btnSaveReport.textContent = actionState?.action === 'save-report'
+      ? (actionState.buttonLabel || 'Saving...')
+      : 'Save Report';
+  }
+
+  let chipText = 'Cases';
+  let statusText = 'Select a case or create one from the Agents tab.';
+  let tone = '';
+
+  if (casesState.statusOverride) {
+    chipText = casesState.statusOverride.chip;
+    statusText = casesState.statusOverride.text;
+    tone = casesState.statusOverride.tone || '';
+  } else if (casesState.isLoadingDetail && casesState.selectedCaseId) {
+    chipText = 'Loading';
+    statusText = `Loading ${casesState.selectedCaseId}...`;
+    tone = 'pending';
+  } else if (casesState.isLoadingList) {
+    chipText = 'Loading';
+    statusText = 'Loading investigations...';
+    tone = 'pending';
+  } else if (selected) {
+    chipText = String(selected.status || 'open');
+    statusText = `Selected ${selected.case_id || ''}`;
+    if (String(selected.status || '').toLowerCase() === 'closed') {
+      tone = 'running';
     }
   }
+
+  if (el.statusChip) {
+    el.statusChip.className = 'status-chip';
+    if (tone) el.statusChip.classList.add(tone);
+    el.statusChip.textContent = chipText;
+  }
   if (el.statusText) {
-    el.statusText.textContent = selected
-      ? `Selected ${selected.case_id || ''}`
-      : 'Select a case or create one from the Agents tab.';
+    el.statusText.textContent = statusText;
   }
 }
 
 function renderCaseList() {
   const el = getCasesElements();
   if (!el.list) return;
+  if (casesState.isLoadingList && !casesState.cases.length) {
+    el.list.innerHTML = '<div class="cases-empty cases-empty-loading">Loading investigations...</div>';
+    updateCasesToolbar();
+    return;
+  }
   if (!casesState.cases.length) {
     el.list.innerHTML = '<div class="cases-empty">No investigation cases yet. Promote an anomaly from the Agents tab to start one.</div>';
     updateCasesToolbar();
@@ -4529,6 +4911,12 @@ function renderCaseDetail() {
   const el = getCasesElements();
   if (!el.detail) return;
 
+  if (casesState.isLoadingDetail) {
+    el.detail.innerHTML = '<div class="cases-empty cases-empty-detail">Loading case details...</div>';
+    updateCasesToolbar();
+    return;
+  }
+
   if (!casesState.currentCase) {
     el.detail.innerHTML = '<div class="cases-empty cases-empty-detail">Choose a case to inspect the event context, capture notes, and generate a report.</div>';
     updateCasesToolbar();
@@ -4546,6 +4934,10 @@ function renderCaseDetail() {
   const equipment = Array.isArray(item.equipment) ? item.equipment : [];
   const draftStatus = String(item.draft_status || '').toLowerCase();
   const hasDraft = Boolean(item.draft_summary || item.draft_explanation || draftCauses.length || draftChecks.length);
+  const actionState = casesState.actionState;
+  const actionPending = actionState?.tone === 'pending';
+  const assistantSession = getCaseAssistantSession(item.case_id);
+  const hasAssistantTranscript = assistantSession.turns.some((turn) => !turn.pending && ((turn.response || '').trim() || (turn.error || '').trim()));
   const dependencySummary = [
     ...(draftContext.upstream_views || []).map((name) => `Upstream: ${name}`),
     ...(draftContext.downstream_views || []).map((name) => `Downstream: ${name}`),
@@ -4553,6 +4945,17 @@ function renderCaseDetail() {
   const reportHtml = casesState.currentReport
     ? `<pre class="case-report-output">${escapeHtml(casesState.currentReport.markdown || '')}</pre>`
     : '<div class="cases-empty" style="padding:0">Generate a report to create a shareable post-incident narrative.</div>';
+  const saveLabel = actionState?.action === 'save-case' ? (actionState.buttonLabel || 'Saving...') : 'Save Case';
+  const closeLabel = actionState?.action === 'close-case' ? (actionState.buttonLabel || 'Closing...') : 'Close Case';
+  const deleteLabel = actionState?.action === 'delete-case' ? (actionState.buttonLabel || 'Deleting...') : 'Delete Case';
+  const draftLabel = actionState?.action === 'generate-draft' ? (actionState.buttonLabel || 'Generating...') : 'AI Enrich Draft';
+  const reportLabel = actionState?.action === 'generate-report' ? (actionState.buttonLabel || 'Generating...') : 'Generate Report';
+  const approveLabel = actionState?.action === 'approve-draft' ? (actionState.buttonLabel || 'Approving...') : 'Approve Draft';
+  const rejectLabel = actionState?.action === 'reject-draft' ? (actionState.buttonLabel || 'Rejecting...') : 'Reject Draft';
+  const regenerateLabel = actionState?.action === 'generate-draft' ? (actionState.buttonLabel || 'Generating...') : 'Regenerate Draft';
+  const actionStatusHtml = actionState?.message
+    ? `<div class="case-action-status tone-${escapeHtml(actionState.tone || 'pending')}">${escapeHtml(actionState.message)}</div>`
+    : '';
 
   el.detail.innerHTML = `
     <div class="case-detail-header">
@@ -4596,6 +4999,10 @@ function renderCaseDetail() {
         <textarea class="input" id="case-explanation-input" rows="4" placeholder="What happened and why does it matter?">${escapeHtml(item.explanation || '')}</textarea>
       </div>
       <div class="case-form-field case-form-field-full">
+        <label for="case-operator-context-input">Operator Context</label>
+        <textarea class="input" id="case-operator-context-input" rows="3" placeholder="Observed symptoms, attempted actions, timeline, and production impact...">${escapeHtml(item.operator_context || '')}</textarea>
+      </div>
+      <div class="case-form-field case-form-field-full">
         <label for="case-notes-input">Operator Notes</label>
         <textarea class="input" id="case-notes-input" rows="4" placeholder="Evidence, timeline, observations...">${escapeHtml(item.notes || '')}</textarea>
       </div>
@@ -4606,10 +5013,13 @@ function renderCaseDetail() {
     </div>
 
     <div class="case-form-actions">
-      <button class="btn btn-primary" id="btn-case-save">Save Case</button>
-      <button class="btn btn-secondary" id="btn-case-generate-draft">AI Enrich Draft</button>
-      <button class="btn btn-secondary" id="btn-case-generate-report">Generate Report</button>
+      <button class="btn btn-primary" id="btn-case-save"${actionPending ? ' disabled' : ''}>${escapeHtml(saveLabel)}</button>
+      <button class="btn btn-secondary" id="btn-case-close"${actionPending || normalizeCaseStatus(item.status) === 'closed' ? ' disabled' : ''}>${escapeHtml(closeLabel)}</button>
+      <button class="btn btn-secondary" id="btn-case-generate-draft"${actionPending ? ' disabled' : ''}>${escapeHtml(draftLabel)}</button>
+      <button class="btn btn-secondary" id="btn-case-generate-report"${actionPending ? ' disabled' : ''}>${escapeHtml(reportLabel)}</button>
+      <button class="btn btn-danger" id="btn-case-delete"${actionPending ? ' disabled' : ''}>${escapeHtml(deleteLabel)}</button>
     </div>
+    ${actionStatusHtml}
 
     ${hasDraft ? `
       <div class="case-draft-panel">
@@ -4631,9 +5041,9 @@ function renderCaseDetail() {
           </div>
         </div>
         <div class="case-form-actions">
-          <button class="btn btn-primary" id="btn-case-approve-draft">Approve Draft</button>
-          <button class="btn btn-ghost" id="btn-case-reject-draft">Reject Draft</button>
-          <button class="btn btn-secondary" id="btn-case-regenerate-draft">Regenerate Draft</button>
+          <button class="btn btn-primary" id="btn-case-approve-draft"${actionPending ? ' disabled' : ''}>${escapeHtml(approveLabel)}</button>
+          <button class="btn btn-ghost" id="btn-case-reject-draft"${actionPending ? ' disabled' : ''}>${escapeHtml(rejectLabel)}</button>
+          <button class="btn btn-secondary" id="btn-case-regenerate-draft"${actionPending ? ' disabled' : ''}>${escapeHtml(regenerateLabel)}</button>
         </div>
       </div>
     ` : ''}
@@ -4661,36 +5071,158 @@ function renderCaseDetail() {
       <h4>Generated Report</h4>
       ${reportHtml}
     </div>
+
+    <div class="case-report-panel">
+      <h4>Investigator Assistant</h4>
+      <div class="case-assistant-transcript">${renderCaseAssistantTranscript(item)}</div>
+      <div class="case-assistant-input-row">
+        <input class="input" id="case-assistant-input" placeholder="Ask about this case using the full query-agent toolset">
+        <button class="btn btn-secondary" id="btn-case-assistant-clear">Clear Chat</button>
+        <button class="btn btn-secondary" id="btn-case-assistant-summary"${!hasAssistantTranscript || actionPending ? ' disabled' : ''}>Append Summary to Narrative</button>
+        <button class="btn btn-primary" id="btn-case-assistant-send"${actionPending ? ' disabled' : ''}>Ask Assistant</button>
+      </div>
+    </div>
   `;
 
   document.getElementById('btn-case-save')?.addEventListener('click', saveSelectedCase);
+  document.getElementById('btn-case-close')?.addEventListener('click', closeSelectedCase);
   document.getElementById('btn-case-generate-draft')?.addEventListener('click', generateSelectedCaseDraft);
   document.getElementById('btn-case-generate-report')?.addEventListener('click', generateSelectedCaseReport);
+  document.getElementById('btn-case-delete')?.addEventListener('click', deleteSelectedCase);
   document.getElementById('btn-case-approve-draft')?.addEventListener('click', approveSelectedCaseDraft);
   document.getElementById('btn-case-reject-draft')?.addEventListener('click', rejectSelectedCaseDraft);
   document.getElementById('btn-case-regenerate-draft')?.addEventListener('click', generateSelectedCaseDraft);
+  document.getElementById('btn-case-assistant-send')?.addEventListener('click', sendCaseAssistantQuery);
+  document.getElementById('btn-case-assistant-summary')?.addEventListener('click', appendAssistantSummaryToNarrative);
+  document.getElementById('btn-case-assistant-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendCaseAssistantQuery();
+    }
+  });
+  document.getElementById('btn-case-assistant-clear')?.addEventListener('click', clearCaseAssistantSession);
+
+  const caseDetailRoot = el.detail;
+  caseDetailRoot.querySelectorAll('input, textarea, select').forEach((field) => {
+    field.addEventListener('pointerdown', (event) => {
+      const hit = document.elementFromPoint(event.clientX, event.clientY);
+      appendCasesUiDebugLog(
+        `pointerdown target=${field.id || field.tagName} hit=${hit?.id || hit?.className || hit?.tagName || 'unknown'} actionPending=${casesState.actionState?.tone === 'pending'}`
+      );
+    });
+    field.addEventListener('focusin', () => {
+      appendCasesUiDebugLog(`focusin target=${field.id || field.tagName}`);
+    });
+  });
+  caseDetailRoot.addEventListener('pointerdown', (event) => {
+    const hit = document.elementFromPoint(event.clientX, event.clientY);
+    if (!hit) return;
+    const targetLabel = event.target?.id || event.target?.className || event.target?.tagName || 'unknown';
+    const hitLabel = hit.id || hit.className || hit.tagName || 'unknown';
+    if (targetLabel !== hitLabel) {
+      appendCasesUiDebugLog(`detail pointerdown target=${targetLabel} hit=${hitLabel}`);
+    }
+  });
 
   updateCasesToolbar();
 }
 
+function clearCaseAssistantSession() {
+  const caseId = casesState.currentCase?.case_id;
+  if (!caseId) return;
+  casesState.assistantSessions[caseId] = {
+    history: [],
+    turns: [],
+  };
+  renderCaseDetail();
+}
+
+async function sendCaseAssistantQuery() {
+  const caseId = casesState.currentCase?.case_id;
+  if (!caseId) return;
+  const input = document.getElementById('case-assistant-input');
+  const question = input?.value?.trim() || '';
+  if (!question) return;
+
+  const session = getCaseAssistantSession(caseId);
+  const stream = createCaseStreamContext(`INVESTIGATOR QUERY ${caseId}`, 'cases-assistant');
+  const turn = {
+    streamId: stream.streamId,
+    question,
+    response: '',
+    toolCalls: [],
+    pending: true,
+    error: '',
+  };
+  session.turns.push(turn);
+  if (input) input.value = '';
+  renderCaseDetail();
+  ensureCaseAssistantTurnDom(turn);
+
+  const result = await window.api.casesAssistantQuery(
+    question,
+    session.history,
+    buildCaseAssistantContext(casesState.currentCase),
+    stream,
+  );
+
+  turn.pending = false;
+  if (!result.success) {
+    turn.error = result.error || 'Investigator assistant query failed';
+    finalizeCaseAssistantTurnDom(stream.streamId, { error: turn.error });
+    return;
+  }
+
+  session.history = Array.isArray(result.history) ? result.history : session.history;
+  turn.response = result.response || turn.response || '';
+  finalizeCaseAssistantTurnDom(stream.streamId);
+}
+
 async function loadCaseDetails(caseId) {
-  const result = await window.api.casesGet(caseId);
-  if (!result.success || !result.case) return;
+  const requestSeq = ++casesState.detailRequestSeq;
+  const stream = createCaseStreamContext(`LOAD CASE ${caseId}`);
+  casesState.selectedCaseId = caseId;
+  casesState.currentCase = null;
+  casesState.currentReport = null;
+  casesState.isLoadingDetail = true;
+  renderCaseList();
+  renderCaseDetail();
+  const result = await window.api.casesGet(caseId, stream);
+  if (requestSeq !== casesState.detailRequestSeq) return;
+  casesState.isLoadingDetail = false;
+  if (!result.success || !result.case) {
+    completeCaseStream(stream.streamId, false);
+    setCasesStatusOverride('Error', result.error || `Failed to load ${caseId}`, 'error');
+    renderCaseDetail();
+    return;
+  }
   casesState.selectedCaseId = caseId;
   casesState.currentCase = result.case;
   casesState.currentReport = null;
+  clearCasesStatusOverride();
   renderCaseList();
   renderCaseDetail();
 }
 
 async function loadCases(preferredCaseId = null) {
   const el = getCasesElements();
+  const requestSeq = ++casesState.listRequestSeq;
+  const stream = createCaseStreamContext('LOAD CASE LIST');
+  casesState.isLoadingList = true;
+  renderCaseList();
   const result = await window.api.casesList({
     limit: 100,
     status: el.filterStatus?.value || undefined,
-  });
+  }, stream);
+  if (requestSeq !== casesState.listRequestSeq) return;
+  casesState.isLoadingList = false;
   if (!result.success) {
-    if (el.list) el.list.innerHTML = `<div class="cases-empty">Failed to load cases: ${escapeHtml(result.error || 'Unknown error')}</div>`;
+    completeCaseStream(stream.streamId, false);
+    setCasesStatusOverride('Error', result.error || 'Failed to load investigations', 'error');
+    if (el.list && !casesState.cases.length) {
+      el.list.innerHTML = `<div class="cases-empty">Failed to load cases: ${escapeHtml(result.error || 'Unknown error')}</div>`;
+    }
+    updateCasesToolbar();
     return;
   }
 
@@ -4706,115 +5238,318 @@ async function loadCases(preferredCaseId = null) {
   casesState.selectedCaseId = null;
   casesState.currentCase = null;
   casesState.currentReport = null;
+  clearCasesStatusOverride();
   renderCaseDetail();
 }
 
 async function createCaseFromAgentEvent(eventId, btnEl) {
   const event = agentsState.events.find((item) => item.event_id === eventId);
   if (!event) return;
-  const originalText = btnEl?.textContent;
-  if (btnEl) {
-    btnEl.disabled = true;
-    btnEl.textContent = 'Opening…';
+  const stream = createCaseStreamContext(`CREATE CASE ${eventId}`);
+  setAgentEventActionStatus(eventId, 'create-case', 'Creating investigation case...', {
+    buttonLabel: 'Creating...',
+  });
+  casesState.selectedCaseId = null;
+  casesState.currentCase = null;
+  casesState.currentReport = null;
+  casesState.isLoadingDetail = true;
+  activateTab('cases');
+  if (!casesState.initialized) initCasesTab();
+  renderCaseDetail();
+  setCasesStatusOverride('Opening', 'Creating investigation case...', 'pending');
+  const result = await window.api.casesCreateFromEvent(event, stream);
+  if (!result.success || !result.case) {
+    completeCaseStream(stream.streamId, false);
+    casesState.isLoadingDetail = false;
+    const errorText = result.error || 'Failed to create investigation case';
+    setAgentEventActionStatus(eventId, 'create-case', errorText, {
+      tone: 'error',
+      buttonLabel: 'Retry',
+    });
+    setCasesStatusOverride('Error', errorText, 'error');
+    return;
   }
-  try {
-    const result = await window.api.casesCreateFromEvent(event);
-    if (!result.success || !result.case) return;
-    casesState.selectedCaseId = result.case.case_id;
-    casesState.currentCase = result.case;
-    casesState.currentReport = null;
-    activateTab('cases');
-    setTimeout(initCasesTab, 50);
-    await loadCases(result.case.case_id);
-  } finally {
-    if (btnEl) {
-      btnEl.disabled = false;
-      btnEl.textContent = originalText || 'Investigate';
-    }
+  setAgentEventActionStatus(eventId, 'create-case', 'Opening case workspace...', {
+    buttonLabel: 'Opening...',
+  });
+  setCasesStatusOverride('Opening', `Opening ${result.case.case_id || 'new case'}...`, 'pending');
+  casesState.selectedCaseId = result.case.case_id;
+  casesState.currentCase = null;
+  casesState.currentReport = null;
+  casesState.isLoadingDetail = false;
+  await loadCases(result.case.case_id);
+  const draftStream = createCaseStreamContext(`AUTO AI ENRICH ${result.case.case_id}`);
+  setCaseActionState('generate-draft', 'Generating AI draft for the new case...', {
+    buttonLabel: 'Generating...',
+    statusChip: 'Working',
+    statusText: 'Generating AI draft for the new case...',
+  });
+  const draftResult = await window.api.casesGenerateDraft(result.case.case_id, draftStream);
+  if (!draftResult.success || !draftResult.case) {
+    completeCaseStream(draftStream.streamId, false);
+    setCaseActionState('generate-draft', draftResult.error || 'Failed to generate AI draft', {
+      tone: 'error',
+      buttonLabel: 'Retry',
+      statusChip: 'Error',
+      statusText: draftResult.error || 'Failed to generate AI draft',
+    });
+    clearAgentEventActionStatus(eventId);
+    return;
   }
+  casesState.currentCase = draftResult.case;
+  casesState.selectedCaseId = draftResult.case.case_id;
+  await loadCases(draftResult.case.case_id);
+  clearCaseActionState();
+  clearAgentEventActionStatus(eventId);
 }
 
 async function aiEnrichEvent(eventId, btnEl) {
   const event = agentsState.events.find((item) => item.event_id === eventId);
   if (!event) return;
-  const originalText = btnEl?.textContent;
+  const createStream = createCaseStreamContext(`AI ENRICH CREATE CASE ${eventId}`);
   agentsState.pendingDeepAnalyze.add(eventId);
+  let clearActionStatusOnExit = true;
+  setAgentEventActionStatus(eventId, 'ai-enrich', 'Creating case for AI draft...', {
+    buttonLabel: 'Creating...',
+  });
+  setCasesStatusOverride('Opening', 'Creating case for AI draft...', 'pending');
   renderSubsystemHealthGrid();
-  if (btnEl) {
-    btnEl.disabled = true;
-    btnEl.textContent = 'Enriching…';
-  }
   try {
-    const caseResult = await window.api.casesCreateFromEvent(event);
-    if (!caseResult.success || !caseResult.case) return;
-    const draftResult = await window.api.casesGenerateDraft(caseResult.case.case_id);
+    const caseResult = await window.api.casesCreateFromEvent(event, createStream);
+    if (!caseResult.success || !caseResult.case) {
+      completeCaseStream(createStream.streamId, false);
+      const errorText = caseResult.error || 'Failed to create case for AI draft';
+      setAgentEventActionStatus(eventId, 'ai-enrich', errorText, {
+        tone: 'error',
+        buttonLabel: 'Retry',
+      });
+      setCasesStatusOverride('Error', errorText, 'error');
+      clearActionStatusOnExit = false;
+      return;
+    }
+    setAgentEventActionStatus(eventId, 'ai-enrich', 'Generating AI draft...', {
+      buttonLabel: 'Generating...',
+    });
+    setCasesStatusOverride('Opening', 'Generating AI draft...', 'pending');
+    const draftStream = createCaseStreamContext(`AI ENRICH DRAFT ${caseResult.case.case_id}`);
+    const draftResult = await window.api.casesGenerateDraft(caseResult.case.case_id, draftStream);
+    if (!draftResult.success) {
+      completeCaseStream(draftStream.streamId, false);
+      setAgentEventActionStatus(eventId, 'ai-enrich', 'AI draft failed. Opening raw case instead...', {
+        tone: 'error',
+        buttonLabel: 'Retry',
+      });
+      setCasesStatusOverride('Opening', 'AI draft failed, opening raw case...', 'pending');
+    } else {
+      setAgentEventActionStatus(eventId, 'ai-enrich', 'Opening AI draft in Cases...', {
+        buttonLabel: 'Opening...',
+      });
+      setCasesStatusOverride('Opening', 'Opening AI draft in Cases...', 'pending');
+    }
     casesState.selectedCaseId = caseResult.case.case_id;
     casesState.currentCase = draftResult.case || caseResult.case;
     casesState.currentReport = null;
     activateTab('cases');
-    setTimeout(initCasesTab, 50);
+    if (!casesState.initialized) initCasesTab();
     await loadCases(caseResult.case.case_id);
   } finally {
     agentsState.pendingDeepAnalyze.delete(eventId);
+    if (clearActionStatusOnExit) clearAgentEventActionStatus(eventId);
     renderSubsystemHealthGrid();
-    if (btnEl) {
-      btnEl.disabled = false;
-      btnEl.textContent = originalText || 'AI Enrich';
-    }
   }
 }
 
 async function generateSelectedCaseDraft() {
   if (!casesState.currentCase?.case_id) return;
-  const result = await window.api.casesGenerateDraft(casesState.currentCase.case_id);
-  if (!result.success || !result.case) return;
+  const stream = createCaseStreamContext(`GENERATE DRAFT ${casesState.currentCase.case_id}`);
+  setCaseActionState('generate-draft', 'Generating AI draft for this case...', {
+    buttonLabel: 'Generating...',
+    statusChip: 'Working',
+    statusText: 'Generating AI draft...',
+  });
+  const result = await window.api.casesGenerateDraft(casesState.currentCase.case_id, stream);
+  if (!result.success || !result.case) {
+    completeCaseStream(stream.streamId, false);
+    setCaseActionState('generate-draft', result.error || 'Failed to generate AI draft', {
+      tone: 'error',
+      buttonLabel: 'Retry',
+      statusChip: 'Error',
+      statusText: result.error || 'Failed to generate AI draft',
+    });
+    return;
+  }
   casesState.currentCase = result.case;
   casesState.selectedCaseId = result.case.case_id;
   casesState.currentReport = null;
   await loadCases(result.case.case_id);
+  clearCaseActionState();
 }
 
 async function approveSelectedCaseDraft() {
   if (!casesState.currentCase?.case_id) return;
-  const result = await window.api.casesApproveDraft(casesState.currentCase.case_id);
-  if (!result.success || !result.case) return;
+  const stream = createCaseStreamContext(`APPROVE DRAFT ${casesState.currentCase.case_id}`);
+  setCaseActionState('approve-draft', 'Approving AI draft and merging it into the case...', {
+    buttonLabel: 'Approving...',
+    statusChip: 'Working',
+    statusText: 'Approving AI draft...',
+  });
+  const result = await window.api.casesApproveDraft(casesState.currentCase.case_id, stream);
+  if (!result.success || !result.case) {
+    completeCaseStream(stream.streamId, false);
+    setCaseActionState('approve-draft', result.error || 'Failed to approve AI draft', {
+      tone: 'error',
+      buttonLabel: 'Retry',
+      statusChip: 'Error',
+      statusText: result.error || 'Failed to approve AI draft',
+    });
+    return;
+  }
   casesState.currentCase = result.case;
   casesState.selectedCaseId = result.case.case_id;
   await loadCases(result.case.case_id);
+  clearCaseActionState();
 }
 
 async function rejectSelectedCaseDraft() {
   if (!casesState.currentCase?.case_id) return;
-  const result = await window.api.casesRejectDraft(casesState.currentCase.case_id);
-  if (!result.success || !result.case) return;
+  const stream = createCaseStreamContext(`REJECT DRAFT ${casesState.currentCase.case_id}`);
+  setCaseActionState('reject-draft', 'Rejecting AI draft...', {
+    buttonLabel: 'Rejecting...',
+    statusChip: 'Working',
+    statusText: 'Rejecting AI draft...',
+  });
+  const result = await window.api.casesRejectDraft(casesState.currentCase.case_id, stream);
+  if (!result.success || !result.case) {
+    completeCaseStream(stream.streamId, false);
+    setCaseActionState('reject-draft', result.error || 'Failed to reject AI draft', {
+      tone: 'error',
+      buttonLabel: 'Retry',
+      statusChip: 'Error',
+      statusText: result.error || 'Failed to reject AI draft',
+    });
+    return;
+  }
   casesState.currentCase = result.case;
   casesState.selectedCaseId = result.case.case_id;
   await loadCases(result.case.case_id);
+  clearCaseActionState();
 }
 
 async function saveSelectedCase() {
   if (!casesState.currentCase?.case_id) return;
+  const stream = createCaseStreamContext(`SAVE CASE ${casesState.currentCase.case_id}`);
+  setCaseActionState('save-case', 'Saving case updates...', {
+    buttonLabel: 'Saving...',
+    statusChip: 'Working',
+    statusText: 'Saving case updates...',
+  });
   const patch = {
     status: document.getElementById('case-status-input')?.value || 'open',
     owner: document.getElementById('case-owner-input')?.value || '',
     disposition: document.getElementById('case-disposition-input')?.value || '',
     summary: document.getElementById('case-summary-input')?.value || '',
     explanation: document.getElementById('case-explanation-input')?.value || '',
+    operator_context: document.getElementById('case-operator-context-input')?.value || '',
     notes: document.getElementById('case-notes-input')?.value || '',
     resolution_notes: document.getElementById('case-resolution-input')?.value || '',
   };
-  const result = await window.api.casesUpdate(casesState.currentCase.case_id, patch);
-  if (!result.success || !result.case) return;
+  const result = await window.api.casesUpdate(casesState.currentCase.case_id, patch, stream);
+  if (!result.success || !result.case) {
+    completeCaseStream(stream.streamId, false);
+    setCaseActionState('save-case', result.error || 'Failed to save case', {
+      tone: 'error',
+      buttonLabel: 'Retry',
+      statusChip: 'Error',
+      statusText: result.error || 'Failed to save case',
+    });
+    return;
+  }
   casesState.currentCase = result.case;
   casesState.selectedCaseId = result.case.case_id;
   casesState.currentReport = null;
   await loadCases(result.case.case_id);
+  clearCaseActionState();
+}
+
+async function closeSelectedCase() {
+  if (!casesState.currentCase?.case_id) return;
+  const caseId = casesState.currentCase.case_id;
+  const stream = createCaseStreamContext(`CLOSE CASE ${caseId}`);
+  setCaseActionState('close-case', 'Closing case...', {
+    buttonLabel: 'Closing...',
+    statusChip: 'Working',
+    statusText: 'Closing case...',
+  });
+  const result = await window.api.casesUpdate(caseId, { status: 'closed' }, stream);
+  if (!result.success || !result.case) {
+    completeCaseStream(stream.streamId, false);
+    setCaseActionState('close-case', result.error || 'Failed to close case', {
+      tone: 'error',
+      buttonLabel: 'Retry',
+      statusChip: 'Error',
+      statusText: result.error || 'Failed to close case',
+    });
+    return;
+  }
+  casesState.currentCase = result.case;
+  casesState.selectedCaseId = result.case.case_id;
+  casesState.currentReport = null;
+  await loadCases(result.case.case_id);
+  clearCaseActionState();
+}
+
+async function deleteSelectedCase() {
+  if (!casesState.currentCase?.case_id) return;
+  const caseId = casesState.currentCase.case_id;
+  const confirmed = window.confirm(`Delete case ${caseId}? This cannot be undone.`);
+  if (!confirmed) return;
+
+  const stream = createCaseStreamContext(`DELETE CASE ${caseId}`);
+  setCaseActionState('delete-case', 'Deleting case...', {
+    buttonLabel: 'Deleting...',
+    statusChip: 'Working',
+    statusText: 'Deleting case...',
+  });
+  const result = await window.api.casesDelete(caseId, stream);
+  if (!result.success) {
+    completeCaseStream(stream.streamId, false);
+    setCaseActionState('delete-case', result.error || 'Failed to delete case', {
+      tone: 'error',
+      buttonLabel: 'Retry',
+      statusChip: 'Error',
+      statusText: result.error || 'Failed to delete case',
+    });
+    return;
+  }
+
+  delete casesState.assistantSessions[caseId];
+  casesState.selectedCaseId = null;
+  casesState.currentCase = null;
+  casesState.currentReport = null;
+  clearCasesStatusOverride();
+  clearCaseActionState();
+  await loadCases(null);
 }
 
 async function generateSelectedCaseReport() {
   if (!casesState.currentCase?.case_id) return;
-  const result = await window.api.casesGenerateReport(casesState.currentCase.case_id);
-  if (!result.success) return;
+  const stream = createCaseStreamContext(`GENERATE REPORT ${casesState.currentCase.case_id}`);
+  setCaseActionState('generate-report', 'Generating investigation report...', {
+    buttonLabel: 'Generating...',
+    statusChip: 'Working',
+    statusText: 'Generating investigation report...',
+  });
+  const result = await window.api.casesGenerateReport(casesState.currentCase.case_id, stream);
+  if (!result.success) {
+    completeCaseStream(stream.streamId, false);
+    setCaseActionState('generate-report', result.error || 'Failed to generate report', {
+      tone: 'error',
+      buttonLabel: 'Retry',
+      statusChip: 'Error',
+      statusText: result.error || 'Failed to generate report',
+    });
+    return;
+  }
   casesState.currentReport = {
     markdown: result.markdown || '',
     filename: result.filename || `investigation_${casesState.currentCase.case_id}.md`,
@@ -4822,22 +5557,43 @@ async function generateSelectedCaseReport() {
   if (result.case) {
     casesState.currentCase = result.case;
   }
+  clearCasesStatusOverride();
+  clearCaseActionState();
   renderCaseDetail();
 }
 
 async function saveSelectedCaseReport() {
   if (!casesState.currentReport) return;
-  await window.api.casesSaveReport(casesState.currentReport.filename, casesState.currentReport.markdown);
+  setCaseActionState('save-report', `Saving ${casesState.currentReport.filename || 'report'}...`, {
+    buttonLabel: 'Saving...',
+    statusChip: 'Working',
+    statusText: 'Saving generated report...',
+  });
+  const result = await window.api.casesSaveReport(casesState.currentReport.filename, casesState.currentReport.markdown);
+  if (result && result.success === false) {
+    setCaseActionState('save-report', result.error || 'Failed to save report', {
+      tone: 'error',
+      buttonLabel: 'Retry',
+      statusChip: 'Error',
+      statusText: result.error || 'Failed to save report',
+    });
+    return;
+  }
+  clearCasesStatusOverride();
+  clearCaseActionState();
 }
 
 function initCasesTab() {
   const el = getCasesElements();
+  ensureCasesLogListeners();
+  ensureCaseAssistantListeners();
   if (!el.list || casesState.initialized) {
     if (el.list) loadCases(casesState.selectedCaseId);
     return;
   }
 
   casesState.initialized = true;
+  el.btnClearLog?.addEventListener('click', () => appendCasesLog('', true));
   el.btnRefresh?.addEventListener('click', () => loadCases(casesState.selectedCaseId));
   el.filterStatus?.addEventListener('change', () => loadCases(null));
   el.btnGenerate?.addEventListener('click', generateSelectedCaseReport);
@@ -4940,6 +5696,7 @@ navButtons.forEach(btn => {
       setTimeout(initAgentsTab, 100);
     }
     if (btn.dataset.tab === 'cases') {
+      setCasesStatusOverride('Loading', casesState.initialized ? 'Refreshing investigations...' : 'Loading investigations...', 'pending');
       setTimeout(initCasesTab, 100);
     }
   });

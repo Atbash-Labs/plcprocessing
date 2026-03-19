@@ -462,6 +462,7 @@ class OntologyGraph:
                     explanation: $explanation,
                     probable_causes_json: $causes_json,
                     recommended_checks_json: $checks_json,
+                    operator_context: '',
                     notes: '',
                     resolution_notes: '',
                     owner: '',
@@ -533,6 +534,7 @@ class OntologyGraph:
             "notes",
             "resolution_notes",
             "owner",
+            "operator_context",
             "explanation",
             "confidence",
         }
@@ -558,6 +560,20 @@ class OntologyGraph:
             if not row or row["cnt"] == 0:
                 return None
         return self.get_investigation_case(case_id)
+
+    def delete_investigation_case(self, case_id: str) -> bool:
+        """Delete an investigation case and all of its relationships."""
+        with self.session() as session:
+            row = session.run(
+                """
+                MATCH (c:InvestigationCase {case_id: $case_id})
+                WITH c, count(c) AS cnt
+                DETACH DELETE c
+                RETURN cnt
+                """,
+                case_id=case_id,
+            ).single()
+            return bool(row and row["cnt"])
 
     @staticmethod
     def _parse_json_list(value: Any) -> List[str]:
@@ -639,6 +655,7 @@ class OntologyGraph:
             "z_score": event.get("z_score"),
             "mad_score": event.get("mad_score"),
             "live_value": event.get("live_value"),
+            "operator_context": case.get("operator_context") or "",
             "probable_causes": self._parse_json_list(case.get("probable_causes_json") or event.get("probable_causes_json")),
             "recommended_checks": self._parse_json_list(case.get("recommended_checks_json") or event.get("recommended_checks_json")),
         }
@@ -662,12 +679,16 @@ class OntologyGraph:
             if downstream:
                 pieces.append(f"downstream context: {', '.join(downstream)}")
             dependency_clause = " The graph shows FEEDS dependencies with " + "; ".join(pieces) + "."
+        operator_context = (context.get("operator_context") or "").strip()
+        operator_clause = ""
+        if operator_context:
+            operator_clause = f" Operator-reported context: {operator_context}"
 
         fallback = {
             "summary": case.get("summary") or event.get("summary") or f"Investigate deviation in {subsystem}",
             "narrative": (
                 f"A deviation was detected on `{context.get('source_tag') or subsystem}` within `{subsystem}`."
-                f"{dependency_clause} Based on the event timing and graph context, the best current hypothesis is that "
+                f"{dependency_clause}{operator_clause} Based on the event timing, operator context, and graph context, the best current hypothesis is that "
                 f"this condition may be contributing to downstream process degradation and should be reviewed before "
                 f"closing the incident."
             ),
@@ -686,11 +707,13 @@ class OntologyGraph:
         try:
             from claude_client import ClaudeClient
 
-            client = ClaudeClient(enable_tools=False)
+            client = ClaudeClient(enable_tools=True)
             llm_result = client.query_json(
                 system_prompt=(
                     "You are an industrial incident investigation assistant. "
                     "You generate a draft investigation narrative that must be approved by an operator. "
+                    "You have access to the same industrial troubleshooting tools as the main query agent. "
+                    "Use those tools to validate graph facts, inspect related nodes, and ground the draft in real data. "
                     "Use FEEDS relationships as evidence of likely upstream/downstream propagation when present. "
                     "Return ONLY valid JSON with keys: summary, narrative, probable_causes, recommended_checks, disposition, confidence."
                 ),
@@ -705,16 +728,21 @@ class OntologyGraph:
                         },
                         "event": event,
                         "graph_context": context,
+                        "operator_context": operator_context,
                         "instruction": (
                             "Write a concise but concrete investigation draft. "
+                            "Use tool calls to verify and enrich the available graph context before answering. "
                             "If FEEDS dependencies exist, explain the likely propagation path. "
+                            "Use operator context when available and treat it as a high-value signal. "
                             "Do not overstate certainty."
                         ),
                     },
                     default=str,
                 ),
                 max_tokens=1200,
-                use_tools=False,
+                use_tools=True,
+                verbose=True,
+                require_data_query=True,
             )
             data = llm_result.get("data") if isinstance(llm_result, dict) else None
             if isinstance(data, dict):
@@ -853,6 +881,9 @@ class OntologyGraph:
             report_lines.append("- No recommended checks recorded yet.")
 
         report_lines.extend([
+            "",
+            "## Operator Context",
+            case.get("operator_context") or "No operator context recorded.",
             "",
             "## Operator Notes",
             case.get("notes") or "No operator notes recorded.",
