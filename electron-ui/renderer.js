@@ -4432,6 +4432,7 @@ const casesState = {
   isLoadingDetail: false,
   statusOverride: null,
   actionState: null,
+  assistantSummaryPending: false,
   logStreamIds: new Set(),
   logListenersReady: false,
   assistantSessions: {},
@@ -4479,10 +4480,6 @@ function completeCaseStream(streamId, success) {
   if (!casesState.logStreamIds.has(streamId)) return;
   casesState.logStreamIds.delete(streamId);
   appendCasesLog(success ? '[OK] Case action complete.\n' : '[ERROR] Case action failed.\n');
-}
-
-function appendCasesUiDebugLog(message) {
-  appendCasesLog(`[UI DEBUG] ${message}\n`);
 }
 
 function ensureCasesLogListeners() {
@@ -4539,7 +4536,7 @@ function setCaseActionState(action, message, options = {}) {
     setCasesStatusOverride(options.statusChip || 'Working', options.statusText || message || '', options.tone || 'pending');
   }
   updateCasesToolbar();
-  renderCaseDetail();
+  if (!options.skipRenderDetail) renderCaseDetail();
 }
 
 function clearCaseActionState() {
@@ -4602,59 +4599,47 @@ function renderCaseAssistantTranscript(caseData) {
   }).join('');
 }
 
-function summarizeAssistantResponse(text, maxLen = 320) {
-  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!normalized) return '';
-  if (normalized.length <= maxLen) return normalized;
-  const truncated = normalized.slice(0, maxLen);
-  const sentenceBreak = Math.max(
-    truncated.lastIndexOf('. '),
-    truncated.lastIndexOf('; '),
-    truncated.lastIndexOf('! '),
-    truncated.lastIndexOf('? ')
-  );
-  if (sentenceBreak > Math.floor(maxLen * 0.5)) {
-    return `${truncated.slice(0, sentenceBreak + 1).trim()}`;
-  }
-  return `${truncated.trim()}...`;
-}
-
-function buildCaseAssistantNarrativeSummary(caseId) {
-  const session = getCaseAssistantSession(caseId);
-  const completedTurns = (session.turns || []).filter((turn) => !turn.pending && !turn.error && (turn.response || '').trim());
-  if (!completedTurns.length) return '';
-
-  const uniqueTools = [...new Set(
-    completedTurns.flatMap((turn) => Array.isArray(turn.toolCalls) ? turn.toolCalls : [])
-  )];
-
-  const lines = ['Investigator assistant summary:'];
-  completedTurns.forEach((turn, index) => {
-    lines.push(`${index + 1}. ${turn.question}`);
-    lines.push(`   Findings: ${summarizeAssistantResponse(turn.response)}`);
-    if (turn.toolCalls?.length) {
-      lines.push(`   Tools used: ${[...new Set(turn.toolCalls)].join(', ')}`);
-    }
-  });
-
-  if (uniqueTools.length) {
-    lines.push(`Overall tools referenced: ${uniqueTools.join(', ')}`);
-  }
-
-  return lines.join('\n');
-}
-
-function appendAssistantSummaryToNarrative() {
+async function appendAssistantSummaryToNarrative() {
   const caseId = casesState.currentCase?.case_id;
   if (!caseId) return;
+  const session = getCaseAssistantSession(caseId);
+  const completedTurns = (session.turns || []).filter((turn) => !turn.pending && ((turn.response || '').trim() || (turn.error || '').trim()));
+  if (!completedTurns.length) return;
+  const stream = createCaseStreamContext(`SUMMARIZE ASSISTANT ${caseId}`);
+  casesState.assistantSummaryPending = true;
+  refreshCaseAssistantSummaryButton();
+  setCasesStatusOverride('Working', 'Summarizing investigator conversation...', 'pending');
+
+  const result = await window.api.casesAssistantSummarize(
+    session.history || [],
+    session.turns || [],
+    buildCaseAssistantContext(casesState.currentCase),
+    stream,
+  );
+  const summary = String(result?.summary || '').trim();
+
+  if (result?.success === false || !summary) {
+    completeCaseStream(stream.streamId, false);
+    casesState.assistantSummaryPending = false;
+    refreshCaseAssistantSummaryButton();
+    setCasesStatusOverride('Error', result.error || 'Failed to summarize investigator conversation', 'error');
+    return;
+  }
+
   const explanationInput = document.getElementById('case-explanation-input');
-  if (!explanationInput) return;
-  const summary = buildCaseAssistantNarrativeSummary(caseId);
-  if (!summary) return;
+  if (!explanationInput) {
+    casesState.assistantSummaryPending = false;
+    refreshCaseAssistantSummaryButton();
+    setCasesStatusOverride('Error', 'Narrative field is not available', 'error');
+    return;
+  }
   const existing = explanationInput.value.trim();
   explanationInput.value = existing ? `${existing}\n\n${summary}` : summary;
   explanationInput.focus();
   explanationInput.selectionStart = explanationInput.selectionEnd = explanationInput.value.length;
+  casesState.assistantSummaryPending = false;
+  refreshCaseAssistantSummaryButton();
+  setCasesStatusOverride('Ready', 'Summary appended to investigation narrative.', 'running');
 }
 
 function getCaseAssistantTranscriptElement() {
@@ -4729,6 +4714,19 @@ function finalizeCaseAssistantTurnDom(streamId, options = {}) {
   }
 }
 
+function refreshCaseAssistantSummaryButton() {
+  const caseId = casesState.currentCase?.case_id;
+  const button = document.getElementById('btn-case-assistant-summary');
+  if (!caseId || !button) return;
+  const session = getCaseAssistantSession(caseId);
+  const actionPending = casesState.actionState?.tone === 'pending';
+  const hasAssistantTranscript = session.turns.some(
+    (turn) => !turn.pending && ((turn.response || '').trim() || (turn.error || '').trim())
+  );
+  button.disabled = !hasAssistantTranscript || actionPending || casesState.assistantSummaryPending;
+  button.textContent = casesState.assistantSummaryPending ? 'Summarizing...' : 'Append Summary to Narrative';
+}
+
 function ensureCaseAssistantListeners() {
   if (casesState.assistantListenersReady) return;
   casesState.assistantListenersReady = true;
@@ -4764,6 +4762,7 @@ function ensureCaseAssistantListeners() {
     if (!turn) return;
     turn.pending = false;
     finalizeCaseAssistantTurnDom(data.streamId);
+    refreshCaseAssistantSummaryButton();
   });
 }
 
@@ -4950,6 +4949,7 @@ function renderCaseDetail() {
   const deleteLabel = actionState?.action === 'delete-case' ? (actionState.buttonLabel || 'Deleting...') : 'Delete Case';
   const draftLabel = actionState?.action === 'generate-draft' ? (actionState.buttonLabel || 'Generating...') : 'AI Enrich Draft';
   const reportLabel = actionState?.action === 'generate-report' ? (actionState.buttonLabel || 'Generating...') : 'Generate Report';
+  const assistantSummaryLabel = casesState.assistantSummaryPending ? 'Summarizing...' : 'Append Summary to Narrative';
   const approveLabel = actionState?.action === 'approve-draft' ? (actionState.buttonLabel || 'Approving...') : 'Approve Draft';
   const rejectLabel = actionState?.action === 'reject-draft' ? (actionState.buttonLabel || 'Rejecting...') : 'Reject Draft';
   const regenerateLabel = actionState?.action === 'generate-draft' ? (actionState.buttonLabel || 'Generating...') : 'Regenerate Draft';
@@ -5078,7 +5078,7 @@ function renderCaseDetail() {
       <div class="case-assistant-input-row">
         <input class="input" id="case-assistant-input" placeholder="Ask about this case using the full query-agent toolset">
         <button class="btn btn-secondary" id="btn-case-assistant-clear">Clear Chat</button>
-        <button class="btn btn-secondary" id="btn-case-assistant-summary"${!hasAssistantTranscript || actionPending ? ' disabled' : ''}>Append Summary to Narrative</button>
+        <button class="btn btn-secondary" id="btn-case-assistant-summary"${!hasAssistantTranscript || actionPending || casesState.assistantSummaryPending ? ' disabled' : ''}>${escapeHtml(assistantSummaryLabel)}</button>
         <button class="btn btn-primary" id="btn-case-assistant-send"${actionPending ? ' disabled' : ''}>Ask Assistant</button>
       </div>
     </div>
@@ -5101,28 +5101,6 @@ function renderCaseDetail() {
     }
   });
   document.getElementById('btn-case-assistant-clear')?.addEventListener('click', clearCaseAssistantSession);
-
-  const caseDetailRoot = el.detail;
-  caseDetailRoot.querySelectorAll('input, textarea, select').forEach((field) => {
-    field.addEventListener('pointerdown', (event) => {
-      const hit = document.elementFromPoint(event.clientX, event.clientY);
-      appendCasesUiDebugLog(
-        `pointerdown target=${field.id || field.tagName} hit=${hit?.id || hit?.className || hit?.tagName || 'unknown'} actionPending=${casesState.actionState?.tone === 'pending'}`
-      );
-    });
-    field.addEventListener('focusin', () => {
-      appendCasesUiDebugLog(`focusin target=${field.id || field.tagName}`);
-    });
-  });
-  caseDetailRoot.addEventListener('pointerdown', (event) => {
-    const hit = document.elementFromPoint(event.clientX, event.clientY);
-    if (!hit) return;
-    const targetLabel = event.target?.id || event.target?.className || event.target?.tagName || 'unknown';
-    const hitLabel = hit.id || hit.className || hit.tagName || 'unknown';
-    if (targetLabel !== hitLabel) {
-      appendCasesUiDebugLog(`detail pointerdown target=${targetLabel} hit=${hitLabel}`);
-    }
-  });
 
   updateCasesToolbar();
 }
@@ -5170,12 +5148,14 @@ async function sendCaseAssistantQuery() {
   if (!result.success) {
     turn.error = result.error || 'Investigator assistant query failed';
     finalizeCaseAssistantTurnDom(stream.streamId, { error: turn.error });
+    refreshCaseAssistantSummaryButton();
     return;
   }
 
   session.history = Array.isArray(result.history) ? result.history : session.history;
   turn.response = result.response || turn.response || '';
   finalizeCaseAssistantTurnDom(stream.streamId);
+  refreshCaseAssistantSummaryButton();
 }
 
 async function loadCaseDetails(caseId) {
@@ -5437,12 +5417,6 @@ async function rejectSelectedCaseDraft() {
 
 async function saveSelectedCase() {
   if (!casesState.currentCase?.case_id) return;
-  const stream = createCaseStreamContext(`SAVE CASE ${casesState.currentCase.case_id}`);
-  setCaseActionState('save-case', 'Saving case updates...', {
-    buttonLabel: 'Saving...',
-    statusChip: 'Working',
-    statusText: 'Saving case updates...',
-  });
   const patch = {
     status: document.getElementById('case-status-input')?.value || 'open',
     owner: document.getElementById('case-owner-input')?.value || '',
@@ -5453,6 +5427,13 @@ async function saveSelectedCase() {
     notes: document.getElementById('case-notes-input')?.value || '',
     resolution_notes: document.getElementById('case-resolution-input')?.value || '',
   };
+  const stream = createCaseStreamContext(`SAVE CASE ${casesState.currentCase.case_id}`);
+  setCaseActionState('save-case', 'Saving case updates...', {
+    buttonLabel: 'Saving...',
+    statusChip: 'Working',
+    statusText: 'Saving case updates...',
+    skipRenderDetail: true,
+  });
   const result = await window.api.casesUpdate(casesState.currentCase.case_id, patch, stream);
   if (!result.success || !result.case) {
     completeCaseStream(stream.streamId, false);

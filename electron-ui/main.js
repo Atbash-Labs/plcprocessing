@@ -2138,6 +2138,24 @@ ipcMain.handle('cases:generate-report', async (event, caseId, options = {}) => {
   }
 });
 
+ipcMain.handle('cases:assistant-summarize', async (event, history, turns, context, options = {}) => {
+  try {
+    const output = await runPythonScriptWithStdin('troubleshoot.py', ['--history', '-v'], {
+      mode: 'summarize_case_transcript',
+      history: history || [],
+      turns: turns || [],
+      context: context || '',
+    }, {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'cases',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case summary response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('cases:save-report', async (event, suggestedFilename, markdown) => {
   try {
     const result = await dialog.showSaveDialog(mainWindow, {

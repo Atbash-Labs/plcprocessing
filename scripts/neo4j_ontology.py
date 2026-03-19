@@ -706,6 +706,7 @@ class OntologyGraph:
 
         try:
             from claude_client import ClaudeClient
+            import sys
 
             client = ClaudeClient(enable_tools=True)
             llm_result = client.query_json(
@@ -744,6 +745,13 @@ class OntologyGraph:
                 verbose=True,
                 require_data_query=True,
             )
+            tool_calls = llm_result.get("tool_calls") if isinstance(llm_result, dict) else []
+            tool_names = [call.get("name", "tool") for call in tool_calls if isinstance(call, dict)]
+            print(
+                f"[CASE DRAFT DEBUG] case_id={case_id} tool_calls={len(tool_names)} tools={','.join(tool_names) if tool_names else 'none'} error={llm_result.get('error') if isinstance(llm_result, dict) else 'unknown'}",
+                file=sys.stderr,
+                flush=True,
+            )
             data = llm_result.get("data") if isinstance(llm_result, dict) else None
             if isinstance(data, dict):
                 fallback.update({
@@ -754,8 +762,8 @@ class OntologyGraph:
                     "disposition": data.get("disposition") or fallback["disposition"],
                     "confidence": float(max(0.0, min(1.0, data.get("confidence", fallback["confidence"]) or fallback["confidence"]))),
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[CASE DRAFT DEBUG] case_id={case_id} llm_exception={exc}", file=sys.stderr, flush=True)
 
         with self.session() as session:
             row = session.run(

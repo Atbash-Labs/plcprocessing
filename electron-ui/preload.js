@@ -99,6 +99,7 @@ contextBridge.exposeInMainWorld('api', {
   casesRejectDraft: (caseId, options) => ipcRenderer.invoke('cases:reject-draft', caseId, options),
   casesGenerateReport: (caseId, options) => ipcRenderer.invoke('cases:generate-report', caseId, options),
   casesAssistantQuery: (question, history, context, options) => ipcRenderer.invoke('cases:assistant-query', question, history, context, options),
+  casesAssistantSummarize: (history, turns, context, options) => ipcRenderer.invoke('cases:assistant-summarize', history, turns, context, options),
   casesSaveReport: (suggestedFilename, markdown) => ipcRenderer.invoke('cases:save-report', suggestedFilename, markdown),
   
   // Database connections
