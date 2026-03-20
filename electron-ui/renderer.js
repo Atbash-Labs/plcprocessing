@@ -4585,7 +4585,12 @@ function renderCaseAssistantTranscript(caseData) {
   }
   return session.turns.map((turn) => {
     const toolCallsHtml = turn.toolCalls?.length
-      ? `<div class="case-assistant-tool-calls" data-case-assistant-tools="${escapeHtml(turn.streamId || '')}">${turn.toolCalls.map((tool) => `<span class="tool-call-chip">${escapeHtml(tool)}</span>`).join('')}</div>`
+      ? `
+        <div class="case-assistant-section">
+          <div class="case-assistant-section-label">Tool Calls</div>
+          <div class="case-assistant-tool-calls" data-case-assistant-tools="${escapeHtml(turn.streamId || '')}">${turn.toolCalls.map((tool) => `<span class="tool-call-chip">${escapeHtml(tool)}</span>`).join('')}</div>
+        </div>
+      `
       : '';
     const responseText = turn.error || turn.response || (turn.pending ? 'Working...' : '');
     const responseClass = turn.error ? ' error' : '';
@@ -4593,7 +4598,10 @@ function renderCaseAssistantTranscript(caseData) {
       <div class="case-assistant-turn" data-case-assistant-turn="${escapeHtml(turn.streamId || '')}">
         <div class="case-assistant-user">${escapeHtml(turn.question || '')}</div>
         ${toolCallsHtml}
-        <div class="case-assistant-response${responseClass}" data-case-assistant-response="${escapeHtml(turn.streamId || '')}">${escapeHtml(responseText || '')}</div>
+        <div class="case-assistant-section">
+          <div class="case-assistant-section-label">Response</div>
+          <div class="case-assistant-response${responseClass}" data-case-assistant-response="${escapeHtml(turn.streamId || '')}">${escapeHtml(responseText || '')}</div>
+        </div>
       </div>
     `;
   }).join('');
@@ -4663,7 +4671,10 @@ function ensureCaseAssistantTurnDom(turn) {
   turnEl.setAttribute('data-case-assistant-turn', turn.streamId);
   turnEl.innerHTML = `
     <div class="case-assistant-user">${userText}</div>
-    <div class="case-assistant-response" data-case-assistant-response="${escapeHtml(turn.streamId)}">${escapeHtml(turn.pending ? 'Working...' : (turn.response || ''))}</div>
+    <div class="case-assistant-section">
+      <div class="case-assistant-section-label">Response</div>
+      <div class="case-assistant-response" data-case-assistant-response="${escapeHtml(turn.streamId)}">${escapeHtml(turn.pending ? 'Working...' : (turn.response || ''))}</div>
+    </div>
   `;
   transcript.appendChild(turnEl);
   transcript.scrollTop = transcript.scrollHeight;
@@ -4675,14 +4686,19 @@ function appendCaseAssistantToolCallDom(streamId, tool) {
   if (!turnEl) return;
   let toolsEl = turnEl.querySelector(`[data-case-assistant-tools="${escapeForAttribute(streamId)}"]`);
   if (!toolsEl) {
+    const toolsSection = document.createElement('div');
+    toolsSection.className = 'case-assistant-section';
+    toolsSection.innerHTML = `<div class="case-assistant-section-label">Tool Calls</div>`;
     toolsEl = document.createElement('div');
     toolsEl.className = 'case-assistant-tool-calls';
     toolsEl.setAttribute('data-case-assistant-tools', streamId);
+    toolsSection.appendChild(toolsEl);
     const responseEl = turnEl.querySelector(`[data-case-assistant-response="${escapeForAttribute(streamId)}"]`);
+    const responseSection = responseEl?.closest('.case-assistant-section');
     if (responseEl) {
-      turnEl.insertBefore(toolsEl, responseEl);
+      turnEl.insertBefore(toolsSection, responseSection || responseEl);
     } else {
-      turnEl.appendChild(toolsEl);
+      turnEl.appendChild(toolsSection);
     }
   }
   const chip = document.createElement('span');
@@ -4958,22 +4974,24 @@ function renderCaseDetail() {
     : '';
 
   el.detail.innerHTML = `
-    <div class="case-detail-header">
+    <div class="case-workspace">
+      <div class="case-main-column">
+        <div class="case-detail-header">
       <div class="case-detail-title-block">
         <h3>${escapeHtml(item.title || 'Untitled case')}</h3>
         <div class="case-detail-subtitle">Case ID <code>${escapeHtml(item.case_id || '')}</code> linked to event <code>${escapeHtml(item.source_event_id || 'n/a')}</code></div>
       </div>
       <span class="case-pill status-${escapeHtml(normalizeCaseStatus(item.status))}">${escapeHtml(normalizeCaseStatus(item.status).replace('_', ' '))}</span>
-    </div>
+        </div>
 
-    <div class="case-detail-grid">
+        <div class="case-detail-grid">
       <div class="case-detail-stat"><span class="case-detail-stat-label">Subsystem</span><span class="case-detail-stat-value">${escapeHtml(item.subsystem_name || item.subsystem_id || 'Unknown')}</span></div>
       <div class="case-detail-stat"><span class="case-detail-stat-label">Source Tag</span><span class="case-detail-stat-value">${escapeHtml(item.source_tag || event.source_tag || 'n/a')}</span></div>
       <div class="case-detail-stat"><span class="case-detail-stat-label">Severity</span><span class="case-detail-stat-value">${escapeHtml(item.severity || 'unknown')}</span></div>
       <div class="case-detail-stat"><span class="case-detail-stat-label">Last Updated</span><span class="case-detail-stat-value">${escapeHtml(formatCaseDate(item.updated_at))}</span></div>
-    </div>
+        </div>
 
-    <div class="case-form-grid">
+        <div class="case-form-grid">
       <div class="case-form-field">
         <label for="case-status-input">Status</label>
         <select class="input" id="case-status-input">
@@ -5010,18 +5028,18 @@ function renderCaseDetail() {
         <label for="case-resolution-input">Resolution Notes</label>
         <textarea class="input" id="case-resolution-input" rows="4" placeholder="Corrective action, reset steps, remaining follow-ups...">${escapeHtml(item.resolution_notes || '')}</textarea>
       </div>
-    </div>
+        </div>
 
-    <div class="case-form-actions">
+        <div class="case-form-actions">
       <button class="btn btn-primary" id="btn-case-save"${actionPending ? ' disabled' : ''}>${escapeHtml(saveLabel)}</button>
       <button class="btn btn-secondary" id="btn-case-close"${actionPending || normalizeCaseStatus(item.status) === 'closed' ? ' disabled' : ''}>${escapeHtml(closeLabel)}</button>
       <button class="btn btn-secondary" id="btn-case-generate-draft"${actionPending ? ' disabled' : ''}>${escapeHtml(draftLabel)}</button>
       <button class="btn btn-secondary" id="btn-case-generate-report"${actionPending ? ' disabled' : ''}>${escapeHtml(reportLabel)}</button>
       <button class="btn btn-danger" id="btn-case-delete"${actionPending ? ' disabled' : ''}>${escapeHtml(deleteLabel)}</button>
-    </div>
-    ${actionStatusHtml}
+        </div>
+        ${actionStatusHtml}
 
-    ${hasDraft ? `
+        ${hasDraft ? `
       <div class="case-draft-panel">
         <div class="case-draft-header">
           <h4>AI Draft</h4>
@@ -5046,9 +5064,9 @@ function renderCaseDetail() {
           <button class="btn btn-secondary" id="btn-case-regenerate-draft"${actionPending ? ' disabled' : ''}>${escapeHtml(regenerateLabel)}</button>
         </div>
       </div>
-    ` : ''}
+        ` : ''}
 
-    <div class="case-linked-lists">
+        <div class="case-linked-lists">
       <div class="case-linked-panel">
         <h4>Probable Causes</h4>
         ${probableCauses.length ? `<ul>${probableCauses.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '<div class="cases-empty" style="padding:0">No probable causes recorded yet.</div>'}
@@ -5065,22 +5083,31 @@ function renderCaseDetail() {
         <h4>Linked Equipment</h4>
         ${equipment.length ? `<ul>${equipment.map((x) => `<li><code>${escapeHtml(x)}</code></li>`).join('')}</ul>` : '<div class="cases-empty" style="padding:0">No linked equipment.</div>'}
       </div>
-    </div>
+        </div>
 
-    <div class="case-report-panel">
+        <div class="case-report-panel">
       <h4>Generated Report</h4>
       ${reportHtml}
-    </div>
-
-    <div class="case-report-panel">
-      <h4>Investigator Assistant</h4>
-      <div class="case-assistant-transcript">${renderCaseAssistantTranscript(item)}</div>
-      <div class="case-assistant-input-row">
-        <input class="input" id="case-assistant-input" placeholder="Ask about this case using the full query-agent toolset">
-        <button class="btn btn-secondary" id="btn-case-assistant-clear">Clear Chat</button>
-        <button class="btn btn-secondary" id="btn-case-assistant-summary"${!hasAssistantTranscript || actionPending || casesState.assistantSummaryPending ? ' disabled' : ''}>${escapeHtml(assistantSummaryLabel)}</button>
-        <button class="btn btn-primary" id="btn-case-assistant-send"${actionPending ? ' disabled' : ''}>Ask Assistant</button>
+        </div>
       </div>
+
+      <aside class="case-assistant-sidebar">
+        <div class="case-assistant-sidebar-header">
+          <div>
+            <h4>Investigator Assistant</h4>
+            <div class="case-assistant-sidebar-subtitle">Case-scoped chat with the full query-agent toolset</div>
+          </div>
+        </div>
+        <div class="case-assistant-transcript">${renderCaseAssistantTranscript(item)}</div>
+        <div class="case-assistant-input-row">
+          <textarea class="input" id="case-assistant-input" rows="6" placeholder="Ask about this case using the full query-agent toolset"></textarea>
+          <div class="case-assistant-action-row">
+            <button class="btn btn-secondary" id="btn-case-assistant-clear">Clear Chat</button>
+            <button class="btn btn-secondary" id="btn-case-assistant-summary"${!hasAssistantTranscript || actionPending || casesState.assistantSummaryPending ? ' disabled' : ''}>${escapeHtml(assistantSummaryLabel)}</button>
+            <button class="btn btn-primary" id="btn-case-assistant-send"${actionPending ? ' disabled' : ''}>Ask Assistant</button>
+          </div>
+        </div>
+      </aside>
     </div>
   `;
 
