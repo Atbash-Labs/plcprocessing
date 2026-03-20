@@ -87,6 +87,20 @@ contextBridge.exposeInMainWorld('api', {
   agentsCleanup: (retentionDays) => ipcRenderer.invoke('agents:cleanup', retentionDays),
   agentsStartSubsystem: (subId) => ipcRenderer.invoke('agents:start-subsystem', subId),
   agentsStopSubsystem: (subId) => ipcRenderer.invoke('agents:stop-subsystem', subId),
+
+  // Investigation cases
+  casesList: (filters, options) => ipcRenderer.invoke('cases:list', filters, options),
+  casesGet: (caseId, options) => ipcRenderer.invoke('cases:get', caseId, options),
+  casesCreateFromEvent: (eventPayload, options) => ipcRenderer.invoke('cases:create-from-event', eventPayload, options),
+  casesUpdate: (caseId, patch, options) => ipcRenderer.invoke('cases:update', caseId, patch, options),
+  casesDelete: (caseId, options) => ipcRenderer.invoke('cases:delete', caseId, options),
+  casesGenerateDraft: (caseId, options) => ipcRenderer.invoke('cases:generate-draft', caseId, options),
+  casesApproveDraft: (caseId, options) => ipcRenderer.invoke('cases:approve-draft', caseId, options),
+  casesRejectDraft: (caseId, options) => ipcRenderer.invoke('cases:reject-draft', caseId, options),
+  casesGenerateReport: (caseId, options) => ipcRenderer.invoke('cases:generate-report', caseId, options),
+  casesAssistantQuery: (question, history, context, options) => ipcRenderer.invoke('cases:assistant-query', question, history, context, options),
+  casesAssistantSummarize: (history, turns, context, options) => ipcRenderer.invoke('cases:assistant-summarize', history, turns, context, options),
+  casesSaveReport: (suggestedFilename, markdown) => ipcRenderer.invoke('cases:save-report', suggestedFilename, markdown),
   
   // Database connections
   getDbConnections: () => ipcRenderer.invoke('get-db-connections'),

@@ -140,6 +140,7 @@ PROCESS_RELATIONSHIPS: Dict[str, Dict[str, str]] = {
     "HANDLES_MEDIUM":        {"from": "Equipment",        "to": "ProcessMedium"},
     "PERFORMS_OPERATION":     {"from": "Equipment",        "to": "UnitOperation"},
     "HAS_OPERATING_ENVELOPE":{"from": "Equipment",        "to": "OperatingEnvelope"},
+    "FEEDS":                {"from": "Equipment",        "to": "Equipment"},
     "MEASURES":              {"from": "ScadaTag",          "to": "PhysicalPrinciple"},
     "MONITORS_ENVELOPE":     {"from": "ScadaTag",          "to": "OperatingEnvelope"},
     "IMPLEMENTS_CONTROL_OF": {"from": "AOI",               "to": "UnitOperation"},

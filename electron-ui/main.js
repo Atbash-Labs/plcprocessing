@@ -131,7 +131,7 @@ app.on('activate', () => {
 
 // Helper to run Python scripts with optional streaming
 function runPythonScript(scriptName, args = [], options = {}) {
-  const { streaming = false, streamId = null } = options;
+  const { streaming = false, streamId = null, target = 'default' } = options;
   
   return new Promise((resolve, reject) => {
     const pythonProcess = spawnPythonProcess(scriptName, args);
@@ -151,17 +151,20 @@ function runPythonScript(scriptName, args = [], options = {}) {
           if (line.startsWith('[TOOL]')) {
             sendToRenderer('tool-call', {
               streamId,
+              target,
               tool: line.replace('[TOOL]', '').trim()
             }, 'runPythonScript stdout tool');
           } else if (line.startsWith('[DEBUG]')) {
             sendToRenderer('stream-output', {
               streamId,
+              target,
               text: line,
               type: 'debug'
             }, 'runPythonScript stdout debug');
           } else if (line.trim()) {
             sendToRenderer('stream-output', {
               streamId,
+              target,
               text: line,
               type: 'output'
             }, 'runPythonScript stdout output');
@@ -178,6 +181,7 @@ function runPythonScript(scriptName, args = [], options = {}) {
       if (streaming) {
         sendToRenderer('stream-output', {
           streamId,
+          target,
           text,
           type: 'stderr'
         }, 'runPythonScript stderr');
@@ -188,6 +192,7 @@ function runPythonScript(scriptName, args = [], options = {}) {
       if (streaming) {
         sendToRenderer('stream-complete', {
           streamId,
+          target,
           success: code === 0
         }, 'runPythonScript close');
       }
@@ -203,6 +208,105 @@ function runPythonScript(scriptName, args = [], options = {}) {
       reject(err);
     });
   });
+}
+
+function runPythonScriptWithStdin(scriptName, args = [], payload = null, options = {}) {
+  const { streaming = false, streamId = null, target = 'default' } = options;
+  return new Promise((resolve, reject) => {
+    const pythonProcess = spawnPythonProcess(scriptName, args);
+    let stdout = '';
+    let stderr = '';
+
+    pythonProcess.stdout.on('data', (data) => {
+      const text = data.toString();
+      stdout += text;
+      if (streaming) {
+        const lines = text.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('[TOOL]')) {
+            sendToRenderer('tool-call', {
+              streamId,
+              target,
+              tool: line.replace('[TOOL]', '').trim()
+            }, 'runPythonScriptWithStdin stdout tool');
+          } else if (line.startsWith('[DEBUG]')) {
+            sendToRenderer('stream-output', {
+              streamId,
+              target,
+              text: line,
+              type: 'debug'
+            }, 'runPythonScriptWithStdin stdout debug');
+          } else if (line.trim()) {
+            sendToRenderer('stream-output', {
+              streamId,
+              target,
+              text: line,
+              type: 'output'
+            }, 'runPythonScriptWithStdin stdout output');
+          }
+        }
+      }
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      const text = data.toString();
+      stderr += text;
+      if (streaming) {
+        sendToRenderer('stream-output', {
+          streamId,
+          target,
+          text,
+          type: 'stderr'
+        }, 'runPythonScriptWithStdin stderr');
+      }
+    });
+
+    pythonProcess.on('close', (code) => {
+      if (streaming) {
+        sendToRenderer('stream-complete', {
+          streamId,
+          target,
+          success: code === 0
+        }, 'runPythonScriptWithStdin close');
+      }
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(stderr || `Process exited with code ${code}`));
+      }
+    });
+
+    pythonProcess.on('error', (err) => {
+      reject(err);
+    });
+
+    if (payload !== null && pythonProcess.stdin) {
+      pythonProcess.stdin.write(typeof payload === 'string' ? payload : JSON.stringify(payload));
+    }
+    if (pythonProcess.stdin) {
+      pythonProcess.stdin.end();
+    }
+  });
+}
+
+function parseJsonFromMixedOutput(output, fallback = {}) {
+  const text = String(output || '').trim();
+  if (!text) return fallback;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      if (!line.startsWith('{') && !line.startsWith('[')) continue;
+      try {
+        return JSON.parse(line);
+      } catch {
+        // Continue scanning upward.
+      }
+    }
+  }
+  return fallback;
 }
 
 function normalizeAgentConfig(config = {}) {
@@ -685,6 +789,115 @@ ipcMain.handle('troubleshoot', async (event, question, history) => {
         }
       });
       
+      proc.on('error', (err) => {
+        resolve({ success: false, error: err.message, streamId });
+      });
+    });
+  } catch (error) {
+    return { success: false, error: error.message, streamId };
+  }
+});
+
+ipcMain.handle('cases:assistant-query', async (event, question, history, context, options = {}) => {
+  const streamId = options.streamId || `cases-assistant-${Date.now()}`;
+  const target = options.target || 'cases-assistant';
+
+  try {
+    const payload = JSON.stringify({
+      question: question,
+      history: history || [],
+      context: context || '',
+    });
+
+    return new Promise((resolve) => {
+      const proc = spawnPythonProcess('troubleshoot.py', ['--history', '-v']);
+
+      proc.stdin.write(payload);
+      proc.stdin.end();
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      proc.stderr.on('data', (data) => {
+        const text = data.toString();
+        stderr += text;
+
+        if (canSendToRenderer()) {
+          if (text.includes('[TOOL]') || text.includes('[DEBUG]') || text.includes('[INFO]')) {
+            const lines = text.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('[TOOL]')) {
+                sendToRenderer('tool-call', {
+                  streamId,
+                  target,
+                  tool: line.replace('[TOOL]', '').trim()
+                }, 'cases assistant stderr tool');
+              } else if (line.startsWith('[DEBUG]') || line.startsWith('[INFO]')) {
+                sendToRenderer('stream-output', {
+                  streamId,
+                  target,
+                  text: line,
+                  type: 'debug'
+                }, 'cases assistant stderr debug');
+              }
+            }
+          } else if (text.includes('[STREAM]')) {
+            const streamStart = text.indexOf('[STREAM]');
+            const afterStream = text.substring(streamStart + 8);
+            if (afterStream) {
+              sendToRenderer('stream-output', {
+                streamId,
+                target,
+                text: afterStream,
+                type: 'claude-stream'
+              }, 'cases assistant stderr stream-start');
+            }
+          } else if (text && !text.startsWith('[')) {
+            sendToRenderer('stream-output', {
+              streamId,
+              target,
+              text: text,
+              type: 'claude-stream'
+            }, 'cases assistant stderr stream-cont');
+          }
+        }
+      });
+
+      proc.on('close', (code) => {
+        if (canSendToRenderer()) {
+          sendToRenderer('stream-complete', {
+            streamId,
+            target,
+            success: code === 0
+          }, 'cases assistant close');
+        }
+
+        if (code === 0) {
+          try {
+            const result = JSON.parse(stdout);
+            resolve({
+              success: true,
+              response: result.response,
+              history: result.history,
+              streamId
+            });
+          } catch (e) {
+            resolve({ success: true, response: stdout, history: [], streamId });
+          }
+        } else {
+          const cleanError = stderr
+            .split('\n')
+            .filter(line => !line.startsWith('[TOOL]') && !line.startsWith('[DEBUG]'))
+            .join('\n')
+            .trim();
+          resolve({ success: false, error: cleanError || 'Case investigator query failed', streamId });
+        }
+      });
+
       proc.on('error', (err) => {
         resolve({ success: false, error: err.message, streamId });
       });
@@ -1799,6 +2012,167 @@ ipcMain.handle('agents:stop-subsystem', async (event, subsystemId) => {
   if (!activeAgentRun) return { success: false, error: 'No active agent run' };
   const sent = sendAgentCommand({ cmd: 'stop-agent', subsystemId });
   return { success: sent, subsystemId };
+});
+
+// ============================================
+// Investigation Cases IPC Handlers
+// ============================================
+
+ipcMain.handle('cases:list', async (event, filters = {}, options = {}) => {
+  const args = ['list'];
+  if (filters.limit) args.push('--limit', String(filters.limit));
+  if (filters.status) args.push('--status', String(filters.status));
+  try {
+    const output = await runPythonScript('case_api.py', args, {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
+    return parseJsonFromMixedOutput(output, { success: true, cases: [] });
+  } catch (error) {
+    return { success: false, error: error.message, cases: [] };
+  }
+});
+
+ipcMain.handle('cases:get', async (event, caseId, options = {}) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['get', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:create-from-event', async (event, eventPayload = {}, options = {}) => {
+  try {
+    const output = await runPythonScriptWithStdin('case_api.py', ['create-from-event'], eventPayload, {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:update', async (event, caseId, patch = {}, options = {}) => {
+  try {
+    const output = await runPythonScriptWithStdin('case_api.py', ['update', '--case-id', String(caseId)], patch, {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:delete', async (event, caseId, options = {}) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['delete', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid delete response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:generate-draft', async (event, caseId, options = {}) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['generate-draft', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid draft response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:approve-draft', async (event, caseId, options = {}) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['approve-draft', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid draft response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:reject-draft', async (event, caseId, options = {}) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['reject-draft', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid draft response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:generate-report', async (event, caseId, options = {}) => {
+  try {
+    const output = await runPythonScript('case_api.py', ['generate-report', '--case-id', String(caseId)], {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'default',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid report response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:assistant-summarize', async (event, history, turns, context, options = {}) => {
+  try {
+    const output = await runPythonScriptWithStdin('troubleshoot.py', ['--history', '-v'], {
+      mode: 'summarize_case_transcript',
+      history: history || [],
+      turns: turns || [],
+      context: context || '',
+    }, {
+      streaming: Boolean(options.streamId),
+      streamId: options.streamId || null,
+      target: options.target || 'cases',
+    });
+    return parseJsonFromMixedOutput(output, { success: false, error: 'Invalid case summary response' });
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('cases:save-report', async (event, suggestedFilename, markdown) => {
+  try {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save Investigation Report',
+      defaultPath: suggestedFilename || 'investigation_report.md',
+      filters: [
+        { name: 'Markdown', extensions: ['md'] },
+        { name: 'Text', extensions: ['txt'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return { success: false, cancelled: true };
+    fs.writeFileSync(result.filePath, String(markdown || ''), 'utf-8');
+    return { success: true, filePath: result.filePath };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 });
 
 // ============================================

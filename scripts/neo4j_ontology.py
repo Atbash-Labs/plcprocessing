@@ -6,6 +6,7 @@ Replaces JSON file storage with a proper graph database.
 
 import os
 import json
+import uuid
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from contextlib import contextmanager
@@ -176,6 +177,7 @@ class OntologyGraph:
                 "CREATE CONSTRAINT namedquery_name IF NOT EXISTS FOR (q:NamedQuery) REQUIRE q.name IS UNIQUE",
                 "CREATE CONSTRAINT agentrun_id IF NOT EXISTS FOR (r:AgentRun) REQUIRE r.run_id IS UNIQUE",
                 "CREATE CONSTRAINT anomalyevent_id IF NOT EXISTS FOR (e:AnomalyEvent) REQUIRE e.event_id IS UNIQUE",
+                "CREATE CONSTRAINT investigationcase_id IF NOT EXISTS FOR (c:InvestigationCase) REQUIRE c.case_id IS UNIQUE",
             ]
 
             # Regular indexes
@@ -223,6 +225,10 @@ class OntologyGraph:
                 "CREATE INDEX anomalyevent_state IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.state)",
                 "CREATE INDEX anomalyevent_severity IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.severity)",
                 "CREATE INDEX anomalyevent_dedup_key IF NOT EXISTS FOR (e:AnomalyEvent) ON (e.dedup_key)",
+                "CREATE INDEX investigationcase_status IF NOT EXISTS FOR (c:InvestigationCase) ON (c.status)",
+                "CREATE INDEX investigationcase_severity IF NOT EXISTS FOR (c:InvestigationCase) ON (c.severity)",
+                "CREATE INDEX investigationcase_created IF NOT EXISTS FOR (c:InvestigationCase) ON (c.created_at)",
+                "CREATE INDEX investigationcase_source_event IF NOT EXISTS FOR (c:InvestigationCase) ON (c.source_event_id)",
                 # Process-semantic layer indexes
                 "CREATE INDEX processmedium_name IF NOT EXISTS FOR (pm:ProcessMedium) ON (pm.name)",
                 "CREATE INDEX unitoperation_name IF NOT EXISTS FOR (uo:UnitOperation) ON (uo.name)",
@@ -334,6 +340,571 @@ class OntologyGraph:
             )
             record = result.single()
             return int(record["deleted"]) if record else 0
+
+    def list_investigation_cases(
+        self,
+        limit: int = 100,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List investigation cases with lightweight linked context."""
+        with self.session() as session:
+            clauses = []
+            params: Dict[str, Any] = {"limit": max(1, min(limit, 500))}
+            if status:
+                clauses.append("c.status = $status")
+                params["status"] = status
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            result = session.run(
+                f"""
+                MATCH (c:InvestigationCase)
+                {where}
+                OPTIONAL MATCH (c)-[:BASED_ON]->(e:AnomalyEvent)
+                OPTIONAL MATCH (c)-[:INVOLVES_TAG]->(t:ScadaTag)
+                OPTIONAL MATCH (c)-[:INVOLVES_EQUIPMENT]->(eq:Equipment)
+                RETURN c, e.event_id AS event_id, e.summary AS event_summary,
+                       collect(DISTINCT t.name) AS tags,
+                       collect(DISTINCT eq.name) AS equipment
+                ORDER BY c.created_at DESC
+                LIMIT $limit
+                """,
+                **params,
+            )
+            cases: List[Dict[str, Any]] = []
+            for record in result:
+                props = dict(record["c"])
+                props["source_event_id"] = props.get("source_event_id") or record["event_id"]
+                props["source_event_summary"] = record["event_summary"]
+                props["tags"] = [x for x in record["tags"] if x]
+                props["equipment"] = [x for x in record["equipment"] if x]
+                cases.append(props)
+            return cases
+
+    def get_investigation_case(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch one investigation case with linked event, tag, and equipment context."""
+        with self.session() as session:
+            record = session.run(
+                """
+                MATCH (c:InvestigationCase {case_id: $case_id})
+                OPTIONAL MATCH (c)-[:BASED_ON]->(e:AnomalyEvent)
+                OPTIONAL MATCH (c)-[:INVOLVES_TAG]->(t:ScadaTag)
+                OPTIONAL MATCH (c)-[:INVOLVES_EQUIPMENT]->(eq:Equipment)
+                RETURN c,
+                       e,
+                       collect(DISTINCT t.name) AS tags,
+                       collect(DISTINCT eq.name) AS equipment
+                LIMIT 1
+                """,
+                case_id=case_id,
+            ).single()
+            if not record:
+                return None
+            case_data = dict(record["c"])
+            case_data["tags"] = [x for x in record["tags"] if x]
+            case_data["equipment"] = [x for x in record["equipment"] if x]
+            event = record["e"]
+            case_data["event"] = dict(event) if event else None
+            return case_data
+
+    def create_investigation_case_from_event(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a persistent investigation case from an event payload."""
+        event = dict(event_data or {})
+        source_event_id = event.get("event_id", "")
+        if source_event_id:
+            with self.session() as session:
+                existing = session.run(
+                    """
+                    MATCH (c:InvestigationCase {source_event_id: $source_event_id})
+                    RETURN c.case_id AS case_id
+                    ORDER BY c.created_at DESC
+                    LIMIT 1
+                    """,
+                    source_event_id=source_event_id,
+                ).single()
+                if existing and existing.get("case_id"):
+                    return self.get_investigation_case(existing["case_id"])
+
+        case_id = str(uuid.uuid4())
+        title = (
+            event.get("summary")
+            or event.get("tag_name")
+            or event.get("source_tag")
+            or f"Investigation {case_id[:8]}"
+        )
+        tags = event.get("tags") if isinstance(event.get("tags"), list) else []
+        equipment = event.get("equipment") if isinstance(event.get("equipment"), list) else []
+        if event.get("tag_name") and event["tag_name"] not in tags:
+            tags = [event["tag_name"], *tags]
+
+        def _json_list(key: str) -> str:
+            value = event.get(key)
+            if isinstance(value, list):
+                return json.dumps(value, default=str)
+            if isinstance(value, str) and value.strip():
+                return value
+            return "[]"
+
+        with self.session() as session:
+            session.run(
+                """
+                CREATE (c:InvestigationCase {
+                    case_id: $case_id,
+                    title: $title,
+                    summary: $summary,
+                    status: 'open',
+                    disposition: '',
+                    severity: $severity,
+                    confidence: $confidence,
+                    subsystem_id: $subsystem_id,
+                    subsystem_name: $subsystem_name,
+                    subsystem_type: $subsystem_type,
+                    source_event_id: $source_event_id,
+                    source_tag: $source_tag,
+                    explanation: $explanation,
+                    probable_causes_json: $causes_json,
+                    recommended_checks_json: $checks_json,
+                    operator_context: '',
+                    notes: '',
+                    resolution_notes: '',
+                    owner: '',
+                    created_at: datetime(),
+                    updated_at: datetime(),
+                    raw_event_json: $raw_event_json
+                })
+                """,
+                case_id=case_id,
+                title=title,
+                summary=event.get("summary", ""),
+                severity=event.get("severity", "medium"),
+                confidence=float(event.get("confidence", 0.5) or 0.5),
+                subsystem_id=event.get("subsystem_id", ""),
+                subsystem_name=event.get("subsystem_name", ""),
+                subsystem_type=event.get("subsystem_type", ""),
+                source_event_id=source_event_id,
+                source_tag=event.get("source_tag", "") or event.get("tag_name", ""),
+                explanation=event.get("explanation", ""),
+                causes_json=_json_list("probable_causes_json"),
+                checks_json=_json_list("recommended_checks_json"),
+                raw_event_json=json.dumps(event, default=str),
+            )
+
+            if source_event_id:
+                session.run(
+                    """
+                    MATCH (c:InvestigationCase {case_id: $case_id})
+                    MATCH (e:AnomalyEvent {event_id: $event_id})
+                    MERGE (c)-[:BASED_ON]->(e)
+                    """,
+                    case_id=case_id,
+                    event_id=source_event_id,
+                )
+
+            if tags:
+                session.run(
+                    """
+                    MATCH (c:InvestigationCase {case_id: $case_id})
+                    UNWIND $tags AS tag_name
+                    MATCH (t:ScadaTag {name: tag_name})
+                    MERGE (c)-[:INVOLVES_TAG]->(t)
+                    """,
+                    case_id=case_id,
+                    tags=tags,
+                )
+
+            if equipment:
+                session.run(
+                    """
+                    MATCH (c:InvestigationCase {case_id: $case_id})
+                    UNWIND $equipment AS equipment_name
+                    MATCH (eq:Equipment {name: equipment_name})
+                    MERGE (c)-[:INVOLVES_EQUIPMENT]->(eq)
+                    """,
+                    case_id=case_id,
+                    equipment=equipment,
+                )
+
+        return self.get_investigation_case(case_id)
+
+    def update_investigation_case(self, case_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Update a subset of investigation case fields."""
+        allowed_fields = {
+            "title",
+            "summary",
+            "status",
+            "disposition",
+            "notes",
+            "resolution_notes",
+            "owner",
+            "operator_context",
+            "explanation",
+            "confidence",
+        }
+        patch = {k: v for k, v in (updates or {}).items() if k in allowed_fields}
+        if not patch:
+            return self.get_investigation_case(case_id)
+
+        assignments = [f"c.{key} = ${key}" for key in patch.keys()]
+        if patch.get("status") == "closed":
+            assignments.append("c.closed_at = datetime()")
+        assignments.append("c.updated_at = datetime()")
+
+        with self.session() as session:
+            row = session.run(
+                f"""
+                MATCH (c:InvestigationCase {{case_id: $case_id}})
+                SET {", ".join(assignments)}
+                RETURN count(c) AS cnt
+                """,
+                case_id=case_id,
+                **patch,
+            ).single()
+            if not row or row["cnt"] == 0:
+                return None
+        return self.get_investigation_case(case_id)
+
+    def delete_investigation_case(self, case_id: str) -> bool:
+        """Delete an investigation case and all of its relationships."""
+        with self.session() as session:
+            row = session.run(
+                """
+                MATCH (c:InvestigationCase {case_id: $case_id})
+                WITH c, count(c) AS cnt
+                DETACH DELETE c
+                RETURN cnt
+                """,
+                case_id=case_id,
+            ).single()
+            return bool(row and row["cnt"])
+
+    @staticmethod
+    def _parse_json_list(value: Any) -> List[str]:
+        """Normalize JSON-or-list values into a flat string list."""
+        if isinstance(value, list):
+            return [str(v) for v in value if v]
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [str(v) for v in parsed if v]
+            except Exception:
+                return [value]
+        return []
+
+    def _build_investigation_case_ai_context(self, case: Dict[str, Any]) -> Dict[str, Any]:
+        """Collect graph context for AI draft generation, including FEEDS links."""
+        source_tag = case.get("source_tag") or ((case.get("event") or {}).get("source_tag"))
+        subsystem_name = case.get("subsystem_name") or ""
+
+        with self.session() as session:
+            record = session.run(
+                """
+                OPTIONAL MATCH (sub:View {name: $subsystem_name})
+                OPTIONAL MATCH (up:View)-[:FEEDS]->(sub)
+                OPTIONAL MATCH (sub)-[:FEEDS]->(down:View)
+                OPTIONAL MATCH (c:InvestigationCase {case_id: $case_id})-[:INVOLVES_TAG]->(linked_tag:ScadaTag)
+                OPTIONAL MATCH (c)-[:INVOLVES_EQUIPMENT]->(linked_eq:Equipment)
+                OPTIONAL MATCH (tag:ScadaTag)
+                WHERE tag.name = $source_tag OR tag.opc_item_path = $source_tag
+                OPTIONAL MATCH (vc:ViewComponent)-[:BINDS_TO]->(tag)
+                OPTIONAL MATCH (tag_view:View)-[:HAS_COMPONENT]->(vc)
+                OPTIONAL MATCH (tag_up:View)-[:FEEDS]->(tag_view)
+                OPTIONAL MATCH (tag_view)-[:FEEDS]->(tag_down:View)
+                RETURN collect(DISTINCT linked_tag.name) AS linked_tags,
+                       collect(DISTINCT linked_eq.name) AS linked_equipment,
+                       collect(DISTINCT up.name) AS upstream_views,
+                       collect(DISTINCT down.name) AS downstream_views,
+                       collect(DISTINCT tag_view.name) AS tag_views,
+                       collect(DISTINCT tag_up.name) AS tag_upstream_views,
+                       collect(DISTINCT tag_down.name) AS tag_downstream_views
+                LIMIT 1
+                """,
+                case_id=case.get("case_id", ""),
+                subsystem_name=subsystem_name,
+                source_tag=source_tag,
+            ).single()
+
+        event = case.get("event") or {}
+        upstream_views = []
+        downstream_views = []
+        tags = list(case.get("tags") or [])
+        equipment = list(case.get("equipment") or [])
+        tag_views = []
+
+        if record:
+            upstream_views = sorted(
+                set([x for x in record["upstream_views"] if x] + [x for x in record["tag_upstream_views"] if x])
+            )
+            downstream_views = sorted(
+                set([x for x in record["downstream_views"] if x] + [x for x in record["tag_downstream_views"] if x])
+            )
+            tag_views = sorted(set([x for x in record["tag_views"] if x]))
+            tags = sorted(set(tags + [x for x in record["linked_tags"] if x]))
+            equipment = sorted(set(equipment + [x for x in record["linked_equipment"] if x]))
+
+        return {
+            "case_id": case.get("case_id"),
+            "subsystem_name": subsystem_name,
+            "subsystem_type": case.get("subsystem_type", ""),
+            "source_tag": source_tag,
+            "linked_tags": tags,
+            "linked_equipment": equipment,
+            "views": tag_views or ([subsystem_name] if subsystem_name else []),
+            "upstream_views": upstream_views,
+            "downstream_views": downstream_views,
+            "event_summary": event.get("summary") or case.get("summary", ""),
+            "event_severity": event.get("severity") or case.get("severity", ""),
+            "z_score": event.get("z_score"),
+            "mad_score": event.get("mad_score"),
+            "live_value": event.get("live_value"),
+            "operator_context": case.get("operator_context") or "",
+            "probable_causes": self._parse_json_list(case.get("probable_causes_json") or event.get("probable_causes_json")),
+            "recommended_checks": self._parse_json_list(case.get("recommended_checks_json") or event.get("recommended_checks_json")),
+        }
+
+    def generate_investigation_case_draft(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """Generate an AI-assisted draft that requires explicit approval."""
+        case = self.get_investigation_case(case_id)
+        if not case:
+            return None
+
+        context = self._build_investigation_case_ai_context(case)
+        event = case.get("event") or {}
+        subsystem = context.get("subsystem_name") or "the affected subsystem"
+        upstream = context.get("upstream_views") or []
+        downstream = context.get("downstream_views") or []
+        dependency_clause = ""
+        if upstream or downstream:
+            pieces = []
+            if upstream:
+                pieces.append(f"upstream context: {', '.join(upstream)}")
+            if downstream:
+                pieces.append(f"downstream context: {', '.join(downstream)}")
+            dependency_clause = " The graph shows FEEDS dependencies with " + "; ".join(pieces) + "."
+        operator_context = (context.get("operator_context") or "").strip()
+        operator_clause = ""
+        if operator_context:
+            operator_clause = f" Operator-reported context: {operator_context}"
+
+        fallback = {
+            "summary": case.get("summary") or event.get("summary") or f"Investigate deviation in {subsystem}",
+            "narrative": (
+                f"A deviation was detected on `{context.get('source_tag') or subsystem}` within `{subsystem}`."
+                f"{dependency_clause}{operator_clause} Based on the event timing, operator context, and graph context, the best current hypothesis is that "
+                f"this condition may be contributing to downstream process degradation and should be reviewed before "
+                f"closing the incident."
+            ),
+            "probable_causes": context.get("probable_causes") or [
+                f"Process deviation originating in {subsystem}.",
+                "Instrumentation, flow restriction, or equipment underperformance should be verified.",
+            ],
+            "recommended_checks": context.get("recommended_checks") or [
+                f"Confirm the live value and recent trend for {context.get('source_tag') or subsystem}.",
+                "Check adjacent upstream/downstream views to validate propagation of the upset.",
+            ],
+            "disposition": "awaiting_operator_review",
+            "confidence": float(case.get("confidence", 0.5) or 0.5),
+        }
+
+        try:
+            from claude_client import ClaudeClient
+            import sys
+
+            client = ClaudeClient(enable_tools=True)
+            llm_result = client.query_json(
+                system_prompt=(
+                    "You are an industrial incident investigation assistant. "
+                    "You generate a draft investigation narrative that must be approved by an operator. "
+                    "You have access to the same industrial troubleshooting tools as the main query agent. "
+                    "Use those tools to validate graph facts, inspect related nodes, and ground the draft in real data. "
+                    "Use FEEDS relationships as evidence of likely upstream/downstream propagation when present. "
+                    "Return ONLY valid JSON with keys: summary, narrative, probable_causes, recommended_checks, disposition, confidence."
+                ),
+                user_prompt=json.dumps(
+                    {
+                        "case": {
+                            "title": case.get("title"),
+                            "summary": case.get("summary"),
+                            "severity": case.get("severity"),
+                            "subsystem_name": case.get("subsystem_name"),
+                            "source_event_id": case.get("source_event_id"),
+                        },
+                        "event": event,
+                        "graph_context": context,
+                        "operator_context": operator_context,
+                        "instruction": (
+                            "Write a concise but concrete investigation draft. "
+                            "Use tool calls to verify and enrich the available graph context before answering. "
+                            "If FEEDS dependencies exist, explain the likely propagation path. "
+                            "Use operator context when available and treat it as a high-value signal. "
+                            "Do not overstate certainty."
+                        ),
+                    },
+                    default=str,
+                ),
+                max_tokens=1200,
+                use_tools=True,
+                verbose=True,
+                require_data_query=True,
+            )
+            tool_calls = llm_result.get("tool_calls") if isinstance(llm_result, dict) else []
+            tool_names = [call.get("name", "tool") for call in tool_calls if isinstance(call, dict)]
+            print(
+                f"[CASE DRAFT DEBUG] case_id={case_id} tool_calls={len(tool_names)} tools={','.join(tool_names) if tool_names else 'none'} error={llm_result.get('error') if isinstance(llm_result, dict) else 'unknown'}",
+                file=sys.stderr,
+                flush=True,
+            )
+            data = llm_result.get("data") if isinstance(llm_result, dict) else None
+            if isinstance(data, dict):
+                fallback.update({
+                    "summary": data.get("summary") or fallback["summary"],
+                    "narrative": data.get("narrative") or fallback["narrative"],
+                    "probable_causes": data.get("probable_causes") or fallback["probable_causes"],
+                    "recommended_checks": data.get("recommended_checks") or fallback["recommended_checks"],
+                    "disposition": data.get("disposition") or fallback["disposition"],
+                    "confidence": float(max(0.0, min(1.0, data.get("confidence", fallback["confidence"]) or fallback["confidence"]))),
+                })
+        except Exception as exc:
+            print(f"[CASE DRAFT DEBUG] case_id={case_id} llm_exception={exc}", file=sys.stderr, flush=True)
+
+        with self.session() as session:
+            row = session.run(
+                """
+                MATCH (c:InvestigationCase {case_id: $case_id})
+                SET c.draft_status = 'pending_approval',
+                    c.draft_generated_at = datetime(),
+                    c.draft_summary = $draft_summary,
+                    c.draft_explanation = $draft_explanation,
+                    c.draft_probable_causes_json = $draft_causes,
+                    c.draft_recommended_checks_json = $draft_checks,
+                    c.draft_disposition = $draft_disposition,
+                    c.draft_confidence = $draft_confidence,
+                    c.draft_context_json = $draft_context_json,
+                    c.updated_at = datetime()
+                RETURN count(c) AS cnt
+                """,
+                case_id=case_id,
+                draft_summary=fallback["summary"],
+                draft_explanation=fallback["narrative"],
+                draft_causes=json.dumps(fallback["probable_causes"], default=str),
+                draft_checks=json.dumps(fallback["recommended_checks"], default=str),
+                draft_disposition=fallback["disposition"],
+                draft_confidence=float(fallback["confidence"]),
+                draft_context_json=json.dumps(context, default=str),
+            ).single()
+            if not row or row["cnt"] == 0:
+                return None
+
+        return self.get_investigation_case(case_id)
+
+    def approve_investigation_case_draft(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """Approve an AI draft and copy it into the canonical case fields."""
+        with self.session() as session:
+            row = session.run(
+                """
+                MATCH (c:InvestigationCase {case_id: $case_id})
+                SET c.summary = coalesce(c.draft_summary, c.summary),
+                    c.explanation = coalesce(c.draft_explanation, c.explanation),
+                    c.probable_causes_json = coalesce(c.draft_probable_causes_json, c.probable_causes_json),
+                    c.recommended_checks_json = coalesce(c.draft_recommended_checks_json, c.recommended_checks_json),
+                    c.disposition = coalesce(c.draft_disposition, c.disposition),
+                    c.confidence = coalesce(c.draft_confidence, c.confidence),
+                    c.draft_status = 'approved',
+                    c.draft_approved_at = datetime(),
+                    c.updated_at = datetime()
+                RETURN count(c) AS cnt
+                """,
+                case_id=case_id,
+            ).single()
+            if not row or row["cnt"] == 0:
+                return None
+        return self.get_investigation_case(case_id)
+
+    def reject_investigation_case_draft(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """Reject the current AI draft while keeping the last draft for auditability."""
+        with self.session() as session:
+            row = session.run(
+                """
+                MATCH (c:InvestigationCase {case_id: $case_id})
+                SET c.draft_status = 'rejected',
+                    c.draft_rejected_at = datetime(),
+                    c.updated_at = datetime()
+                RETURN count(c) AS cnt
+                """,
+                case_id=case_id,
+            ).single()
+            if not row or row["cnt"] == 0:
+                return None
+        return self.get_investigation_case(case_id)
+
+    def generate_investigation_case_report(self, case_id: str) -> Optional[Dict[str, Any]]:
+        """Generate a deterministic markdown report for a case."""
+        case = self.get_investigation_case(case_id)
+        if not case:
+            return None
+
+        event = case.get("event") or {}
+        probable_causes = self._parse_json_list(case.get("probable_causes_json") or event.get("probable_causes_json"))
+        recommended_checks = self._parse_json_list(case.get("recommended_checks_json") or event.get("recommended_checks_json"))
+        equipment = case.get("equipment") or []
+        tags = case.get("tags") or []
+
+        report_lines = [
+            f"# Investigation Report: {case.get('title', case_id)}",
+            "",
+            "## Case Summary",
+            f"- Case ID: `{case.get('case_id', case_id)}`",
+            f"- Status: `{case.get('status', 'open')}`",
+            f"- Disposition: `{case.get('disposition', 'unassigned') or 'unassigned'}`",
+            f"- Severity: `{case.get('severity', 'unknown')}`",
+            f"- Created: `{case.get('created_at', '')}`",
+            f"- Updated: `{case.get('updated_at', '')}`",
+            "",
+            "## Operational Context",
+            f"- Subsystem: `{case.get('subsystem_name') or case.get('subsystem_id') or 'unknown'}`",
+            f"- Source Tag: `{case.get('source_tag') or event.get('source_tag') or ''}`",
+            f"- Related Equipment: {', '.join(f'`{name}`' for name in equipment) if equipment else 'None linked'}",
+            f"- Related Tags: {', '.join(f'`{name}`' for name in tags) if tags else 'None linked'}",
+            "",
+            "## Event Snapshot",
+            f"- Source Event ID: `{case.get('source_event_id') or event.get('event_id') or 'n/a'}`",
+            f"- Event State: `{event.get('state', 'n/a')}`",
+            f"- z-score: `{event.get('z_score', 'n/a')}`",
+            f"- MAD score: `{event.get('mad_score', 'n/a')}`",
+            f"- Summary: {event.get('summary') or case.get('summary') or 'No summary recorded.'}",
+            "",
+            "## Investigation Narrative",
+            case.get("explanation") or event.get("explanation") or "No generated investigation narrative is available yet.",
+            "",
+            "## Probable Causes",
+        ]
+
+        if probable_causes:
+            report_lines.extend([f"- {item}" for item in probable_causes])
+        else:
+            report_lines.append("- No probable causes recorded yet.")
+
+        report_lines.extend(["", "## Recommended Checks"])
+        if recommended_checks:
+            report_lines.extend([f"- {item}" for item in recommended_checks])
+        else:
+            report_lines.append("- No recommended checks recorded yet.")
+
+        report_lines.extend([
+            "",
+            "## Operator Context",
+            case.get("operator_context") or "No operator context recorded.",
+            "",
+            "## Operator Notes",
+            case.get("notes") or "No operator notes recorded.",
+            "",
+            "## Resolution Notes",
+            case.get("resolution_notes") or "No resolution notes recorded.",
+        ])
+
+        return {
+            "case": case,
+            "markdown": "\n".join(report_lines).strip() + "\n",
+            "filename": f"investigation_{case.get('case_id', case_id)}.md",
+        }
 
     def clear_all(self) -> None:
         """Clear all nodes and relationships. USE WITH CAUTION."""

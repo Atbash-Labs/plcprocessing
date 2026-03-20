@@ -43,6 +43,15 @@
           </svg>
           <span class="nav-label">Agents</span>
         </button>
+        <button class="nav-btn" data-tab="cases" title="Investigations and Case Reports">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="8" y1="13" x2="16" y2="13"/>
+            <line x1="8" y1="17" x2="14" y2="17"/>
+          </svg>
+          <span class="nav-label">Cases</span>
+        </button>
         <button class="nav-btn" data-tab="database" title="Database">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <ellipse cx="12" cy="5" rx="9" ry="3"/>
@@ -635,6 +644,56 @@
         </div>
       </section>
 
+      <!-- Cases Tab -->
+      <section class="tab-content" id="tab-cases">
+        <header class="tab-header">
+          <h2>Cases & Reports</h2>
+          <p>Promote agent events into investigations, track notes, and generate post-incident reports</p>
+        </header>
+
+        <div class="cases-toolbar">
+          <div class="cases-toolbar-copy">
+            <span class="status-chip" id="cases-status-chip">Cases</span>
+            <span class="cases-status-text" id="cases-status-text">Select a case or create one from the Agents tab.</span>
+          </div>
+          <div class="cases-toolbar-actions">
+            <select class="input input-sm" id="cases-filter-status">
+              <option value="">All statuses</option>
+              <option value="open">Open</option>
+              <option value="in_review">In Review</option>
+              <option value="closed">Closed</option>
+            </select>
+            <button class="btn btn-ghost" id="btn-cases-refresh">Refresh</button>
+            <button class="btn btn-secondary" id="btn-cases-generate-report" disabled>Generate Report</button>
+            <button class="btn btn-primary" id="btn-cases-save-report" disabled>Save Report</button>
+          </div>
+        </div>
+
+        <div class="cases-layout">
+          <aside class="cases-sidebar">
+            <div class="cases-sidebar-header">
+              <h3>Investigations</h3>
+              <span id="cases-count-label">0 cases</span>
+            </div>
+            <div class="cases-list" id="cases-list">
+              <div class="cases-empty">No investigation cases yet. Promote an anomaly from the Agents tab to start one.</div>
+            </div>
+          </aside>
+
+          <section class="cases-detail" id="cases-detail">
+            <div class="cases-empty cases-empty-detail">Choose a case to inspect the event context, capture notes, and generate a report.</div>
+          </section>
+        </div>
+
+        <div class="output-panel cases-log-panel" id="cases-log-panel">
+          <div class="output-header">
+            <h4>Case Python Log</h4>
+            <button class="btn btn-sm btn-ghost" id="btn-clear-cases-log">Clear</button>
+          </div>
+          <pre class="output-content" id="cases-log"></pre>
+        </div>
+      </section>
+
       <!-- Database Tab -->
       <section class="tab-content" id="tab-database">
         <header class="tab-header">
@@ -700,26 +759,6 @@
         </header>
         
         <div class="graph-layout">
-          <!-- Left Sidebar: Pending Changes -->
-          <aside class="graph-sidebar graph-sidebar-left" id="graph-changes-panel">
-            <div class="sidebar-section-collapsible" id="pending-changes-section">
-              <button class="section-trigger" onclick="this.parentElement.classList.toggle('collapsed')">
-                <span>Pending Changes</span>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-              </button>
-              <div class="section-body">
-                <div class="pending-changes-summary" id="pending-changes-summary">
-                  <p class="no-changes text-muted text-sm">No pending changes</p>
-                </div>
-                <div class="pending-changes-list" id="pending-changes-list"></div>
-                <div class="pending-changes-actions">
-                  <button class="btn btn-sm btn-primary" id="btn-apply-changes" disabled>Apply All</button>
-                  <button class="btn btn-sm btn-secondary" id="btn-discard-changes" disabled>Discard</button>
-                </div>
-              </div>
-            </div>
-          </aside>
-          
           <!-- Center: Graph Canvas -->
           <div class="graph-main">
             <div class="toolbar">
@@ -1025,6 +1064,22 @@
                   <input type="text" id="new-node-name" placeholder="Enter name...">
                 </div>
                 <button class="btn btn-secondary" id="btn-add-node">Add Node</button>
+              </div>
+            </div>
+            <div class="sidebar-section-collapsible pending-changes-docked" id="pending-changes-section">
+              <button class="section-trigger" onclick="this.parentElement.classList.toggle('collapsed')">
+                <span>Pending Changes</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="section-body">
+                <div class="pending-changes-summary" id="pending-changes-summary">
+                  <p class="no-changes text-muted text-sm">No pending changes</p>
+                </div>
+                <div class="pending-changes-list" id="pending-changes-list"></div>
+                <div class="pending-changes-actions">
+                  <button class="btn btn-sm btn-primary" id="btn-apply-changes" disabled>Apply All</button>
+                  <button class="btn btn-sm btn-secondary" id="btn-discard-changes" disabled>Discard</button>
+                </div>
               </div>
             </div>
           </aside>

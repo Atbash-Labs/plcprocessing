@@ -302,6 +302,8 @@ Rules:
 - For operating parameters, extract numeric limits when available.
 - Classify media as: utility, product, waste, solvent, or gas.
 - Classify operations as: transfer, thermal, mixing, separation, cleaning, or reaction.
+- For explicit upstream/downstream process dependencies between pieces of equipment, use the relationship type "FEEDS".
+- Use canonical relationship names when possible: HANDLES_MEDIUM, PERFORMS_OPERATION, HAS_OPERATING_ENVELOPE, FEEDS, MEASURES, MONITORS_ENVELOPE, IMPLEMENTS_CONTROL_OF, USES_PRINCIPLE, INVOLVES_SPECIES, PROCESSES_SPECIES, HAS_REACTION, MEDIUM_CONTAINS, ENVELOPE_FOR_PRINCIPLE, VISUALIZES.
 - Return valid JSON matching the schema described below.
 {entity_hint}
 
